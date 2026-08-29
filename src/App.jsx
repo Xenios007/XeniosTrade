@@ -1,5 +1,9 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
-import { LoaderCircle, LockKeyhole, LogOut } from 'lucide-react'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { LoaderCircle, LockKeyhole } from 'lucide-react'
+import { AppShell } from './components/shell/AppShell'
+import { BrandMark } from './components/BrandMark'
+import { DEFAULT_PATH, resolveInitialPath } from './components/shell/navItems'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
 import { CoinAvatar } from './components/CoinAvatar'
@@ -10,12 +14,11 @@ import { SettingsPage } from './components/SettingsPage'
 import { SidebarMarketList } from './components/SidebarMarketList'
 import { StatsBar } from './components/StatsBar'
 import { TradeHistoryStatsPanel } from './components/TradeHistoryStatsPanel'
-import { TopNavigation } from './components/TopNavigation'
 import { TradeHistoryTable } from './components/TradeHistoryTable'
 import { WalletsPage } from './components/WalletsPage'
 import { WorkflowReadinessPanel } from './components/WorkflowReadinessPanel'
 import { getKlines, getSignalModelAnalysis, getVolatileMarkets } from './lib/api'
-import { getStrategyDerivedMaxLossPerTrade, isTradeClosed } from './lib/accountMetrics'
+import { getStrategyDerivedMaxLossPerTrade, isTradeClosed, summarizeAccount } from './lib/accountMetrics'
 import { formatPrice } from './lib/formatters'
 import { calculateBollingerBands, calculateEMA, calculateMACD, calculateRSI, calculateSMA } from './lib/indicators'
 import { DEFAULT_MARGIN_MODE } from './lib/marginModes'
@@ -32,7 +35,7 @@ import { MANUAL_TRADE_STYLE_PRESET_ID } from './lib/strategyPresets'
 import { DEFAULT_PREFERRED_SYMBOLS } from './lib/tradingConfig'
 import { DEFAULT_AUTO_TRADE_SESSIONS } from './lib/tradingSessions'
 import { isAutoTradeSource } from './lib/trades'
-import { buildDefaultWallets } from './lib/wallets'
+import { buildDefaultWallets, getTotalWalletStartingBalance } from './lib/wallets'
 import { analyzeTradeSignal } from './lib/tradeSignal'
 
 const CandlestickChart = lazy(() => import('./components/CandlestickChart').then((module) => ({
@@ -43,7 +46,6 @@ const DEFAULT_SYMBOL = 'BTCUSDT'
 const MARKET_STREAM_BASE = 'wss://data-stream.binance.vision'
 const COMBINED_STREAM_BASE = `${MARKET_STREAM_BASE}/stream`
 const RAW_STREAM_BASE = `${MARKET_STREAM_BASE}/ws`
-const HEADER_AUTO_UNIVERSE_PREVIEW_COUNT = 6
 const DEFAULT_STRATEGY_SETTINGS_BASE = {
   autoTradingEnabled: false,
   preferredSymbols: DEFAULT_PREFERRED_SYMBOLS,
@@ -211,31 +213,6 @@ async function postJsonResource(url, body = {}) {
   return payload
 }
 
-function BrandMark() {
-  return (
-    <svg viewBox="0 0 88 88" className="h-14 w-14 shrink-0" aria-hidden="true">
-      <defs>
-        <linearGradient id="xenios-ring" x1="10%" y1="10%" x2="90%" y2="90%">
-          <stop offset="0%" stopColor="#38bdf8" />
-          <stop offset="100%" stopColor="#14b8a6" />
-        </linearGradient>
-        <linearGradient id="xenios-candle" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stopColor="#f8fafc" />
-          <stop offset="100%" stopColor="#cbd5e1" />
-        </linearGradient>
-      </defs>
-      <rect x="4" y="4" width="80" height="80" rx="24" fill="rgba(15,23,42,0.92)" stroke="url(#xenios-ring)" strokeWidth="3.5" />
-      <path d="M21 58C28 49 35 46 43 48C52 50 57 35 68 28" fill="none" stroke="url(#xenios-ring)" strokeWidth="5" strokeLinecap="round" />
-      <path d="M28 25V56" stroke="#22c55e" strokeWidth="3.5" strokeLinecap="round" />
-      <rect x="23.5" y="33" width="9" height="15" rx="4.5" fill="#22c55e" />
-      <path d="M44 20V50" stroke="url(#xenios-candle)" strokeWidth="3.5" strokeLinecap="round" />
-      <rect x="39.5" y="26" width="9" height="18" rx="4.5" fill="url(#xenios-candle)" />
-      <path d="M60 34V64" stroke="#f43f5e" strokeWidth="3.5" strokeLinecap="round" />
-      <rect x="55.5" y="40" width="9" height="16" rx="4.5" fill="#f43f5e" />
-    </svg>
-  )
-}
-
 function ChartPanelFallback() {
   return (
     <section className="min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/5 shadow-glow backdrop-blur-xl">
@@ -297,18 +274,18 @@ export default function App() {
   const [authStatusMessage, setAuthStatusMessage] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
-  const [currentPage, setCurrentPage] = useState(() => {
+  const location = useLocation()
+  const [initialPath] = useState(() => {
     try {
-      const savedPage = window.localStorage.getItem(CURRENT_PAGE_STORAGE_KEY)
-      return savedPage || 'dashboard'
+      return resolveInitialPath(window.localStorage.getItem(CURRENT_PAGE_STORAGE_KEY))
     } catch {
-      return 'dashboard'
+      return DEFAULT_PATH
     }
   })
   const [markets, setMarkets] = useState([])
   const [liveTradePrices, setLiveTradePrices] = useState({})
   const [liveTradeDirections, setLiveTradeDirections] = useState({})
-  const [showFullAutoUniverse, setShowFullAutoUniverse] = useState(false)
+  const [marketDataHealth, setMarketDataHealth] = useState(null)
   const [selectedSymbol, setSelectedSymbol] = useState(DEFAULT_SYMBOL)
   const [interval, setInterval] = useState('15m')
   const [indicatorVisibility, setIndicatorVisibility] = useState({
@@ -427,6 +404,7 @@ export default function App() {
     if (healthResult.status === 'fulfilled') {
       setTradingMode(healthResult.value.mode)
       setRuntimeProfile(healthResult.value.runtimeProfile || DEFAULT_RUNTIME_PROFILE)
+      setMarketDataHealth(healthResult.value.marketData || null)
     } else {
       console.error('Failed to refresh health status:', healthResult.reason)
     }
@@ -532,12 +510,16 @@ export default function App() {
   }, [selectedSymbol, authState])
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(CURRENT_PAGE_STORAGE_KEY, currentPage)
-    } catch {
-      // Ignore storage issues and keep the in-memory page state.
+    if (location.pathname === '/') {
+      return
     }
-  }, [currentPage])
+
+    try {
+      window.localStorage.setItem(CURRENT_PAGE_STORAGE_KEY, location.pathname)
+    } catch {
+      // Ignore storage issues; routing still works without the remembered page.
+    }
+  }, [location.pathname])
 
   useEffect(() => {
     if (authState !== AUTH_STATE_AUTHENTICATED) {
@@ -708,10 +690,6 @@ export default function App() {
   const activeSignalModel = useMemo(
     () => getSignalModel(settings.strategy.activeSignalModelId),
     [settings.strategy.activeSignalModelId],
-  )
-  const activeSignalModelStrategy = useMemo(
-    () => getEffectiveSignalModelStrategy(settings.strategy, settings.strategy.activeSignalModelId),
-    [settings.strategy],
   )
   const marketSymbols = useMemo(
     () => markets.map((market) => market.symbol).filter(Boolean),
@@ -976,14 +954,13 @@ export default function App() {
     return emptyStats
   }, [tradeHistory])
 
-  const autoUniverseSymbols = settings.strategy.preferredSymbols || []
-  const autoUniversePreview = useMemo(
-    () => autoUniverseSymbols.slice(0, HEADER_AUTO_UNIVERSE_PREVIEW_COUNT),
-    [autoUniverseSymbols],
-  )
-  const autoUniverseOverflowCount = Math.max(
-    autoUniverseSymbols.length - HEADER_AUTO_UNIVERSE_PREVIEW_COUNT,
-    0,
+  const accountSummary = useMemo(
+    () => summarizeAccount({
+      trades: tradeHistory,
+      livePrices: liveTradePrices,
+      startingBalance: getTotalWalletStartingBalance(settings.wallets),
+    }),
+    [tradeHistory, liveTradePrices, settings.wallets],
   )
 
   const trackedTradeSymbols = useMemo(() => (
@@ -1941,145 +1918,33 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.16),_transparent_26%),radial-gradient(circle_at_bottom_right,_rgba(34,197,94,0.08),_transparent_18%)]" />
-      <div className="absolute inset-0 bg-grid bg-[size:32px_32px] opacity-30" />
+    <AppShell
+      symbol={selectedSymbol}
+      symbols={marketSymbols}
+      onSelectSymbol={setSelectedSymbol}
+      tradingMode={tradingMode}
+      marketDataHealth={marketDataHealth}
+      account={accountSummary}
+      onLogout={handleLogout}
+      loggingOut={loggingOut}
+    >
+      {error ? (
+        <div className="mb-6 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-5 py-4 text-sm text-rose-200">
+          {error}
+        </div>
+      ) : null}
 
-      <div className="fixed right-4 top-4 z-50">
-        <button
-          type="button"
-          onClick={handleLogout}
-          disabled={loggingOut}
-          className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/90 px-4 py-2 text-sm font-semibold text-white shadow-glow backdrop-blur-xl transition hover:border-white/20 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-70"
-        >
-          <LogOut className="h-4 w-4" />
-          {loggingOut ? 'Signing out...' : 'Logout'}
-        </button>
-      </div>
-
-      <main className="relative mx-auto flex min-h-screen max-w-[1800px] flex-col gap-6 px-4 py-4 lg:px-6">
-        <header className="rounded-[28px] border border-white/10 bg-white/[0.04] px-6 py-5 shadow-glow backdrop-blur-xl">
-          <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex items-center gap-4">
-              <BrandMark />
-              <div>
-                <p className="mb-1 text-2xl font-semibold tracking-[0.08em] text-white">XeniosTrade</p>
-                <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                  Futures range-scalping workspace with mock execution and rule-based automation
-                </p>
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Selected Pair</div>
-                <div className="mt-2 flex items-center gap-3 text-base font-semibold text-white">
-                  <CoinAvatar symbol={selectedSymbol} size="md" />
-                  {selectedSymbol}
-                </div>
-              </div>
-              <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-3 sm:col-span-2 xl:col-span-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-[11px] uppercase tracking-[0.24em] text-sky-200/70">Auto Universe</div>
-                    <div className="mt-1 text-base font-semibold text-sky-100">
-                      {autoUniverseSymbols.length} pairs tracked
-                    </div>
-                    <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-sky-100/60">
-                      Top score = volume x volatility
-                    </div>
-                  </div>
-                  {autoUniverseSymbols.length > HEADER_AUTO_UNIVERSE_PREVIEW_COUNT ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowFullAutoUniverse((current) => !current)}
-                      className="rounded-full border border-sky-300/20 bg-slate-950/35 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-slate-950/50"
-                    >
-                      {showFullAutoUniverse ? 'Collapse' : `View all ${autoUniverseSymbols.length}`}
-                    </button>
-                  ) : null}
-                </div>
-
-                <div className="mt-3 flex flex-wrap gap-2 text-sky-100">
-                  {(showFullAutoUniverse ? autoUniverseSymbols : autoUniversePreview).map((symbol) => (
-                    <span
-                      key={symbol}
-                      className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em]"
-                    >
-                      <CoinAvatar symbol={symbol} size="xs" />
-                      {symbol}
-                    </span>
-                  ))}
-                  {!showFullAutoUniverse && autoUniverseOverflowCount > 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowFullAutoUniverse(true)}
-                      className="inline-flex items-center rounded-full border border-sky-300/20 bg-slate-950/35 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-slate-950/50"
-                    >
-                      +{autoUniverseOverflowCount} more
-                    </button>
-                  ) : null}
-                </div>
-
-                {showFullAutoUniverse && autoUniverseSymbols.length > HEADER_AUTO_UNIVERSE_PREVIEW_COUNT ? (
-                  <div className="mt-3 text-xs text-sky-100/65">
-                    Full universe expanded for review. Collapse to return the header to its compact layout.
-                  </div>
-                ) : null}
-              </div>
-              <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-200/70">Trading Mode</div>
-                <div className="mt-1 text-base font-semibold text-emerald-300">{tradingMode}</div>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Risk Model</div>
-                <div className="mt-1 text-sm font-semibold text-white">
-                  {activeSignalModelStrategy.signalModelName}
-                </div>
-                <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                  {activeSignalModelStrategy.marginPerTrade} margin x {activeSignalModelStrategy.leverage} leverage
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleLogout}
-                disabled={loggingOut}
-                className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-left transition hover:border-white/20 hover:bg-slate-900/80 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
-                    <LogOut className="h-4 w-4 text-slate-200" />
-                  </span>
-                  <span>
-                    <span className="block text-[11px] uppercase tracking-[0.24em] text-slate-500">Session</span>
-                    <span className="mt-1 block text-sm font-semibold text-white">
-                      {loggingOut ? 'Signing out...' : 'Logout'}
-                    </span>
-                  </span>
-                </div>
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-5 border-t border-white/10 pt-5">
-            <TopNavigation currentPage={currentPage} onChangePage={setCurrentPage} />
-          </div>
-        </header>
-
-        {error ? (
-          <div className="rounded-3xl border border-rose-400/20 bg-rose-400/10 px-5 py-4 text-sm text-rose-200">
-            {error}
-          </div>
-        ) : null}
-
-        {currentPage === 'dashboard' ? renderDashboard() : null}
-        {currentPage === 'mock-trading' ? renderMockTrading() : null}
-        {currentPage === 'learning-bot' ? renderLearningBot() : null}
-        {currentPage === 'wallets' ? renderWallets() : null}
-        {currentPage === 'journal' ? renderJournal() : null}
-        {currentPage === 'trade-history' ? renderTradeHistory() : null}
-        {currentPage === 'settings' ? renderSettings() : null}
-      </main>
-    </div>
+      <Routes>
+        <Route path="/" element={<Navigate to={initialPath} replace />} />
+        <Route path="/dashboard" element={renderDashboard()} />
+        <Route path="/mock-trading" element={renderMockTrading()} />
+        <Route path="/ai-training" element={renderLearningBot()} />
+        <Route path="/wallets" element={renderWallets()} />
+        <Route path="/journal" element={renderJournal()} />
+        <Route path="/trade-history" element={renderTradeHistory()} />
+        <Route path="/settings" element={renderSettings()} />
+        <Route path="*" element={<Navigate to={initialPath} replace />} />
+      </Routes>
+    </AppShell>
   )
 }
