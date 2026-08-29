@@ -1953,7 +1953,7 @@ export default function App() {
         <Route path="/wallets" element={renderWallets()} />
         <Route path="/journal" element={renderJournal()} />
         <Route path="/trade-history" element={renderTradeHistory()} />
-        <Route path="/settings" element={renderSettings()} />
+        <Route path="/settings/*" element={renderSettings()} />
         <Route path="*" element={<Navigate to={initialPath} replace />} />
       </Routes>
     </AppShell>

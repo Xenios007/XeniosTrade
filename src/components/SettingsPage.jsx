@@ -1,5 +1,6 @@
 import { Activity, BarChart3, Bot, CandlestickChart, ChevronDown, CircleHelp, Clock3, ShieldAlert, Target, WalletCards } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
 import {
   getStrategyDerivedMaxLossPerTrade,
   getStrategyDerivedTakeProfitPerTrade,
@@ -30,6 +31,35 @@ import { usePersistentBoolean } from '../lib/usePersistentBoolean'
 import { getWalletEffectiveStartingBalance, normalizeWallets } from '../lib/wallets'
 import { CoinAvatar } from './CoinAvatar'
 import { Panel } from './Panel'
+import { PageHeader } from './ui/PageHeader'
+
+const SETTINGS_TABS = [
+  { to: '/settings/automation', label: 'Automation' },
+  { to: '/settings/strategy', label: 'Bot Strategy' },
+  { to: '/settings/credentials', label: 'API Credentials' },
+]
+
+function SettingsTabs() {
+  return (
+    <nav className="flex flex-wrap gap-2 border-b border-white/10 pb-4">
+      {SETTINGS_TABS.map((tab) => (
+        <NavLink
+          key={tab.to}
+          to={tab.to}
+          className={({ isActive }) =>
+            `rounded-full px-4 py-2 text-sm font-medium transition ${
+              isActive
+                ? 'bg-sky-400 text-slate-950'
+                : 'border border-white/10 bg-slate-950/60 text-slate-300 hover:border-white/20'
+            }`
+          }
+        >
+          {tab.label}
+        </NavLink>
+      ))}
+    </nav>
+  )
+}
 
 const STRATEGY_FIELD_META = {
   preferredSymbols: {
@@ -816,6 +846,12 @@ export function SettingsPage({
 
   return (
     <form className="grid gap-6" onSubmit={handleSubmit}>
+      <PageHeader
+        title="Settings"
+        description="Automation, per-bot strategy, and exchange credentials. Changes are saved with the button at the bottom of each tab."
+      />
+      <SettingsTabs />
+
       {!ready ? (
         <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-4 text-sm text-amber-100">
           Waiting for the saved settings to load from the backend. Saving is disabled until the current settings snapshot is available.
@@ -828,6 +864,9 @@ export function SettingsPage({
       ) : null}
 
       <fieldset disabled={controlsDisabled} className="contents">
+      <Routes>
+      <Route index element={<Navigate to="/settings/automation" replace />} />
+      <Route path="automation" element={(
       <Panel title="Automation">
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)]">
           <ToggleCard
@@ -900,7 +939,8 @@ export function SettingsPage({
           </div>
         </div>
       </Panel>
-
+      )} />
+      <Route path="strategy" element={(
       <Panel title="Bot Strategy Comparison">
         <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
           Pick a bot from the dropdown below to view or edit its strategy. Bot 1 and Bot 2 are editable; Bot 3 and Bot 4 are automatic and read-only, showing the live resolved settings from their assigned wallet.
@@ -947,8 +987,9 @@ export function SettingsPage({
           </div>
         ) : null}
       </Panel>
-
-      <Panel title="API Credentials" collapsible storageKey="settings:api-credentials:collapsed">
+      )} />
+      <Route path="credentials" element={(
+      <Panel title="API Credentials">
         <div className="grid gap-4">
           <div className="grid gap-4 md:grid-cols-2">
             {[
@@ -1012,6 +1053,9 @@ export function SettingsPage({
           </label>
         </div>
       </Panel>
+      )} />
+      <Route path="*" element={<Navigate to="/settings/automation" replace />} />
+      </Routes>
 
       <div>
         <button

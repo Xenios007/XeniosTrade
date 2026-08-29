@@ -49,9 +49,13 @@ export const LEGACY_PAGE_TO_PATH = {
 
 export const DEFAULT_PATH = '/dashboard'
 
+const KNOWN_TOP_SEGMENTS = new Set(NAV_ITEMS.map((item) => item.to.split('/')[1]))
+
 export function resolveInitialPath(rawSavedValue) {
   const saved = String(rawSavedValue || '').trim()
-  if (saved.startsWith('/') && NAV_ITEMS.some((item) => item.to === saved)) {
+  // Accept any path whose first segment is a known section, including nested
+  // routes like /settings/strategy.
+  if (saved.startsWith('/') && KNOWN_TOP_SEGMENTS.has(saved.split('/')[1])) {
     return saved
   }
   if (LEGACY_PAGE_TO_PATH[saved]) {
