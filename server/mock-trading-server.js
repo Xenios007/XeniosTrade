@@ -90,6 +90,11 @@ const learningBotTrainStatusFilePath = path.join(dataDir, 'learning-bot-train-st
 const learningBotTrainConfigFilePath = path.join(dataDir, 'learning-bot-train-config.json')
 const learningBotTrainArtifactFilePath = path.join(dataDir, 'learning-bot-train-artifact.json')
 const learningBotTrainerScriptPath = path.join(__dirname, 'learning-bot', 'rl_trainer.py')
+// Append-only log of upstream market-data 4xx responses (Binance 418/429 rate
+// limits, 451, etc.). Used to decide whether the tracked universe
+// (VOLATILE_MARKET_SYMBOL_LIMIT) needs to be dialed back from 100 toward 50.
+const marketData4xxLogFilePath = path.join(dataDir, 'market-data-4xx.log')
+const MARKET_DATA_4XX_LOG_MAX_BYTES = 5 * 1024 * 1024
 // Keep effectively the full trade history so the AI can train on every closed trade.
 // This is a safety ceiling against an unbounded file, not a training window.
 const TRADE_HISTORY_LIMIT = 100000
@@ -150,6 +155,9 @@ const marketDataReliability = {
   lastFailureAt: null,
   lastFailureMessage: '',
   lastFailureStatus: null,
+  fourXx: 0,
+  fourXxByStatus: {},
+  fourXxLastAt: null,
 }
 let lastObservedSettingsFileHash = ''
 let lastObservedSettingsSnapshot = null
@@ -3571,13 +3579,48 @@ function recordMarketDataSuccess() {
   marketDataReliability.lastSuccessAt = Date.now()
 }
 
-function recordMarketDataFailure(error) {
+async function logMarketData4xx({ status, url = '', message = '' }) {
+  const line = `${JSON.stringify({
+    ts: new Date().toISOString(),
+    status,
+    universeLimit: VOLATILE_SYMBOL_LIMIT,
+    url,
+    message: String(message || '').slice(0, 300),
+  })}\n`
+
+  try {
+    try {
+      const stat = await fs.stat(marketData4xxLogFilePath)
+      if (stat.size >= MARKET_DATA_4XX_LOG_MAX_BYTES) {
+        await fs.rename(marketData4xxLogFilePath, `${marketData4xxLogFilePath}.1`)
+      }
+    } catch {
+      // No existing file (or stat failed); appendFile will create it.
+    }
+    await fs.appendFile(marketData4xxLogFilePath, line)
+  } catch {
+    // Logging must never break a market-data request.
+  }
+}
+
+function recordMarketDataFailure(error, context = {}) {
   const now = Date.now()
   const status = getHttpStatusFromError(error)
   marketDataReliability.failures += 1
   marketDataReliability.lastFailureAt = now
   marketDataReliability.lastFailureMessage = error instanceof Error ? error.message : String(error)
   marketDataReliability.lastFailureStatus = status
+
+  if (status != null && status >= 400 && status < 500) {
+    marketDataReliability.fourXx += 1
+    marketDataReliability.fourXxByStatus[status] = (marketDataReliability.fourXxByStatus[status] || 0) + 1
+    marketDataReliability.fourXxLastAt = now
+    void logMarketData4xx({
+      status,
+      url: context.url || '',
+      message: marketDataReliability.lastFailureMessage,
+    })
+  }
 
   if (status === 418 || status === 429) {
     marketDataReliability.rateLimited += 1
@@ -3627,6 +3670,10 @@ function getMarketDataHealthSnapshot() {
     lastFailureAt: marketDataReliability.lastFailureAt,
     lastFailureMessage: marketDataReliability.lastFailureMessage,
     lastFailureStatus: marketDataReliability.lastFailureStatus,
+    fourXx: marketDataReliability.fourXx,
+    fourXxByStatus: { ...marketDataReliability.fourXxByStatus },
+    fourXxLastAt: marketDataReliability.fourXxLastAt,
+    universeLimit: VOLATILE_SYMBOL_LIMIT,
     cacheEntries: marketDataCache.size,
     inflightRequests: marketDataInflightRequests.size,
   }
@@ -3663,8 +3710,10 @@ async function fetchJson(url, {
   const requestPromise = (async () => {
     const targets = [url, ...(fallbackUrl ? [fallbackUrl] : [])]
     let lastError = null
+    let lastTarget = url
 
     for (const target of targets) {
+      lastTarget = target
       for (let attempt = 0; attempt <= retries; attempt += 1) {
         try {
           const controller = new AbortController()
@@ -3698,7 +3747,7 @@ async function fetchJson(url, {
       }
     }
 
-    recordMarketDataFailure(lastError)
+    recordMarketDataFailure(lastError, { url: lastTarget })
 
     if (cacheKey && cached && allowStaleOnError && Date.now() - cached.updatedAt <= staleMaxAgeMs) {
       marketDataReliability.staleServed += 1
