@@ -3,10 +3,12 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { LoaderCircle, LockKeyhole } from 'lucide-react'
 import { AppShell } from './components/shell/AppShell'
 import { BrandMark } from './components/BrandMark'
+import { DashboardKpis } from './components/DashboardKpis'
+import { PageHeader } from './components/ui/PageHeader'
+import { useToast } from './components/ui/Toast'
 import { DEFAULT_PATH, resolveInitialPath } from './components/shell/navItems'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
-import { CoinAvatar } from './components/CoinAvatar'
 import { JournalSummaryPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
 import { MockTradingPage } from './components/MockTradingPage'
@@ -275,6 +277,7 @@ export default function App() {
   const [loggingIn, setLoggingIn] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
   const location = useLocation()
+  const { error: notifyError } = useToast()
   const [initialPath] = useState(() => {
     try {
       return resolveInitialPath(window.localStorage.getItem(CURRENT_PAGE_STORAGE_KEY))
@@ -520,6 +523,12 @@ export default function App() {
       // Ignore storage issues; routing still works without the remembered page.
     }
   }, [location.pathname])
+
+  useEffect(() => {
+    if (error) {
+      notifyError(error)
+    }
+  }, [error, notifyError])
 
   useEffect(() => {
     if (authState !== AUTH_STATE_AUTHENTICATED) {
@@ -1660,14 +1669,21 @@ export default function App() {
 
   function renderDashboard() {
     return (
-      <div className="grid flex-1 gap-6 2xl:grid-cols-[320px_minmax(0,1fr)_360px]">
-        <aside className="xl:min-h-[calc(100vh-220px)]">
-          <SidebarMarketList
-            markets={markets}
-            selectedSymbol={selectedSymbol}
-            onSelectSymbol={setSelectedSymbol}
-          />
-        </aside>
+      <>
+        <PageHeader
+          title="Dashboard"
+          description="Live market, model signal, and automation status for the selected pair."
+        />
+        <DashboardKpis account={accountSummary} autoTradeStatus={autoTradeStatus} />
+
+        <div className="grid gap-6 2xl:grid-cols-[320px_minmax(0,1fr)_360px]">
+          <aside>
+            <SidebarMarketList
+              markets={markets}
+              selectedSymbol={selectedSymbol}
+              onSelectSymbol={setSelectedSymbol}
+            />
+          </aside>
 
         <section className="grid gap-6">
           <Suspense fallback={<ChartPanelFallback />}>
@@ -1704,8 +1720,9 @@ export default function App() {
             activeModelRiskSummary={activeModelStrategy.riskProfile?.summary || ''}
             modelChecklistAnalysis={sidebarModelAnalysis}
           />
-        </aside>
-      </div>
+          </aside>
+        </div>
+      </>
     )
   }
 
@@ -1928,12 +1945,6 @@ export default function App() {
       onLogout={handleLogout}
       loggingOut={loggingOut}
     >
-      {error ? (
-        <div className="mb-6 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-5 py-4 text-sm text-rose-200">
-          {error}
-        </div>
-      ) : null}
-
       <Routes>
         <Route path="/" element={<Navigate to={initialPath} replace />} />
         <Route path="/dashboard" element={renderDashboard()} />
