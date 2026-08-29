@@ -32,6 +32,25 @@ function NavItem({ to, label, Icon, collapsed, onNavigate }) {
   )
 }
 
+function NavSubItem({ to, label, onNavigate }) {
+  return (
+    <NavLink
+      to={to}
+      end
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        `block rounded-xl py-2 pl-11 pr-3 text-[13px] transition ${
+          isActive
+            ? 'font-medium text-sky-200'
+            : 'text-slate-500 hover:text-slate-200'
+        }`
+      }
+    >
+      {label}
+    </NavLink>
+  )
+}
+
 function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showClose }) {
   return (
     <div className="flex h-full flex-col">
@@ -64,7 +83,16 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
               </div>
             ) : null}
             {group.items.map((item) => (
-              <NavItem key={item.to} {...item} collapsed={collapsed} onNavigate={onNavigate} />
+              <div key={item.to}>
+                <NavItem {...item} collapsed={collapsed} onNavigate={onNavigate} />
+                {item.children && !collapsed ? (
+                  <div className="mt-0.5 space-y-0.5 pb-1">
+                    {item.children.map((child) => (
+                      <NavSubItem key={child.to} {...child} onNavigate={onNavigate} />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ))}
           </div>
         ))}

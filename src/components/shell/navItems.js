@@ -28,7 +28,16 @@ export const NAV_GROUPS = [
     label: 'Config',
     items: [
       { to: '/wallets', label: 'Wallets', Icon: Wallet },
-      { to: '/settings', label: 'Settings', Icon: Settings },
+      {
+        to: '/settings',
+        label: 'Settings',
+        Icon: Settings,
+        children: [
+          { to: '/settings/automation', label: 'Automation' },
+          { to: '/settings/strategy', label: 'Bot Strategy' },
+          { to: '/settings/credentials', label: 'API Credentials' },
+        ],
+      },
     ],
   },
 ]
