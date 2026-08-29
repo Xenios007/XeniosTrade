@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+server/learning-bot/.venv/
+
+# Build output
+dist/
+
+# Environment / secrets — never commit real keys
+.env
+.env.local
+.env.*.local
+# keep the template
+!.env.example
+
+# Runtime state & logs (mutable data, may contain credentials)
+server/data/*.json
+server/data/*.log
+launcher-logs/
+*.log
+*.err.log
+*.out.log
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp

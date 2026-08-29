@@ -1,0 +1,18 @@
+[Unit]
+Description=XeniosTrade mock trading workspace
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trade
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=3001
+Environment=SERVE_FRONTEND=true
+ExecStart=/usr/bin/env bash -lc 'source /home/ubuntu/.nvm/nvm.sh && npm start'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
