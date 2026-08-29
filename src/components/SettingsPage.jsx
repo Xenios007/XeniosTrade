@@ -868,7 +868,7 @@ export function SettingsPage({
       <Route index element={<Navigate to="/settings/automation" replace />} />
       <Route path="automation" element={(
       <Panel title="Automation">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)]">
+        <div className="grid gap-4">
           <ToggleCard
             title={STRATEGY_FIELD_META.autoTradingEnabled.label}
             description="Global on/off switch for the automatic trader across every configured wallet."
