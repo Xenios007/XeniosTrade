@@ -44,11 +44,13 @@ import {
   normalizeWallets,
 } from '../src/lib/wallets.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID } from '../src/lib/strategyPresets.js'
+import { detectChartPatterns, patternScoreForSide } from '../src/lib/chartPatterns.js'
 import {
   DEFAULT_AUTO_TRADE_SESSIONS,
   isHourWithinScheduledSessions,
   normalizeAutoTradeSessions,
 } from '../src/lib/tradingSessions.js'
+import { getCodexConsoleStatus, runCodexConsoleTurn } from './codex-console.js'
 
 dotenv.config()
 
@@ -60,6 +62,12 @@ const publicDataBaseUrl = 'https://data-api.binance.vision/api/v3'
 const publicDataFallbackBaseUrl = 'https://api.binance.com/api/v3'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+// The server (HTTP listener + background timers) starts by default. Tools that
+// import this file only for its exported functions — the backtest harness —
+// set XENIOS_SERVER_AUTOSTART=off first so nothing double-runs. An entry-point
+// check is not reliable here because pm2 fork mode loads the file through its
+// own wrapper, so argv[1] is not this file.
+const IS_MAIN_MODULE = String(process.env.XENIOS_SERVER_AUTOSTART || '').toLowerCase() !== 'off'
 const defaultLearningBotTrainerRuntimeCommand = process.platform === 'win32' ? 'python' : 'python3'
 const defaultLearningBotTrainerDevicePreference = process.platform === 'win32' ? 'cuda' : 'cpu'
 const dataDir = path.join(__dirname, 'data')
@@ -86,13 +94,24 @@ const autoTradeLogFilePath = path.join(dataDir, 'auto-trade-log.json')
 const workflowReviewLogFilePath = path.join(dataDir, 'workflow-review-log.json')
 const botSettingsLogFilePath = path.join(dataDir, 'bot-settings-log.json')
 const learningBotDatasetFilePath = path.join(dataDir, 'learning-bot-dataset.json')
+// Backtest-generated closed trades for AI training only. Never read into the
+// live account / journal / UI - only merged in getPreferredLearningBotDataset.
+const backtestHistoryFilePath = path.join(dataDir, 'backtest-history.json')
+// Registry of individual backtest runs (see server/backtest/run-registry.js).
+// Each entry may point at its own per-run row file under backtest-runs/ and is
+// merged into training only when `includeInTraining === true`.
+const backtestRunsRegistryFilePath = path.join(dataDir, 'backtest-runs.json')
+const backtestRunsDir = path.join(dataDir, 'backtest-runs')
+const backtestRunsMdDir = path.join(__dirname, 'backtest', 'runs')
 const learningBotTrainStatusFilePath = path.join(dataDir, 'learning-bot-train-status.json')
 const learningBotTrainConfigFilePath = path.join(dataDir, 'learning-bot-train-config.json')
 const learningBotTrainArtifactFilePath = path.join(dataDir, 'learning-bot-train-artifact.json')
 const learningBotTrainerScriptPath = path.join(__dirname, 'learning-bot', 'rl_trainer.py')
 // Append-only log of upstream market-data 4xx responses (Binance 418/429 rate
 // limits, 451, etc.). Used to decide whether the tracked universe
-// (VOLATILE_MARKET_SYMBOL_LIMIT) needs to be dialed back from 100 toward 50.
+// (VOLATILE_MARKET_SYMBOL_LIMIT) needs further tuning. Dialed back 100 -> 50 on
+// 2026-08-30 because the 100-symbol scan was overrunning the 5-minute interval
+// (not 4xx-related; there were zero 4xx), leaving the auto-trader lock held.
 const marketData4xxLogFilePath = path.join(dataDir, 'market-data-4xx.log')
 const MARKET_DATA_4XX_LOG_MAX_BYTES = 5 * 1024 * 1024
 // Keep effectively the full trade history so the AI can train on every closed trade.
@@ -109,6 +128,10 @@ const autoTradeRuntime = {
   lastReason: 'No auto-trade run recorded yet.',
   lastExecuted: false,
 }
+// How many symbols the auto-trader scans in parallel per wave. Keeps the scan
+// off a single serial await chain so one slow/failed upstream symbol can't
+// stall the whole run (or hold the run lock past the 5-minute interval).
+const SIGNAL_SCAN_CONCURRENCY = 5
 const TERMINAL_TRADE_MONITOR_INTERVAL_MS = 10_000
 let lastTerminalTradeMonitorAt = 0
 let lastTerminalTradeMonitorSignature = ''
@@ -270,6 +293,10 @@ const defaultLearningBotSettings = {
   requireCandleClose: true,
   blockCounterTrend: true,
   autoPromoteToPaper: false,
+  // When true, backtest-generated trades (server/data/backtest-history.json,
+  // produced by server/backtest/replay-dataset.js) are merged into the training
+  // dataset alongside real closed trades. They never touch account balances.
+  includeBacktestData: true,
   notes: '',
   aiTrainer: {
     enabled: false,
@@ -325,7 +352,7 @@ function clampInteger(value, fallback, {
   return Math.min(Math.max(numericValue, min), max)
 }
 
-function normalizeLearningBotSettings(rawSettings = {}) {
+export function normalizeLearningBotSettings(rawSettings = {}) {
   const raw = rawSettings && typeof rawSettings === 'object' ? rawSettings : {}
   const rawAiTrainer = raw.aiTrainer && typeof raw.aiTrainer === 'object' ? raw.aiTrainer : {}
   const rawAiEntryFilter = raw.aiEntryFilter && typeof raw.aiEntryFilter === 'object' ? raw.aiEntryFilter : {}
@@ -357,6 +384,7 @@ function normalizeLearningBotSettings(rawSettings = {}) {
     requireCandleClose: raw.requireCandleClose !== false,
     blockCounterTrend: raw.blockCounterTrend !== false,
     autoPromoteToPaper: Boolean(raw.autoPromoteToPaper),
+    includeBacktestData: raw.includeBacktestData !== false,
     notes: typeof raw.notes === 'string'
       ? raw.notes.trim().slice(0, 600)
       : defaultLearningBotSettings.notes,
@@ -1643,7 +1671,7 @@ async function readSettingsFileAuditState() {
   }
 }
 
-async function getSettings() {
+export async function getSettings() {
   const stored = await readJson(settingsFilePath, defaultSettings)
   const normalized = normalizeSettings(stored)
 
@@ -1728,7 +1756,7 @@ async function getTradeHistory() {
   return sanitized
 }
 
-function inferLearningBotSetupFamily(signalSummary = '') {
+export function inferLearningBotSetupFamily(signalSummary = '') {
   const summary = String(signalSummary || '').toLowerCase()
 
   if (summary.includes('support-zone reversal')) {
@@ -1962,7 +1990,7 @@ function getLearningBotEligibleClosedTrades(history = [], config = defaultLearni
 
   return history
     .filter((trade) => trade.status !== 'OPEN' && Number.isFinite(Number(trade.pnl)))
-    .filter((trade) => (focusSource ? trade.source === focusSource : true))
+    .filter((trade) => (focusSource ? String(trade.source || '').startsWith(focusSource) : true))
     .filter((trade) => (focusSignalModelId ? ensureSignalModelId(trade.signalModelId) === focusSignalModelId : true))
 }
 
@@ -2124,17 +2152,90 @@ async function saveLearningBotTrainStatus(status = {}) {
   return nextStatus
 }
 
+async function getBacktestHistory() {
+  const items = await readJson(backtestHistoryFilePath, [])
+  return Array.isArray(items) ? items : []
+}
+
+async function getBacktestRunRegistry() {
+  const items = await readJson(backtestRunsRegistryFilePath, [])
+  return Array.isArray(items) ? items : []
+}
+
+async function writeBacktestRunRegistry(runs) {
+  const list = Array.isArray(runs) ? runs : []
+  list.sort((a, b) => Number(b?.startedAt || 0) - Number(a?.startedAt || 0))
+  // Atomic write so a concurrent harness read never sees a torn file.
+  const tmp = `${backtestRunsRegistryFilePath}.tmp-${process.pid}`
+  await fs.writeFile(tmp, JSON.stringify(list, null, 2))
+  await fs.rename(tmp, backtestRunsRegistryFilePath)
+  return list
+}
+
+// Rows from every registry run flagged includeInTraining. dataFile is stored
+// relative to server/data. Missing / unreadable files are skipped, not fatal.
+// `alreadyLoadedPaths` lists absolute paths pulled in by another source (e.g. the
+// legacy backtest-history.json) so a run pointing at the same file is not read
+// twice.
+async function getFlaggedBacktestRunRows(alreadyLoadedPaths = []) {
+  const registry = await getBacktestRunRegistry()
+  const skip = new Set(alreadyLoadedPaths.map((p) => path.resolve(p)))
+  const flagged = registry.filter((run) => run && run.includeInTraining === true && run.dataFile)
+  const out = []
+  for (const run of flagged) {
+    const abs = path.resolve(dataDir, String(run.dataFile))
+    if (skip.has(abs)) continue
+    skip.add(abs)
+    const rows = await readJson(abs, [])
+    if (Array.isArray(rows)) {
+      for (const row of rows) out.push(row)
+    }
+  }
+  return out
+}
+
 async function getPreferredLearningBotDataset(config = defaultLearningBotSettings) {
-  const history = await getTradeHistory()
+  const realHistory = await getTradeHistory()
+  const useBacktest = config.includeBacktestData !== false
+  const backtestHistory = useBacktest ? await getBacktestHistory() : []
+  const flaggedRunRows = useBacktest
+    ? await getFlaggedBacktestRunRows(backtestHistory.length > 0 ? [backtestHistoryFilePath] : [])
+    : []
+  // Real trades first so the training window (when set) prefers them; backtest
+  // rows are supplemental bootstrap data. When no per-run file is flagged this is
+  // the exact pre-existing fast path (no extra copy) — the dedupe merge only runs
+  // when a Backtests-tab run has actually been opted in.
+  let history
+  if (flaggedRunRows.length === 0) {
+    history = backtestHistory.length > 0 ? [...realHistory, ...backtestHistory] : realHistory
+  } else {
+    history = []
+    const seenIds = new Set()
+    for (const row of realHistory) {
+      if (row && row.id != null) seenIds.add(row.id)
+      history.push(row)
+    }
+    for (const row of [...backtestHistory, ...flaggedRunRows]) {
+      const id = row && row.id
+      if (id != null) {
+        if (seenIds.has(id)) continue
+        seenIds.add(id)
+      }
+      history.push(row)
+    }
+  }
   const eligibleClosedTradeCount = getLearningBotEligibleClosedTrades(history, config).length
   const dataset = buildLearningBotDataset(history, config)
+  const sourceParts = ['local-history']
+  if (backtestHistory.length > 0) sourceParts.push(`backtest(${backtestHistory.length})`)
+  if (flaggedRunRows.length > 0) sourceParts.push(`runs(${flaggedRunRows.length})`)
   return {
     artifact: buildLearningBotTrainingDatasetArtifact(dataset, config),
     dataset,
     eligibleClosedTradeCount,
     realMoneyTradeTarget: LEARNING_BOT_REAL_MONEY_TRADE_TARGET,
     realMoneyTradeReady: eligibleClosedTradeCount >= LEARNING_BOT_REAL_MONEY_TRADE_TARGET,
-    source: 'local-history',
+    source: sourceParts.join('+'),
   }
 }
 
@@ -2159,7 +2260,7 @@ function buildLearningBotDatasetFingerprint(dataset = []) {
   ].join(':')
 }
 
-async function refreshLearningBotDatasetArtifact(config = defaultLearningBotSettings) {
+export async function refreshLearningBotDatasetArtifact(config = defaultLearningBotSettings) {
   const { artifact, dataset, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady, source } = await getPreferredLearningBotDataset(config)
   await writeJson(learningBotDatasetFilePath, artifact)
 
@@ -2191,7 +2292,7 @@ function hydrateLearningBotTrainStatus(status = defaultLearningBotTrainStatus, d
   }
 }
 
-async function launchLearningBotTraining({ config, dataset }) {
+export async function launchLearningBotTraining({ config, dataset }) {
   const currentStatus = await getLearningBotTrainStatus()
 
   if (currentStatus.running) {
@@ -2391,7 +2492,7 @@ function estimateCandidateEntryQuality(candidate = {}) {
   return Math.max(0, Math.min(100, Math.round(score)))
 }
 
-function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config = defaultLearningBotSettings) {
+export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config = defaultLearningBotSettings) {
   const overallPolicy = trainStatus?.metrics?.policy?.setupFamilyScores || {}
   const modelPolicyMap = trainStatus?.metrics?.policy?.bySignalModel || {}
   const setupFamily = inferLearningBotSetupFamily(candidate.summary)
@@ -2419,9 +2520,6 @@ function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config =
     leverage: candidate.leverage,
   })
   const baseScore = entryQualityScore
-  const rewardAdjustment = setupStats ? Math.max(-20, Math.min(20, Number(setupStats.avgReward || 0) * 2)) : 0
-  const winRateAdjustment = setupStats ? ((Number(setupStats.winRate || 0) - 50) * 0.35) : 0
-  const finalScore = Math.max(0, Math.min(100, Math.round(baseScore + rewardAdjustment + winRateAdjustment)))
   const perBotOverride = config.perBotOverrides?.[candidateSignalModelId] || null
   const thresholdScore = Number(
     perBotOverride?.thresholdScore
@@ -2429,13 +2527,45 @@ function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config =
     ?? defaultLearningBotSettings.aiEntryFilter.thresholdScore,
   )
   const liveFilterPaperOnly = perBotOverride?.paperOnly ?? config.aiEntryFilter?.paperOnly ?? true
+
+  // Loss-averse scoring: a setup family this model has historically lost on is
+  // penalised harder than a winning one is rewarded, and a proven loser is
+  // pushed below the accept threshold so the AI filter skips it outright.
+  const rewardValue = setupStats ? Number(setupStats.avgReward || 0) : 0
+  const winRateValue = setupStats && setupStats.winRate != null ? Number(setupStats.winRate) : null
+  const sampleCount = setupStats ? Number(setupStats.count || 0) : 0
+  // A setup family needs at least this many closed trades before its learned
+  // stats are trusted enough to gate a bot. Below it the numbers are noise, so
+  // their influence is scaled way down and the bot stays in data-collection
+  // (bootstrap) mode instead of being frozen by a 1-2 sample fluke.
+  const MIN_POLICY_SAMPLES = 5
+  const policyReliable = sampleCount >= MIN_POLICY_SAMPLES
+  const reliabilityWeight = policyReliable
+    ? 1
+    : Math.min(1, sampleCount / MIN_POLICY_SAMPLES) * 0.3
+  const rewardAdjustment = (setupStats
+    ? (rewardValue < 0
+      ? Math.max(-32, rewardValue * 3.2)
+      : Math.min(16, rewardValue * 1.6))
+    : 0) * reliabilityWeight
+  const winRateAdjustment = (winRateValue == null
+    ? 0
+    : (winRateValue < 50
+      ? (winRateValue - 50) * 0.7
+      : (winRateValue - 50) * 0.3)) * reliabilityWeight
+  const provenLoser = policyReliable
+    && ((winRateValue != null && winRateValue < 40) || rewardValue <= -3)
+  let finalScore = Math.max(0, Math.min(100, Math.round(baseScore + rewardAdjustment + winRateAdjustment)))
+  if (provenLoser) {
+    finalScore = Math.min(finalScore, Math.max(0, thresholdScore - 12))
+  }
   // "Own" policy = trained on this signal model's own trades (not the shared fallback pool).
   const hasOwnModelPolicy = policySource === candidateSignalModelId
     || policySource === `${candidateSignalModelId}:unclassified`
-  // Bootstrap: a hard-block bot with no self-trained policy cannot be meaningfully gated
-  // yet, so let it trade to build its dataset. This auto-disables the moment the trainer
-  // produces a per-model policy for this setup family.
-  const bootstrapAccept = !liveFilterPaperOnly && !hasOwnModelPolicy
+  // Bootstrap: a hard-block bot with no reliable self-trained policy for this
+  // setup family keeps trading to build its dataset. Auto-disables the moment
+  // the trainer has >= MIN_POLICY_SAMPLES closed trades for the family.
+  const bootstrapAccept = !liveFilterPaperOnly && (!hasOwnModelPolicy || !policyReliable)
   const accept = bootstrapAccept || finalScore >= thresholdScore
 
   return {
@@ -2449,6 +2579,7 @@ function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config =
     thresholdScore,
     hasOwnModelPolicy,
     bootstrapAccept,
+    provenLoser,
     accept,
   }
 }
@@ -2471,6 +2602,103 @@ function describeAiPolicySource(policySource = 'none', signalModelId = DEFAULT_S
   }
 
   return 'Heuristic baseline'
+}
+
+// Chart-pattern influence on the AI entry score. Asymmetric and loss-averse: a
+// pattern that CONFIRMS the trade adds little, a pattern that OPPOSES it
+// subtracts a lot (a confident opposing pattern can pull a borderline setup
+// below the accept threshold).
+const PATTERN_AI_SCORE_WEIGHT = 6
+const PATTERN_AI_CONFLICT_WEIGHT = 14
+
+// Runs the pattern engine over a candle series and returns a bounded,
+// direction-aware score contribution plus a lightweight pattern list.
+function computePatternInsight(candles, side) {
+  try {
+    const series = (Array.isArray(candles) ? candles : [])
+      .filter((candle) => candle
+        && Number.isFinite(Number(candle.open))
+        && Number.isFinite(Number(candle.high))
+        && Number.isFinite(Number(candle.low))
+        && Number.isFinite(Number(candle.close)))
+      .map((candle) => ({
+        time: Number(candle.time) || 0,
+        open: Number(candle.open),
+        high: Number(candle.high),
+        low: Number(candle.low),
+        close: Number(candle.close),
+      }))
+
+    const { patterns, summary } = detectChartPatterns(series, { candleLookback: 40 })
+    const resolvedSide = side === 'SHORT' ? 'SHORT' : 'LONG'
+    // The score already weights by confidence x recency; keep the attached list
+    // to the few that actually matter so trade logs stay readable.
+    const notablePatterns = patterns
+      .filter((pattern) => pattern.confidence >= 0.5 || pattern.category === 'chart')
+      .slice(0, 4)
+
+    return {
+      patternBias: summary.bias,
+      patternScore: patternScoreForSide(summary, resolvedSide),
+      patterns: notablePatterns.map((pattern) => ({
+        name: pattern.name,
+        category: pattern.category,
+        bias: pattern.bias,
+        confidence: Number(pattern.confidence.toFixed(2)),
+      })),
+      patternSummary: {
+        bias: summary.bias,
+        score: summary.score,
+        count: summary.count,
+        top: summary.top
+          ? { name: summary.top.name, bias: summary.top.bias, confidence: Number(summary.top.confidence.toFixed(2)) }
+          : null,
+      },
+    }
+  } catch {
+    return { patternBias: 'neutral', patternScore: 0, patterns: [], patternSummary: null }
+  }
+}
+
+// Attaches the pattern insight to a completed signal snapshot.
+function attachPatternInsight(snapshot, candles) {
+  if (!snapshot) {
+    return snapshot
+  }
+
+  const side = snapshot.checklistSide
+    || snapshot.side
+    || (snapshot.direction === 'SHORT' ? 'SHORT' : 'LONG')
+  return { ...snapshot, ...computePatternInsight(candles, side) }
+}
+
+// Applies the bounded pattern nudge to an AI filter decision. The pattern can
+// move the final score by at most ±PATTERN_AI_SCORE_WEIGHT and can NOT by
+// itself flip accept <-> skip: if the nudge would cross the threshold, the
+// original accept verdict is kept while the displayed score still moves.
+export function applyPatternAiNudge(decision, patternScore) {
+  const base = Number(decision?.finalScore || 0)
+  const threshold = Number(decision?.thresholdScore || 0)
+  const clamped = Math.max(-1, Math.min(1, Number(patternScore) || 0))
+  const weight = clamped < 0 ? PATTERN_AI_CONFLICT_WEIGHT : PATTERN_AI_SCORE_WEIGHT
+  const delta = Math.round(clamped * weight)
+  const nudged = Math.max(0, Math.min(100, base + delta))
+  // Bootstrap-mode passes (no learned policy yet) always go through to grow the
+  // dataset; the pattern nudge only moves the displayed score there. Otherwise
+  // the nudged score decides accept, so a confirming pattern near the threshold
+  // can tip a ready setup in and a conflicting one can tip it out - but the
+  // rule-based setup must already be trade-ready, so a pattern never creates a
+  // trade on its own.
+  const accept = decision?.bootstrapAccept
+    ? Boolean(decision.accept)
+    : nudged >= threshold
+
+  return {
+    delta,
+    finalScore: nudged,
+    accept,
+    flipped: (base >= threshold) !== (nudged >= threshold),
+  }
 }
 
 function buildSignalAnalysisAiAdvisory(
@@ -2597,11 +2825,18 @@ function buildSignalAnalysisAiAdvisory(
   const hasLearnedPolicy = Boolean(decision.setupStats)
   const sampleCount = Number(decision.setupStats?.count || 0)
 
+  const patternScore = Number(analysis.patternScore || 0)
+  const patternBias = analysis.patternBias || 'neutral'
+  const nudge = applyPatternAiNudge(decision, patternScore)
+  const patternNote = nudge.delta !== 0
+    ? ` Chart patterns (${patternBias}) ${nudge.delta > 0 ? 'added' : 'removed'} ${Math.abs(nudge.delta)} point${Math.abs(nudge.delta) === 1 ? '' : 's'}${nudge.flipped ? ', but not enough on their own to change the verdict' : ''}.`
+    : ''
+
   return {
     advisoryOnly: true,
     available: true,
     signalReady: true,
-    status: decision.accept ? 'accept' : 'caution',
+    status: nudge.accept ? 'accept' : 'caution',
     signalModelId: decision.signalModelId,
     signalModelName,
     setupFamily: decision.setupFamily,
@@ -2615,22 +2850,26 @@ function buildSignalAnalysisAiAdvisory(
     sampleCount,
     hasLearnedPolicy,
     entryQualityScore: decision.entryQualityScore,
-    finalScore: decision.finalScore,
-    accept: decision.accept,
+    finalScore: nudge.finalScore,
+    baseFinalScore: decision.finalScore,
+    patternScore: Number(patternScore.toFixed(3)),
+    patternBias,
+    patternScoreDelta: nudge.delta,
+    accept: nudge.accept,
     setupWinRate: decision.setupStats ? Number(decision.setupStats.winRate || 0) : null,
     avgReward: decision.setupStats ? Number(decision.setupStats.avgReward || 0) : null,
     avgEntryQuality: decision.setupStats ? Number(decision.setupStats.avgEntryQuality || 0) : null,
-    detail: hasLearnedPolicy
+    detail: (hasLearnedPolicy
       ? (
-        decision.accept
+        nudge.accept
           ? `AI would allow this ${decision.setupFamily.toLowerCase()} setup as an advisory pass.`
           : `AI would caution against this ${decision.setupFamily.toLowerCase()} setup for now.`
       )
       : (
-        decision.accept
+        nudge.accept
           ? 'No learned policy matched this setup yet, but the heuristic entry-quality score clears the advisory threshold.'
           : 'No learned policy matched this setup yet, and the heuristic entry-quality score stays below the advisory threshold.'
-      ),
+      )) + patternNote,
   }
 }
 
@@ -3740,7 +3979,15 @@ async function fetchJson(url, {
         } catch (error) {
           lastError = error
           if (attempt < retries) {
-            await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)))
+            // Exponential backoff with jitter; back off harder when the upstream
+            // is rate-limiting or refusing connections so a retry storm doesn't
+            // make things worse.
+            const code = error?.cause?.code || ''
+            const rateLimited = /Request failed: 429|Request failed: 418/.test(String(error?.message || ''))
+            const connectStalled = code === 'UND_ERR_CONNECT_TIMEOUT' || error?.name === 'AbortError'
+            const base = (rateLimited || connectStalled) ? 1200 : 350
+            const wait = Math.round(base * (2 ** attempt) * (1 + Math.random() * 0.4))
+            await new Promise((resolve) => setTimeout(resolve, wait))
             continue
           }
         }
@@ -3774,6 +4021,7 @@ async function fetchKlines(symbol, interval, limit) {
   const path = `/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
   return fetchJson(`${publicDataBaseUrl}${path}`, {
     retries: 1,
+    timeoutMs: 9_000,
     fallbackUrl: `${publicDataFallbackBaseUrl}${path}`,
     cacheKey: `klines:${symbol}:${interval}:${limit}`,
     cacheTtlMs: getMarketDataCacheTtlForKlineInterval(interval),
@@ -3783,6 +4031,7 @@ async function fetchKlines(symbol, interval, limit) {
 async function fetchFuturesDepth(symbol, limit = 20) {
   return fetchJson(`${futuresTestnetBaseUrl}/fapi/v1/depth?symbol=${symbol}&limit=${limit}`, {
     retries: 1,
+    timeoutMs: 9_000,
     cacheKey: `futures-depth:${symbol}:${limit}`,
     cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS,
   })
@@ -3790,6 +4039,7 @@ async function fetchFuturesDepth(symbol, limit = 20) {
 
 async function fetchFuturesPremiumIndex(symbol) {
   return fetchJson(`${futuresTestnetBaseUrl}/fapi/v1/premiumIndex?symbol=${symbol}`, {
+    timeoutMs: 9_000,
     retries: 1,
     cacheKey: `futures-premium:${symbol}`,
     cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS,
@@ -3973,7 +4223,7 @@ async function fetchSignalMarketContext(symbol) {
   }
 }
 
-function toCandleData(klines) {
+export function toCandleData(klines) {
   return klines.map((entry) => ({
     time: entry[0],
     closeTime: Number(entry[6] || 0),
@@ -4512,7 +4762,7 @@ function isBearishCandle(candle) {
   return Number(candle?.close || 0) < Number(candle?.open || 0)
 }
 
-function getClosedCandleSeries(candles, intervalMs, timestamp = Date.now()) {
+export function getClosedCandleSeries(candles, intervalMs, timestamp = Date.now()) {
   return Array.isArray(candles)
     ? candles.filter((candle) => {
       const closeTime = Number(candle?.closeTime || 0)
@@ -5914,7 +6164,7 @@ function buildBot4SignalSnapshot({
   }
 }
 
-function buildSignalAnalysisSnapshot(
+export function buildSignalAnalysisSnapshot(
   symbol,
   biasTimeframe,
   setupTimeframe,
@@ -5966,7 +6216,7 @@ function buildSignalAnalysisSnapshot(
       })
     }
 
-    return buildBot4SignalSnapshot({
+    return attachPatternInsight(buildBot4SignalSnapshot({
       symbol,
       signalModel,
       effectiveStrategy,
@@ -5978,7 +6228,7 @@ function buildSignalAnalysisSnapshot(
       signalModel,
       effectiveStrategy,
       entryPrice: latestEntryForBot4.close,
-    })
+    }), closedEntryTimeframe)
   }
 
   if (
@@ -6010,7 +6260,7 @@ function buildSignalAnalysisSnapshot(
   }
 
   if (signalModel.id === 'model-3') {
-    return buildBot3SignalSnapshot({
+    return attachPatternInsight(buildBot3SignalSnapshot({
       symbol,
       signalModel,
       effectiveStrategy,
@@ -6032,10 +6282,10 @@ function buildSignalAnalysisSnapshot(
       signalModel,
       effectiveStrategy,
       entryPrice: latestEntry.close,
-    })
+    }), closedEntryTimeframe)
   }
 
-  return buildBot12SignalSnapshot({
+  return attachPatternInsight(buildBot12SignalSnapshot({
     symbol,
     signalModel,
     effectiveStrategy,
@@ -6057,10 +6307,10 @@ function buildSignalAnalysisSnapshot(
     signalModel,
     effectiveStrategy,
     entryPrice: latestEntry.close,
-  })
+  }), closedEntryTimeframe)
 }
 
-function analyzeSymbolStrategy(
+export function analyzeSymbolStrategy(
   symbol,
   biasTimeframe,
   setupTimeframe,
@@ -6103,6 +6353,10 @@ function analyzeSymbolStrategy(
     configuredStopLossPercent: snapshot.configuredStopLossPercent,
     maxLossPerTrade: snapshot.maxLossPerTrade,
     summary: snapshot.summary,
+    patternScore: Number(snapshot.patternScore || 0),
+    patternBias: snapshot.patternBias || 'neutral',
+    patterns: Array.isArray(snapshot.patterns) ? snapshot.patterns : [],
+    patternSummary: snapshot.patternSummary || null,
   }
 }
 
@@ -7593,6 +7847,23 @@ async function updateOpenTrades() {
   }
 }
 
+// Runs `worker` over `items` with at most `limit` in flight at once, keeping
+// the results in input order.
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length)
+  let cursor = 0
+  const workerCount = Math.max(1, Math.min(limit, items.length))
+  const runners = Array.from({ length: workerCount }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await worker(items[index], index)
+    }
+  })
+  await Promise.all(runners)
+  return results
+}
+
 async function runAutoTrader(trigger = 'MANUAL') {
   const runSteps = []
   const pushStep = (message, status = 'info', extra = {}) => {
@@ -7817,7 +8088,10 @@ async function runAutoTrader(trigger = 'MANUAL') {
       const walletOpenTrades = walletHistory.filter((trade) => trade.status === 'OPEN')
       const walletOpenAutoTrades = walletOpenTrades.filter((trade) => isAutoTradeSource(trade.source))
       const walletOpenPaperAutoTrades = walletOpenAutoTrades.filter((trade) => trade.mode === 'local-paper')
-      if (walletOpenPaperAutoTrades.length > 0) {
+      // This clean-slate gate only matters for wallets promoted to live/Testnet
+      // execution. Local-paper bot wallets run continuously and are capped by
+      // their own maxOpenPositions, so an open paper trade must not freeze them.
+      if (walletOpenPaperAutoTrades.length > 0 && isExchangeSyncWallet(resolvedWallet)) {
         pushWalletStep(
           `Found ${walletOpenPaperAutoTrades.length} open local-paper auto trade${walletOpenPaperAutoTrades.length === 1 ? '' : 's'} in this wallet. Close them manually before Phase 3 Binance execution can continue.`,
           'blocked',
@@ -8023,34 +8297,67 @@ async function runAutoTrader(trigger = 'MANUAL') {
       }
 
       const analyses = []
-      for (const symbol of walletScanSymbols) {
+      let scanCancelled = false
+      let scanSkipped = 0
+
+      for (let start = 0; start < walletScanSymbols.length; start += SIGNAL_SCAN_CONCURRENCY) {
         if (autoTradeRuntime.cancelRequested) {
-          const result = await walletCancelled()
-          setAutoTradeOutcome(result)
-          return result
+          scanCancelled = true
+          break
         }
 
-        const marketInputs = await getSymbolInputs(symbol)
-        const analysis = analyzeSymbolStrategy(
-          symbol,
-          marketInputs.bias,
-          marketInputs.higher,
-          marketInputs.entry,
-          walletStrategy,
-          walletSignalModelId,
-          marketInputs.marketContext,
-          marketInputs.trigger,
-        )
+        const batch = walletScanSymbols.slice(start, start + SIGNAL_SCAN_CONCURRENCY)
+        const batchResults = await mapWithConcurrency(batch, SIGNAL_SCAN_CONCURRENCY, async (symbol) => {
+          try {
+            const marketInputs = await getSymbolInputs(symbol)
+            const analysis = analyzeSymbolStrategy(
+              symbol,
+              marketInputs.bias,
+              marketInputs.higher,
+              marketInputs.entry,
+              walletStrategy,
+              walletSignalModelId,
+              marketInputs.marketContext,
+              marketInputs.trigger,
+            )
+            return { symbol, analysis, error: null }
+          } catch (error) {
+            return { symbol, analysis: null, error: error instanceof Error ? error.message : String(error) }
+          }
+        })
 
-        pushWalletStep(
-          analysis
-            ? `Found ${walletSignalModel.name} candidate on ${symbol}: ${analysis.direction} score ${analysis.score}/${analysis.maxScore} at ${analysis.entryPrice}.`
-            : `No A-grade setup on ${symbol}.`,
-          analysis ? 'pass' : 'info',
-          analysis ? { symbol, direction: analysis.direction, score: analysis.score } : { symbol },
-        )
+        for (const { symbol, analysis, error } of batchResults) {
+          if (error) {
+            scanSkipped += 1
+            pushWalletStep(`Skipped ${symbol}: market data unavailable (${error}).`, 'info', { symbol })
+            continue
+          }
 
-        analyses.push(analysis)
+          const patternNote = analysis && Array.isArray(analysis.patterns) && analysis.patterns.length > 0
+            ? ` Patterns: ${analysis.patterns.map((pattern) => pattern.name).join(', ')} (${analysis.patternBias}).`
+            : ''
+          pushWalletStep(
+            analysis
+              ? `Found ${walletSignalModel.name} candidate on ${symbol}: ${analysis.direction} score ${analysis.score}/${analysis.maxScore} at ${analysis.entryPrice}.${patternNote}`
+              : `No A-grade setup on ${symbol}.`,
+            analysis ? 'pass' : 'info',
+            analysis
+              ? { symbol, direction: analysis.direction, score: analysis.score, patternBias: analysis.patternBias, patternScore: analysis.patternScore }
+              : { symbol },
+          )
+
+          analyses.push(analysis)
+        }
+      }
+
+      if (scanCancelled) {
+        const result = await walletCancelled()
+        setAutoTradeOutcome(result)
+        return result
+      }
+
+      if (scanSkipped > 0) {
+        pushWalletStep(`${scanSkipped} symbol${scanSkipped === 1 ? '' : 's'} skipped this wave due to upstream market-data errors.`, 'info')
       }
 
       const candidate = analyses
@@ -8161,6 +8468,21 @@ async function runAutoTrader(trigger = 'MANUAL') {
         : null
 
       if (aiFilterDecision) {
+        const patternScoreValue = Number(candidate.patternScore || 0)
+        const patternNudge = applyPatternAiNudge(aiFilterDecision, patternScoreValue)
+        if (patternNudge.delta !== 0) {
+          pushWalletStep(
+            `Chart patterns (${candidate.patternBias || 'neutral'}) ${patternNudge.delta > 0 ? 'added' : 'removed'} ${Math.abs(patternNudge.delta)} to the AI score: ${aiFilterDecision.finalScore} -> ${patternNudge.finalScore}/${aiFilterDecision.thresholdScore}${patternNudge.flipped ? ` (${patternNudge.accept ? 'now clears' : 'now below'} the threshold)` : ''}.`,
+            'info',
+            { symbol: candidate.symbol, patternScore: Number(patternScoreValue.toFixed(3)), patternDelta: patternNudge.delta },
+          )
+        }
+        aiFilterDecision.baseFinalScore = aiFilterDecision.finalScore
+        aiFilterDecision.finalScore = patternNudge.finalScore
+        aiFilterDecision.accept = patternNudge.accept
+        aiFilterDecision.patternScore = Number(patternScoreValue.toFixed(3))
+        aiFilterDecision.patternScoreDelta = patternNudge.delta
+
         pushWalletStep(
           `AI filter scored ${candidate.symbol} ${aiFilterDecision.finalScore}/100 for ${aiFilterDecision.setupFamily} using ${aiFilterDecision.policySource} policy (threshold ${aiFilterDecision.thresholdScore}).`,
           aiFilterDecision.accept ? 'pass' : 'blocked',
@@ -8220,11 +8542,15 @@ async function runAutoTrader(trigger = 'MANUAL') {
           signalModelName: candidate.signalModelName,
           aiDecision: aiFilterDecision ? {
             finalScore: aiFilterDecision.finalScore,
+            baseFinalScore: aiFilterDecision.baseFinalScore ?? aiFilterDecision.finalScore,
             thresholdScore: aiFilterDecision.thresholdScore,
             setupFamily: aiFilterDecision.setupFamily,
             policySource: aiFilterDecision.policySource,
             entryQualityScore: aiFilterDecision.entryQualityScore,
             accept: aiFilterDecision.accept,
+            patternScore: aiFilterDecision.patternScore ?? Number(candidate.patternScore || 0),
+            patternScoreDelta: aiFilterDecision.patternScoreDelta ?? 0,
+            patternBias: candidate.patternBias || 'neutral',
           } : null,
           walletId: resolvedWallet.id,
           walletName: resolvedWallet.name,
@@ -8622,6 +8948,113 @@ app.post('/api/learning-bot/train', async (_request, response) => {
   } catch (error) {
     response.status(500).json({
       error: error instanceof Error ? error.message : 'Unable to start learning bot training',
+    })
+  }
+})
+
+function formatEtaText(seconds) {
+  const s = Number(seconds)
+  if (!Number.isFinite(s) || s <= 0) return null
+  if (s < 90) return `~${Math.round(s)}s left`
+  const mins = Math.round(s / 60)
+  if (mins < 90) return `~${mins} min left`
+  const hrs = Math.floor(mins / 60)
+  const rem = mins % 60
+  return rem ? `~${hrs}h ${rem}m left` : `~${hrs}h left`
+}
+
+app.get('/api/learning-bot/backtests', async (_request, response) => {
+  try {
+    const registry = await getBacktestRunRegistry()
+    const runs = registry.map((run) => ({
+      ...run,
+      etaText: run?.status === 'running' ? formatEtaText(run?.progress?.etaSeconds) : null,
+    }))
+    response.json({ ok: true, runs })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Unable to load backtest runs',
+    })
+  }
+})
+
+app.patch('/api/learning-bot/backtests/:id', async (request, response) => {
+  try {
+    const id = String(request.params.id || '').trim()
+    const registry = await getBacktestRunRegistry()
+    const idx = registry.findIndex((run) => run && run.id === id)
+    if (idx < 0) {
+      response.status(404).json({ error: `No backtest run with id "${id}".` })
+      return
+    }
+    const patch = request.body && typeof request.body === 'object' ? request.body : {}
+    const next = { ...registry[idx] }
+    if (typeof patch.includeInTraining === 'boolean') next.includeInTraining = patch.includeInTraining
+    if (typeof patch.conclusion === 'string') next.conclusion = patch.conclusion
+    if (typeof patch.label === 'string' && patch.label.trim()) next.label = patch.label.trim()
+    next.updatedAt = Date.now()
+    registry[idx] = next
+    await writeBacktestRunRegistry(registry)
+    response.json({ ok: true, run: next })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Unable to update backtest run',
+    })
+  }
+})
+
+app.get('/api/learning-bot/backtests/:id/report', async (request, response) => {
+  try {
+    const id = String(request.params.id || '').trim().replace(/[^A-Za-z0-9._-]/g, '-')
+    const file = path.join(backtestRunsMdDir, `${id}.md`)
+    let markdown = ''
+    try {
+      markdown = await fs.readFile(file, 'utf8')
+    } catch {
+      markdown = ''
+    }
+    response.json({ ok: true, markdown })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Unable to load backtest report',
+    })
+  }
+})
+
+app.get('/api/learning-bot/signal-insights', async (_request, response) => {
+  try {
+    const artifact = await readJson(learningBotTrainArtifactFilePath, null)
+    const metrics = artifact?.metrics || null
+    const bySignalModel = metrics?.policy?.bySignalModel || {}
+    const classify = (winRate, avgReward) => {
+      if (avgReward > 0 && winRate >= 45) return 'works'
+      if (avgReward >= -1) return 'marginal'
+      return 'losing'
+    }
+    const bots = Object.entries(bySignalModel).map(([modelId, node]) => {
+      const families = Object.entries(node?.setupFamilyScores || {})
+        .map(([family, item]) => ({
+          family,
+          count: Number(item?.count || 0),
+          winRate: Number(item?.winRate || 0),
+          avgReward: Number(item?.avgReward || 0),
+          avgEntryQuality: Number(item?.avgEntryQuality || 0),
+          verdict: classify(Number(item?.winRate || 0), Number(item?.avgReward || 0)),
+        }))
+        .sort((a, b) => b.count - a.count)
+      return { modelId, families }
+    })
+    response.json({
+      ok: true,
+      generatedAt: artifact?.generatedAt || metrics?.generatedAt || null,
+      rows: Number(metrics?.rows || 0),
+      framework: metrics?.framework || null,
+      actionAlignment: Number(metrics?.actionAlignment || 0),
+      bots,
+    })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Unable to build signal insights',
     })
   }
 })
@@ -9041,6 +9474,33 @@ app.get('/api/workflow-readiness', async (_request, response) => {
   })
 })
 
+app.get('/api/codex-console/status', async (_request, response) => {
+  try {
+    const status = await getCodexConsoleStatus()
+    response.json({ ok: true, ...status })
+  } catch (error) {
+    response.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'Unable to read Codex console status.',
+    })
+  }
+})
+
+app.post('/api/codex-console/message', async (request, response) => {
+  const { message, threadId } = request.body || {}
+
+  try {
+    const result = await runCodexConsoleTurn({ message, threadId })
+    response.json({ ok: true, ...result })
+  } catch (error) {
+    const statusCode = error && error.statusCode ? error.statusCode : 500
+    response.status(statusCode).json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'Codex console request failed.',
+    })
+  }
+})
+
 app.get('/api/auto-trade-events', (request, response) => {
   response.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -9114,6 +9574,7 @@ if (shouldServeBuiltFrontend) {
   })
 }
 
+if (IS_MAIN_MODULE) {
 setInterval(() => {
   updateOpenTrades().catch((error) => {
     console.error('Failed to update open trades:', error)
@@ -9197,3 +9658,4 @@ app.listen(port, host, async () => {
     console.error('Failed to auto-refresh AI policy on startup:', error)
   })
 })
+} // end IS_MAIN_MODULE

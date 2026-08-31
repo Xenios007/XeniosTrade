@@ -1,202 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { LoaderCircle, Lock, Radar, TrendingDown, TrendingUp } from 'lucide-react'
+import { ChevronDown, LoaderCircle } from 'lucide-react'
 import { formatPrice } from '../lib/formatters'
 import { calculateEMA, calculateSMA, calculateVWAP } from '../lib/indicators'
-import { SIGNAL_MODELS, getSignalModel } from '../lib/signalModels'
+import { getSignalModel } from '../lib/signalModels'
 import { Panel } from './Panel'
 
-const intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d', '1w']
+const intervals = [
+  '1m', '3m', '5m', '15m', '30m',
+  '1h', '2h', '4h', '6h', '8h', '12h',
+  '1d', '3d', '1w', '1M',
+]
 const indicatorItems = [
   { key: 'ema', label: 'EMA 12' },
   { key: 'ma', label: 'MA 20' },
   { key: 'bb', label: 'BB 20,2' },
   { key: 'rsi', label: 'RSI 14' },
 ]
-const EMPTY_MODEL_STATS = {
-  tradeCount: 0,
-  closedTrades: 0,
-  wins: 0,
-  losses: 0,
-  winRate: 0,
-  pnl: 0,
-}
 const CHART_SCENARIO_RIGHT_OFFSET = 14
-
-function formatWinRate(winRate, closedTrades) {
-  if (!closedTrades) {
-    return 'No closed trades'
-  }
-
-  return `${(Number(winRate || 0) * 100).toFixed(0)}% win`
-}
-
-function formatSignedUsdt(value) {
-  const number = Number(value || 0)
-  const sign = number > 0 ? '+' : ''
-  return `${sign}${number.toFixed(2)} USDT`
-}
 
 function isFinitePrice(value) {
   return Number.isFinite(Number(value))
-}
-
-function getAiStatusMeta(aiAdvisory = null) {
-  if (!aiAdvisory) {
-    return {
-      label: 'AI Offline',
-      tone: 'border-white/10 bg-white/[0.03] text-slate-300',
-      score: 'N/A',
-      detail: 'AI advisory is still loading for this bot.',
-    }
-  }
-
-  if (aiAdvisory.status === 'accept') {
-    return {
-      label: 'AI Accept',
-      tone: 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100',
-      score: `${aiAdvisory.finalScore}/${aiAdvisory.thresholdScore}`,
-      detail: aiAdvisory.detail,
-    }
-  }
-
-  if (aiAdvisory.status === 'caution') {
-    return {
-      label: 'AI Skip',
-      tone: 'border-rose-400/20 bg-rose-400/10 text-rose-100',
-      score: `${aiAdvisory.finalScore}/${aiAdvisory.thresholdScore}`,
-      detail: aiAdvisory.detail,
-    }
-  }
-
-  if (aiAdvisory.status === 'waiting') {
-    return {
-      label: 'AI Waiting',
-      tone: 'border-amber-400/20 bg-amber-400/10 text-amber-100',
-      score: 'Standby',
-      detail: aiAdvisory.detail,
-    }
-  }
-
-  return {
-    label: 'AI Training',
-    tone: 'border-sky-400/20 bg-sky-400/10 text-sky-100',
-    score: 'Needs data',
-    detail: aiAdvisory.detail || 'AI is still preparing its advisory policy.',
-  }
-}
-
-function getModelDirectionMeta(model, analysis) {
-  if (model.status === 'blank') {
-    return {
-      label: 'Blank Slot',
-      Icon: Lock,
-    }
-  }
-
-  if (analysis?.ready) {
-    return analysis.checklistSide === 'SHORT'
-      ? { label: 'Short Ready', Icon: TrendingDown }
-      : { label: 'Long Ready', Icon: TrendingUp }
-  }
-
-  if (analysis?.checklistSide === 'SHORT') {
-    return {
-      label: 'Short Bias',
-      Icon: TrendingDown,
-    }
-  }
-
-  if (analysis?.checklistSide === 'LONG') {
-    return {
-      label: 'Long Bias',
-      Icon: TrendingUp,
-    }
-  }
-
-  return {
-    label: 'Watching',
-    Icon: Radar,
-  }
-}
-
-function getModelTone(model, analysis, isActive) {
-  if (model.status === 'blank') {
-    return {
-      card: `border-white/10 bg-slate-950/88 ${isActive ? 'shadow-[0_0_0_1px_rgba(148,163,184,0.18)]' : ''}`,
-      badge: 'border-white/10 bg-white/[0.04] text-slate-400',
-      fill: 'bg-slate-500/70',
-      signalOn: 'bg-slate-400/80',
-      signalOff: 'bg-white/10',
-    }
-  }
-
-  if (analysis?.checklistSide === 'SHORT') {
-    return {
-      card: `${isActive ? 'border-rose-300/40 bg-rose-400/12 shadow-[0_0_0_1px_rgba(251,113,133,0.18)]' : 'border-rose-400/20 bg-slate-950/86'}`,
-      badge: analysis?.ready
-        ? 'border-rose-300/30 bg-rose-400/15 text-rose-200'
-        : 'border-rose-400/20 bg-rose-400/10 text-rose-200',
-      fill: analysis?.ready ? 'bg-rose-300' : 'bg-rose-400/85',
-      signalOn: analysis?.ready ? 'bg-rose-300' : 'bg-rose-400/80',
-      signalOff: 'bg-white/10',
-    }
-  }
-
-  if (analysis?.checklistSide === 'LONG') {
-    return {
-      card: `${isActive ? 'border-emerald-300/40 bg-emerald-400/12 shadow-[0_0_0_1px_rgba(110,231,183,0.18)]' : 'border-emerald-400/20 bg-slate-950/86'}`,
-      badge: analysis?.ready
-        ? 'border-emerald-300/30 bg-emerald-400/15 text-emerald-200'
-        : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200',
-      fill: analysis?.ready ? 'bg-emerald-300' : 'bg-emerald-400/85',
-      signalOn: analysis?.ready ? 'bg-emerald-300' : 'bg-emerald-400/80',
-      signalOff: 'bg-white/10',
-    }
-  }
-
-  return {
-    card: `${isActive ? 'border-sky-300/40 bg-sky-400/12 shadow-[0_0_0_1px_rgba(125,211,252,0.18)]' : 'border-sky-400/20 bg-slate-950/86'}`,
-    badge: 'border-sky-400/20 bg-sky-400/10 text-sky-200',
-    fill: 'bg-sky-400/85',
-    signalOn: 'bg-sky-400/80',
-    signalOff: 'bg-white/10',
-  }
-}
-
-function getSignalSlots(model, analysis) {
-  if (Array.isArray(analysis?.checklist) && analysis.checklist.length > 0) {
-    return analysis.checklist.map((signal) => ({
-      key: signal.key,
-      passed: Boolean(signal.passed),
-    }))
-  }
-
-  const fallbackCount = Math.max(model.totalSignals || 0, model.status === 'blank' ? 3 : 4)
-  return Array.from({ length: fallbackCount }, (_, index) => ({
-    key: `${model.id}-placeholder-${index}`,
-    passed: false,
-  }))
-}
-
-function getModelStatusLine(model, analysis) {
-  if (model.status === 'blank') {
-    return 'No live rules yet.'
-  }
-
-  if (!analysis) {
-    return 'Loading live scan...'
-  }
-
-  if (analysis.ready) {
-    return `${analysis.checklistSide} entry conditions aligned.`
-  }
-
-  const firstMissingSignal = analysis.checklist?.find((signal) => !signal.passed)
-  if (firstMissingSignal) {
-    return `Next: ${firstMissingSignal.label}`
-  }
-
-  return `${analysis.score}/${analysis.maxScore} signals active.`
 }
 
 function getChecklistSignal(analysis, ...keys) {
@@ -761,13 +584,21 @@ export function CandlestickChart({
   loading = false,
   onChangeInterval,
   onToggleIndicator,
-  footerContent = null,
+  chartPatterns = [],
 }) {
   const chartContainerRef = useRef(null)
   const chartApiRef = useRef(null)
   const chartRuntimeRef = useRef(null)
-  const visibleLogicalRangeRef = useRef(null)
-  const lastChartViewKeyRef = useRef('')
+  const seriesRef = useRef({})
+  const markersPrimitiveRef = useRef(null)
+  const botSeriesRef = useRef([])
+  const botSeriesModelRef = useRef('')
+  const tradePriceLinesRef = useRef([])
+  const rsiPriceLinesRef = useRef([])
+  const patternSeriesRef = useRef([])
+  const patternSigRef = useRef('')
+  const didFitRef = useRef(false)
+  const prevViewKeyRef = useRef('')
   const [chartEngineReady, setChartEngineReady] = useState(false)
   const [chartEngineError, setChartEngineError] = useState('')
   const activeModel = useMemo(() => getSignalModel(activeSignalModelId), [activeSignalModelId])
@@ -775,6 +606,16 @@ export function CandlestickChart({
   const activeSignalMarkers = useMemo(
     () => buildActiveSignalMarkers(data, activeModelAnalysis),
     [data, activeModelAnalysis],
+  )
+  const allMarkers = useMemo(() => {
+    const patternMarkers = chartPatterns
+      .filter((pattern) => pattern.marker)
+      .map((pattern) => pattern.marker)
+    return [...activeSignalMarkers, ...patternMarkers].sort((a, b) => a.time - b.time)
+  }, [activeSignalMarkers, chartPatterns])
+  const patternSignature = useMemo(
+    () => chartPatterns.map((pattern) => pattern.id).join('|'),
+    [chartPatterns],
   )
   const activeBotVisualSpec = useMemo(
     () => getResolvedActiveBotVisualSpec(activeModel, data, activeModelAnalysis),
@@ -787,44 +628,33 @@ export function CandlestickChart({
   const chartViewKey = `${symbol}:${interval}`
 
   function resetChartView() {
-    const chart = chartApiRef.current
-
-    if (!chart) {
-      return
-    }
-
-    visibleLogicalRangeRef.current = null
-    chart.timeScale().fitContent()
+    chartApiRef.current?.timeScale().fitContent()
   }
 
+  // Create the chart and its base series exactly once. Everything after this
+  // is an incremental update on the existing chart instance, so the user's
+  // pan/zoom is never thrown away by a streaming candle update.
   useEffect(() => {
-    if (!chartContainerRef.current || data.length === 0) {
+    if (!chartContainerRef.current) {
       return undefined
     }
 
     let disposed = false
     let cleanup = () => {}
 
-    async function renderChart() {
+    async function bootChart() {
       try {
         setChartEngineError('')
 
         if (!chartRuntimeRef.current) {
-          setChartEngineReady(false)
           chartRuntimeRef.current = await import('lightweight-charts')
         }
 
-        if (disposed || !chartContainerRef.current) {
+        if (disposed || !chartContainerRef.current || chartApiRef.current) {
           return
         }
 
-        const {
-          CandlestickSeries,
-          CrosshairMode,
-          LineSeries,
-          createChart,
-          createSeriesMarkers,
-        } = chartRuntimeRef.current
+        const { CandlestickSeries, CrosshairMode, LineSeries, createChart } = chartRuntimeRef.current
 
         const chart = createChart(chartContainerRef.current, {
           autoSize: true,
@@ -877,163 +707,34 @@ export function CandlestickChart({
           },
         })
         chartApiRef.current = chart
-        const timeScale = chart.timeScale()
-        const visibleRangeChangeHandler = (range) => {
-          visibleLogicalRangeRef.current = range || null
-        }
 
-        timeScale.subscribeVisibleLogicalRangeChange(visibleRangeChangeHandler)
-
-        const candleSeries = chart.addSeries(CandlestickSeries, {
+        const candle = chart.addSeries(CandlestickSeries, {
           upColor: '#22c55e',
           downColor: '#f43f5e',
           borderVisible: false,
           wickUpColor: '#22c55e',
           wickDownColor: '#f43f5e',
         })
-
-        const emaSeries = chart.addSeries(LineSeries, {
-          color: '#38bdf8',
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const ema = chart.addSeries(LineSeries, {
+          color: '#38bdf8', lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
         })
-
-        const maSeries = chart.addSeries(LineSeries, {
-          color: '#f59e0b',
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const ma = chart.addSeries(LineSeries, {
+          color: '#f59e0b', lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
         })
-
-        const bbUpperSeries = chart.addSeries(LineSeries, {
-          color: 'rgba(148, 163, 184, 0.7)',
-          lineWidth: 1,
-          lineStyle: 2,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const bbUpper = chart.addSeries(LineSeries, {
+          color: 'rgba(148, 163, 184, 0.7)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
         })
-
-        const bbBasisSeries = chart.addSeries(LineSeries, {
-          color: 'rgba(244, 114, 182, 0.9)',
-          lineWidth: 1,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const bbBasis = chart.addSeries(LineSeries, {
+          color: 'rgba(244, 114, 182, 0.9)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
         })
-
-        const bbLowerSeries = chart.addSeries(LineSeries, {
-          color: 'rgba(148, 163, 184, 0.7)',
-          lineWidth: 1,
-          lineStyle: 2,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const bbLower = chart.addSeries(LineSeries, {
+          color: 'rgba(148, 163, 184, 0.7)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
         })
-
-        const rsiSeries = chart.addSeries(LineSeries, {
-          color: '#a78bfa',
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: false,
+        const rsi = chart.addSeries(LineSeries, {
+          color: '#a78bfa', lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
         }, 1)
-        activeBotVisualSpec.series.forEach((seriesSpec) => {
-          const series = chart.addSeries(LineSeries, seriesSpec.options)
-          series.setData(seriesSpec.data)
-        })
 
-        candleSeries.setData(data)
-        emaSeries.setData(indicatorVisibility.ema ? indicators.ema : [])
-        maSeries.setData(indicatorVisibility.ma ? indicators.ma : [])
-        bbUpperSeries.setData(indicatorVisibility.bb ? indicators.bollinger.upper : [])
-        bbBasisSeries.setData(indicatorVisibility.bb ? indicators.bollinger.basis : [])
-        bbLowerSeries.setData(indicatorVisibility.bb ? indicators.bollinger.lower : [])
-        rsiSeries.setData(indicatorVisibility.rsi ? indicators.rsi : [])
-
-        createSeriesMarkers(candleSeries, activeSignalMarkers, {
-          autoScale: true,
-          zOrder: 'aboveSeries',
-        })
-
-        if (indicatorVisibility.rsi) {
-          rsiSeries.createPriceLine({
-            price: 70,
-            color: 'rgba(244, 63, 94, 0.45)',
-            lineWidth: 1,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: 'RSI 70',
-          })
-
-          rsiSeries.createPriceLine({
-            price: 30,
-            color: 'rgba(34, 197, 94, 0.45)',
-            lineWidth: 1,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: 'RSI 30',
-          })
-        }
-
-        if (activeModelAnalysis) {
-          if (isFinitePrice(activeModelAnalysis.support)) {
-            candleSeries.createPriceLine({
-              price: Number(activeModelAnalysis.support),
-              color: 'rgba(56, 189, 248, 0.55)',
-              lineWidth: 1,
-              lineStyle: 2,
-              axisLabelVisible: true,
-              title: activeModel.id === 'model-3' ? `${activeModel.name} Structure Low` : `${activeModel.name} Support`,
-            })
-          }
-
-          if (isFinitePrice(activeModelAnalysis.resistance)) {
-            candleSeries.createPriceLine({
-              price: Number(activeModelAnalysis.resistance),
-              color: 'rgba(245, 158, 11, 0.55)',
-              lineWidth: 1,
-              lineStyle: 2,
-              axisLabelVisible: true,
-              title: activeModel.id === 'model-3' ? `${activeModel.name} Structure High` : `${activeModel.name} Resistance`,
-            })
-          }
-
-          if (activeModelAnalysis.ready) {
-            const entryColor = activeModelAnalysis.checklistSide === 'SHORT'
-              ? 'rgba(244, 63, 94, 0.92)'
-              : 'rgba(34, 197, 94, 0.92)'
-
-            if (isFinitePrice(activeModelAnalysis.entryPrice)) {
-              candleSeries.createPriceLine({
-                price: Number(activeModelAnalysis.entryPrice),
-                color: entryColor,
-                lineWidth: 2,
-                axisLabelVisible: true,
-                title: `${activeModel.name} Entry`,
-              })
-            }
-
-            if (isFinitePrice(activeModelAnalysis.stopLoss)) {
-              candleSeries.createPriceLine({
-                price: Number(activeModelAnalysis.stopLoss),
-                color: 'rgba(248, 113, 113, 0.82)',
-                lineWidth: 1,
-                lineStyle: 2,
-                axisLabelVisible: true,
-                title: 'Stop Loss',
-              })
-            }
-
-            if (isFinitePrice(activeModelAnalysis.takeProfit)) {
-              candleSeries.createPriceLine({
-                price: Number(activeModelAnalysis.takeProfit),
-                color: 'rgba(74, 222, 128, 0.82)',
-                lineWidth: 1,
-                lineStyle: 2,
-                axisLabelVisible: true,
-                title: 'Take Profit',
-              })
-            }
-          }
-        }
+        seriesRef.current = { candle, ema, ma, bbUpper, bbBasis, bbLower, rsi }
 
         const panes = chart.panes()
         if (panes[0]) {
@@ -1043,21 +744,21 @@ export function CandlestickChart({
           panes[1].setHeight(140)
         }
 
-        if (lastChartViewKeyRef.current !== chartViewKey) {
-          visibleLogicalRangeRef.current = null
-          lastChartViewKeyRef.current = chartViewKey
-        }
-
-        if (visibleLogicalRangeRef.current) {
-          timeScale.setVisibleLogicalRange(visibleLogicalRangeRef.current)
-        } else {
-          timeScale.fitContent()
-        }
-
+        didFitRef.current = false
+        prevViewKeyRef.current = ''
         setChartEngineReady(true)
+
         cleanup = () => {
-          timeScale.unsubscribeVisibleLogicalRangeChange(visibleRangeChangeHandler)
+          setChartEngineReady(false)
           chartApiRef.current = null
+          seriesRef.current = {}
+          markersPrimitiveRef.current = null
+          botSeriesRef.current = []
+          botSeriesModelRef.current = ''
+          tradePriceLinesRef.current = []
+          rsiPriceLinesRef.current = []
+          patternSeriesRef.current = []
+          patternSigRef.current = ''
           chart.remove()
         }
       } catch (error) {
@@ -1067,13 +768,240 @@ export function CandlestickChart({
       }
     }
 
-    renderChart()
+    bootChart()
 
     return () => {
       disposed = true
       cleanup()
     }
-  }, [activeBotVisualSpec.series, activeModel.id, activeModel.name, activeModelAnalysis, activeSignalMarkers, chartViewKey, data, indicators, indicatorVisibility])
+  }, [])
+
+  // Candle data. fitContent() runs once per symbol/interval, after that
+  // symbol's fresh candles have loaded - never on a plain streaming update,
+  // so the user's pan/zoom is preserved while they read the chart.
+  useEffect(() => {
+    const candle = seriesRef.current.candle
+    if (!chartEngineReady || !candle) {
+      return
+    }
+
+    if (prevViewKeyRef.current !== chartViewKey) {
+      prevViewKeyRef.current = chartViewKey
+      didFitRef.current = false
+    }
+
+    candle.setData(data)
+
+    if (data.length > 0 && !didFitRef.current && !loading) {
+      chartApiRef.current?.timeScale().fitContent()
+      didFitRef.current = true
+    }
+  }, [data, chartViewKey, chartEngineReady, loading])
+
+  // Indicator overlays + RSI guide lines.
+  useEffect(() => {
+    const s = seriesRef.current
+    if (!chartEngineReady || !s.candle) {
+      return
+    }
+
+    s.ema.setData(indicatorVisibility.ema ? indicators.ema : [])
+    s.ma.setData(indicatorVisibility.ma ? indicators.ma : [])
+    s.bbUpper.setData(indicatorVisibility.bb ? indicators.bollinger.upper : [])
+    s.bbBasis.setData(indicatorVisibility.bb ? indicators.bollinger.basis : [])
+    s.bbLower.setData(indicatorVisibility.bb ? indicators.bollinger.lower : [])
+    s.rsi.setData(indicatorVisibility.rsi ? indicators.rsi : [])
+
+    rsiPriceLinesRef.current.forEach((line) => s.rsi.removePriceLine(line))
+    rsiPriceLinesRef.current = []
+    if (indicatorVisibility.rsi) {
+      rsiPriceLinesRef.current.push(s.rsi.createPriceLine({
+        price: 70, color: 'rgba(244, 63, 94, 0.45)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'RSI 70',
+      }))
+      rsiPriceLinesRef.current.push(s.rsi.createPriceLine({
+        price: 30, color: 'rgba(34, 197, 94, 0.45)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'RSI 30',
+      }))
+    }
+  }, [indicators, indicatorVisibility, chartEngineReady])
+
+  // Confirmed-signal + detected-pattern markers on the candle series.
+  useEffect(() => {
+    const candle = seriesRef.current.candle
+    const runtime = chartRuntimeRef.current
+    if (!chartEngineReady || !candle || !runtime?.createSeriesMarkers) {
+      return
+    }
+
+    if (!markersPrimitiveRef.current) {
+      markersPrimitiveRef.current = runtime.createSeriesMarkers(candle, allMarkers, {
+        autoScale: true,
+        zOrder: 'aboveSeries',
+      })
+    } else {
+      markersPrimitiveRef.current.setMarkers(allMarkers)
+    }
+  }, [allMarkers, chartEngineReady])
+
+  // Geometric chart-pattern overlays (necklines, trendlines, pattern outlines).
+  // Rebuilt only when the detected set changes, not on every streaming tick.
+  useEffect(() => {
+    const chart = chartApiRef.current
+    const runtime = chartRuntimeRef.current
+    if (!chartEngineReady || !chart || !runtime?.LineSeries) {
+      return
+    }
+
+    if (patternSigRef.current === patternSignature) {
+      return
+    }
+    patternSigRef.current = patternSignature
+
+    patternSeriesRef.current.forEach((series) => {
+      try {
+        chart.removeSeries(series)
+      } catch {
+        // already detached
+      }
+    })
+
+    const nextSeries = []
+    for (const pattern of chartPatterns) {
+      for (const line of pattern.lines || []) {
+        if (!line.points || line.points.length < 2) continue
+        const series = chart.addSeries(runtime.LineSeries, {
+          color: line.color,
+          lineWidth: line.lineWidth || 1,
+          lineStyle: line.lineStyle ?? 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        })
+        series.setData(
+          line.points
+            .slice()
+            .sort((a, b) => a.time - b.time)
+            .filter((point, index, arr) => index === 0 || point.time !== arr[index - 1].time),
+        )
+        nextSeries.push(series)
+      }
+    }
+    patternSeriesRef.current = nextSeries
+  }, [patternSignature, chartPatterns, chartEngineReady])
+
+  // Per-bot visual overlay lines (EMA 9 / VWAP / etc.). The spec's options are
+  // static per bot, so when only the point data changed (every streaming tick)
+  // we reuse the existing series and just push new data.
+  useEffect(() => {
+    const chart = chartApiRef.current
+    const runtime = chartRuntimeRef.current
+    if (!chartEngineReady || !chart || !runtime?.LineSeries) {
+      return
+    }
+
+    const specs = activeBotVisualSpec.series
+    if (
+      botSeriesModelRef.current === activeModel.id
+      && botSeriesRef.current.length === specs.length
+    ) {
+      specs.forEach((spec, index) => botSeriesRef.current[index].setData(spec.data))
+      return
+    }
+
+    botSeriesRef.current.forEach((series) => {
+      try {
+        chart.removeSeries(series)
+      } catch {
+        // series already detached
+      }
+    })
+    botSeriesRef.current = specs.map((spec) => {
+      const series = chart.addSeries(runtime.LineSeries, spec.options)
+      series.setData(spec.data)
+      return series
+    })
+    botSeriesModelRef.current = activeModel.id
+  }, [activeBotVisualSpec.series, activeModel.id, chartEngineReady])
+
+  // Trade projection lines: entry / stop / target / support / resistance.
+  // Shown whenever the bot has priced them, dashed until the setup is ready
+  // so you can see how the trade would play out before it triggers.
+  useEffect(() => {
+    const candle = seriesRef.current.candle
+    if (!chartEngineReady || !candle) {
+      return
+    }
+
+    tradePriceLinesRef.current.forEach((line) => candle.removePriceLine(line))
+    tradePriceLinesRef.current = []
+
+    const analysis = activeModelAnalysis
+    if (!analysis) {
+      return
+    }
+
+    const ready = Boolean(analysis.ready)
+    const isShort = analysis.checklistSide === 'SHORT'
+    const add = (options) => {
+      tradePriceLinesRef.current.push(candle.createPriceLine(options))
+    }
+
+    if (isFinitePrice(analysis.support)) {
+      add({
+        price: Number(analysis.support),
+        color: 'rgba(56, 189, 248, 0.55)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: activeModel.id === 'model-3' ? `${activeModel.name} Structure Low` : `${activeModel.name} Support`,
+      })
+    }
+
+    if (isFinitePrice(analysis.resistance)) {
+      add({
+        price: Number(analysis.resistance),
+        color: 'rgba(245, 158, 11, 0.55)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: activeModel.id === 'model-3' ? `${activeModel.name} Structure High` : `${activeModel.name} Resistance`,
+      })
+    }
+
+    if (isFinitePrice(analysis.entryPrice)) {
+      add({
+        price: Number(analysis.entryPrice),
+        color: ready
+          ? (isShort ? 'rgba(244, 63, 94, 0.95)' : 'rgba(34, 197, 94, 0.95)')
+          : 'rgba(125, 211, 252, 0.9)',
+        lineWidth: 2,
+        lineStyle: ready ? 0 : 2,
+        axisLabelVisible: true,
+        title: ready ? `${activeModel.name} Entry` : `${activeModel.name} Entry (projected)`,
+      })
+    }
+
+    if (isFinitePrice(analysis.stopLoss)) {
+      add({
+        price: Number(analysis.stopLoss),
+        color: ready ? 'rgba(248, 113, 113, 0.9)' : 'rgba(248, 113, 113, 0.6)',
+        lineWidth: ready ? 2 : 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: ready ? 'Stop Loss' : 'Stop Loss (projected)',
+      })
+    }
+
+    if (isFinitePrice(analysis.takeProfit)) {
+      add({
+        price: Number(analysis.takeProfit),
+        color: ready ? 'rgba(74, 222, 128, 0.9)' : 'rgba(74, 222, 128, 0.6)',
+        lineWidth: ready ? 2 : 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: ready ? 'Take Profit' : 'Take Profit (projected)',
+      })
+    }
+  }, [activeModelAnalysis, activeModel.id, activeModel.name, chartEngineReady])
 
   const chartStatusMessage = chartEngineError
     ? `Chart unavailable: ${chartEngineError}`
@@ -1104,7 +1032,7 @@ export function CandlestickChart({
               </button>
             ))}
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={resetChartView}
@@ -1112,20 +1040,21 @@ export function CandlestickChart({
             >
               Reset View
             </button>
-            {intervals.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => onChangeInterval(item)}
-                className={`rounded-full px-3 py-1.5 text-xs transition ${
-                  item === interval
-                    ? 'bg-sky-400 text-slate-950'
-                    : 'border border-white/10 bg-slate-950/70 text-slate-300'
-                }`}
+            <label className="relative">
+              <span className="sr-only">Chart timeframe</span>
+              <select
+                value={interval}
+                onChange={(event) => onChangeInterval(event.target.value)}
+                className="appearance-none rounded-full border border-sky-400/40 bg-sky-400/12 py-1.5 pl-3 pr-8 text-xs font-semibold text-sky-100 outline-none transition focus:border-sky-300/60 focus:ring-2 focus:ring-sky-400/20"
               >
-                {item}
-              </button>
-            ))}
+                {intervals.map((item) => (
+                  <option key={item} value={item} className="bg-slate-900 text-white">
+                    {item}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-sky-200" />
+            </label>
           </div>
         </div>
       }
@@ -1146,40 +1075,6 @@ export function CandlestickChart({
         ) : null}
       </div>
 
-      {footerContent ? (
-        <div>{footerContent}</div>
-      ) : null}
-
-      <div className={`rounded-2xl border px-4 py-4 ${activeBotVisualSpec.panelTone}`}>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.22em] opacity-70">Chart Visual Mode</div>
-            <div className="mt-2 text-sm font-semibold">{activeBotVisualSpec.title}</div>
-            <div className="mt-2 text-sm opacity-90">{activeBotVisualSpec.detail}</div>
-            <div className="mt-2 text-xs opacity-75">
-              Drag the chart left to open scenario space on the right, then zoom into the section you want to inspect.
-            </div>
-          </div>
-          <span className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${activeBotVisualSpec.badgeTone}`}>
-            {activeBotVisualSpec.badge}
-          </span>
-        </div>
-
-        {activeBotVisualSpec.legend.length > 0 ? (
-          <div className="mt-4 flex flex-wrap gap-2">
-            {activeBotVisualSpec.legend.map((item) => (
-              <span
-                key={item.key}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.16em]"
-              >
-                <span className={`h-2.5 w-2.5 rounded-full ${item.chipClass}`} />
-                {item.label}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
       <div className={`rounded-2xl border px-4 py-4 ${currentCandleSignalState.panelTone}`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1193,115 +1088,41 @@ export function CandlestickChart({
         </div>
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-3">
-          {SIGNAL_MODELS.map((model) => {
-            const analysis = modelAnalyses[model.id] || null
-            const isActive = model.id === activeSignalModelId
-            const tone = getModelTone(model, analysis, isActive)
-            const directionMeta = getModelDirectionMeta(model, analysis)
-            const stats = signalModelPerformance[model.id] || EMPTY_MODEL_STATS
-            const signalSlots = getSignalSlots(model, analysis)
-            const score = Number(analysis?.score || 0)
-            const maxScore = Number(analysis?.maxScore || model.totalSignals || 0)
-            const progressPercent = maxScore > 0 ? Math.max(0, Math.min(100, (score / maxScore) * 100)) : 0
-            const pnl = Number(stats.pnl || 0)
-            const pnlTone = pnl > 0 ? 'text-emerald-300' : pnl < 0 ? 'text-rose-300' : 'text-slate-300'
-            const hasProfessionalFilters = model.professionalSignalCount > 0 && analysis
-            const aiMeta = getAiStatusMeta(analysis?.aiAdvisory || null)
+      <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Chart Patterns Detected</div>
+          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+            {chartPatterns.length} found
+          </span>
+        </div>
 
-            return (
-              <div
-                key={model.id}
-                className={`rounded-2xl border px-4 py-3 backdrop-blur-md ${tone.card}`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">{model.name}</div>
-                    <div className="mt-1 truncate text-sm font-semibold text-white">{model.tag}</div>
-                  </div>
-                  <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${tone.badge}`}>
-                    {isActive ? 'Focus' : model.status}
-                  </span>
-                </div>
-
-                <div className="mt-3 flex items-center justify-between gap-3">
-                  <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${tone.badge}`}>
-                    <directionMeta.Icon className="h-3.5 w-3.5" />
-                    {directionMeta.label}
-                  </span>
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Live Score</div>
-                    <div className="mt-1 text-sm font-semibold text-white">
-                      {maxScore > 0 ? `${score}/${maxScore}` : '0/0'}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className={`h-full rounded-full transition-all ${tone.fill}`}
-                    style={{ width: `${progressPercent}%` }}
-                  />
-                </div>
-
-                <div
-                  className="mt-2 grid gap-1.5"
-                  style={{ gridTemplateColumns: `repeat(${signalSlots.length || 1}, minmax(0, 1fr))` }}
-                >
-                  {signalSlots.map((signal) => (
-                    <div
-                      key={signal.key}
-                      className={`h-1.5 rounded-full ${signal.passed ? tone.signalOn : tone.signalOff}`}
-                    />
-                  ))}
-                </div>
-
-                <div className="mt-3 text-xs text-slate-300">{getModelStatusLine(model, analysis)}</div>
-
-                <div className={`mt-3 rounded-xl border px-3 py-3 ${aiMeta.tone}`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-[10px] uppercase tracking-[0.18em] opacity-80">{aiMeta.label}</div>
-                    <div className="text-[11px] font-semibold">{aiMeta.score}</div>
-                  </div>
-                  <div className="mt-2 text-[11px] leading-5 opacity-90">{aiMeta.detail}</div>
-                  {analysis?.aiAdvisory?.policyLabel ? (
-                    <div className="mt-2 text-[10px] uppercase tracking-[0.16em] opacity-70">
-                      {analysis.aiAdvisory.policyLabel} • {analysis.aiAdvisory.datasetRows || 0} trained rows
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="mt-2 text-[11px] text-slate-500">Live bot status is shown above in direction and score. History shows the closed-trade win rate.</div>
-
-                <div className="mt-3 grid grid-cols-2 gap-3 text-[11px] uppercase tracking-[0.14em] text-slate-400">
-                  <div>
-                    <div>History</div>
-                    <div className="mt-1 text-slate-200">{formatWinRate(stats.winRate, stats.closedTrades)}</div>
-                  </div>
-                  <div className="text-right">
-                    <div>PnL</div>
-                    <div className={`mt-1 ${pnlTone}`}>{formatSignedUsdt(pnl)}</div>
-                  </div>
-                </div>
-
-                {hasProfessionalFilters ? (
-                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-400">
-                    <span>Professional filters</span>
-                    <span className="font-medium text-slate-200">
-                      {analysis.professionalSignalScore}/{model.professionalSignalCount}
+        {chartPatterns.length === 0 ? (
+          <div className="mt-3 text-sm text-slate-400">No recognised candlestick or chart pattern in the visible range.</div>
+        ) : (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {chartPatterns.map((pattern) => {
+              const tone = pattern.bias === 'bullish'
+                ? 'border-emerald-400/25 bg-emerald-400/[0.07] text-emerald-100'
+                : pattern.bias === 'bearish'
+                  ? 'border-rose-400/25 bg-rose-400/[0.07] text-rose-100'
+                  : 'border-sky-400/25 bg-sky-400/[0.07] text-sky-100'
+              return (
+                <div key={pattern.id} className={`rounded-xl border px-3 py-2.5 ${tone}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold">{pattern.name}</span>
+                    <span className="text-[10px] uppercase tracking-[0.18em] opacity-80">
+                      {pattern.bias} · {Math.round(pattern.confidence * 100)}%
                     </span>
                   </div>
-                ) : null}
-
-                {isActive && activeModelAnalysis?.ready && isFinitePrice(activeModelAnalysis.entryPrice) ? (
-                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-400">
-                    <span>Live entry</span>
-                    <span className="font-medium text-white">{formatPrice(activeModelAnalysis.entryPrice, 5)}</span>
+                  <div className="mt-1 text-[11px] uppercase tracking-[0.14em] opacity-70">
+                    {pattern.category === 'candlestick' ? 'Candlestick' : 'Chart pattern'}
                   </div>
-                ) : null}
-              </div>
-            )
-          })}
+                  <div className="mt-1 text-xs leading-5 opacity-90">{pattern.detail}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </Panel>
   )

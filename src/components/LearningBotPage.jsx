@@ -1,12 +1,48 @@
 import { useEffect, useState } from 'react'
 import { BrainCircuit, Cpu, Database, FlaskConical, GitBranch, Scale } from 'lucide-react'
+import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
 import {
   getLearningBotDataset,
   getLearningBotSummary,
   getLearningBotTrainStatus,
   startLearningBotTraining,
 } from '../lib/api'
+import { AIAdvisoryPanel } from './AIAdvisoryPanel'
+import { AIAssistantSidebar } from './AIAssistantSidebar'
+import { BacktestHistoryPanel } from './BacktestHistoryPanel'
+import { SignalInsightsPanel } from './SignalInsightsPanel'
 import { Panel } from './Panel'
+
+const AI_TRAINING_TABS = [
+  { to: '/ai-training', label: 'Training', end: true },
+  { to: '/ai-training/backtests', label: 'Backtests' },
+  { to: '/ai-training/insights', label: 'Signal Insights' },
+  { to: '/ai-training/advisory', label: 'AI Advisory' },
+  { to: '/ai-training/assistant', label: 'AI Assistant' },
+]
+
+function AITrainingTabs() {
+  return (
+    <nav className="flex flex-wrap gap-2 border-b border-white/10 pb-4">
+      {AI_TRAINING_TABS.map((tab) => (
+        <NavLink
+          key={tab.to}
+          to={tab.to}
+          end={tab.end}
+          className={({ isActive }) =>
+            `rounded-full px-4 py-2 text-sm font-medium transition ${
+              isActive
+                ? 'bg-sky-400 text-slate-950'
+                : 'border border-white/10 bg-slate-950/60 text-slate-300 hover:border-white/20'
+            }`
+          }
+        >
+          {tab.label}
+        </NavLink>
+      ))}
+    </nav>
+  )
+}
 
 const BOT_LABELS = {
   'model-1': 'Bot 1',
@@ -227,7 +263,17 @@ function getAiGateModeLabel({ enabled, paperOnly }) {
   return paperOnly ? 'Paper Only' : 'Hard Block'
 }
 
-export function LearningBotPage({ settings, onSave, saving = false, ready = false, runtimeProfile = 'workstation' }) {
+export function LearningBotPage({
+  settings,
+  onSave,
+  saving = false,
+  ready = false,
+  runtimeProfile = 'workstation',
+  analysis = null,
+  activeSignalModelId = null,
+  activeModelRiskSummary = '',
+  modelChecklistAnalysis = null,
+}) {
   const [form, setForm] = useState(() => toFormState(settings?.learningBot))
   const [summary, setSummary] = useState(null)
   const [dataset, setDataset] = useState(null)
@@ -349,7 +395,7 @@ export function LearningBotPage({ settings, onSave, saving = false, ready = fals
       ? `Last successful training finished ${formatLearningRelativeTime(latestLearningUpdatedAt)}.`
       : 'The page has not recorded a successful learned model update yet.'
 
-  return (
+  const trainingMain = (
     <div className="grid gap-6">
       <section className="rounded-[32px] border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_24%),rgba(15,23,42,0.9)] p-6 shadow-glow backdrop-blur-xl">
         <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-sky-100">
@@ -358,11 +404,14 @@ export function LearningBotPage({ settings, onSave, saving = false, ready = fals
         </div>
         <h1 className="mt-4 text-3xl font-semibold text-white">PyTorch training for the Learning Bot</h1>
         <p className="mt-4 max-w-4xl text-sm leading-7 text-slate-300">
-          This workspace now exports closed trades into an AI dataset, keeps trainer config separate from the live bots,
-          and can launch a Python trainer when a working runtime is available.
+          The trainer now learns from two sources at once: every closed live/paper trade, and the historical
+          <span className="text-white"> backtest runs you flag for training</span> on the Backtests tab. It retrains
+          after each new closed trade, so live activity keeps the policy fresh on its own.
         </p>
         <div className="mt-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-100">
-          AI training is server-native here now. The old download/upload sync workflow has been removed, so this page manages training directly on this machine.
+          The trained artifact drives the live AI entry filter — per bot it scores each candidate against the
+          historical expectancy of that setup family and can hard-block weak entries (see Live AI Gate below).
+          Real-money trading stays locked until {realMoneyTradeTarget} reviewed trades.
         </div>
         <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Stat label="Reviewed Trades" value={String(eligibleClosedTradeCount || 0)} detail={`${realMoneyTradesRemaining} until ${realMoneyTradeTarget} real-money signal`} />
@@ -579,9 +628,9 @@ export function LearningBotPage({ settings, onSave, saving = false, ready = fals
 
       <Panel title="Architecture" action={<GitBranch className="h-4 w-4 text-sky-300" />}>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5 text-sm text-slate-300">Trade history becomes an AI dataset with state, reward, and setup labels.</div>
+          <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5 text-sm text-slate-300">Live closed trades plus flagged backtest runs become one AI dataset with state, reward, and setup-family labels.</div>
           <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5 text-sm text-slate-300">PyTorch training stays separate from live bot execution and saves its own status/artifacts.</div>
-          <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5 text-sm text-slate-300">AI output is review-first and can later become a paper-trading filter.</div>
+          <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5 text-sm text-slate-300">The trained policy runs live as the AI entry filter — scoring candidates and, per bot, hard-blocking weak setups.</div>
         </div>
       </Panel>
 
@@ -709,9 +758,9 @@ export function LearningBotPage({ settings, onSave, saving = false, ready = fals
 
         <Panel title="Learning Loop" action={<Scale className="h-4 w-4 text-sky-300" />}>
           <div className="space-y-3 text-sm text-slate-300">
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">1. Export closed trades into a structured AI dataset.</div>
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">2. Train a PyTorch model with reward based on pnl and risk.</div>
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">3. Compare AI behavior against rule-based review before paper rollout.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">1. Merge live closed trades + flagged backtest runs into one structured AI dataset.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">2. Retrain the PyTorch policy (reward = pnl − risk + entry quality) after each new closed trade.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">3. The policy scores live entries; per-bot gates hard-block families with losing historical expectancy.</div>
           </div>
         </Panel>
       </div>
@@ -730,14 +779,38 @@ export function LearningBotPage({ settings, onSave, saving = false, ready = fals
 
         <Panel title="Roadmap" action={<FlaskConical className="h-4 w-4 text-sky-300" />}>
           <div className="space-y-3 text-sm text-slate-300">
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">Offline AI training first.</div>
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">AI score as a trade filter next.</div>
-            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">Paper-mode validation before any live use.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">Now: iterate signals, backtest each, feed the good runs into training.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">Next: a setup family clears the "works" bar in Signal Insights on both live and backtest data.</div>
+            <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">Then: {realMoneyTradeTarget} reviewed trades reached → real-money gate opens for review.</div>
           </div>
         </Panel>
       </div>
 
       {error ? <div className="rounded-3xl border border-rose-400/20 bg-rose-400/10 px-5 py-4 text-sm text-rose-200">{error}</div> : null}
+    </div>
+  )
+
+  return (
+    <div className="grid gap-6">
+      <AITrainingTabs />
+      <Routes>
+        <Route index element={trainingMain} />
+        <Route path="backtests" element={<BacktestHistoryPanel />} />
+        <Route path="insights" element={<SignalInsightsPanel />} />
+        <Route path="advisory" element={<AIAdvisoryPanel analysis={analysis} />} />
+        <Route
+          path="assistant"
+          element={(
+            <AIAssistantSidebar
+              analysis={analysis}
+              activeSignalModelId={activeSignalModelId}
+              activeModelRiskSummary={activeModelRiskSummary}
+              modelChecklistAnalysis={modelChecklistAnalysis}
+            />
+          )}
+        />
+        <Route path="*" element={<Navigate to="/ai-training" replace />} />
+      </Routes>
     </div>
   )
 }

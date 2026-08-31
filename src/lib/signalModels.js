@@ -140,33 +140,38 @@ const model4Signals = [
   },
 ]
 
+
 export const DEFAULT_BOT3_RISK_PRESET_ID = 'bot3-20'
+// Risk profiles tightened 2026-08-31 to cap the loss side: lower leverage,
+// tighter stops, and much smaller daily-loss / loss-count ceilings so a bad
+// day can't erase the room to recover. The AI entry filter (hard-block for
+// bots 1-3) skips setup families each bot has historically lost on.
 export const DEFAULT_BOT1_SETTINGS = {
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   marginMode: DEFAULT_MARGIN_MODE,
   marginPerTrade: 100,
-  leverage: 10,
-  maxOpenPositions: 2,
-  stopLossPercent: 1,
-  takeProfitPercent: 1.2,
-  maxTradesPerDay: 12,
-  maxLossesPerDay: 5,
-  maxLossPerDay: 50,
-  dailyProfitTarget: 500,
+  leverage: 8,
+  maxOpenPositions: 1,
+  stopLossPercent: 0.6,
+  takeProfitPercent: 1,
+  maxTradesPerDay: 6,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 18,
+  dailyProfitTarget: 60,
 }
 
 export const DEFAULT_BOT2_SETTINGS = {
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   marginMode: DEFAULT_MARGIN_MODE,
   marginPerTrade: 120,
-  leverage: 20,
+  leverage: 12,
   maxOpenPositions: 1,
-  stopLossPercent: 0.9,
-  takeProfitPercent: 1.4,
-  maxTradesPerDay: 8,
-  maxLossesPerDay: 4,
-  maxLossPerDay: 60,
-  dailyProfitTarget: 500,
+  stopLossPercent: 0.55,
+  takeProfitPercent: 1.1,
+  maxTradesPerDay: 5,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 18,
+  dailyProfitTarget: 60,
 }
 
 export const DEFAULT_BOT4_MOMENTUM_SETTINGS = {
@@ -174,14 +179,15 @@ export const DEFAULT_BOT4_MOMENTUM_SETTINGS = {
   marginMode: DEFAULT_MARGIN_MODE,
   marginPerTrade: 10,
   leverage: 50,
-  maxOpenPositions: 3,
+  maxOpenPositions: 2,
   stopLossPercent: 0.2,
   takeProfitPercent: 0.4,
-  maxTradesPerDay: 40,
-  maxLossesPerDay: 40,
-  maxLossPerDay: 40,
+  maxTradesPerDay: 25,
+  maxLossesPerDay: 15,
+  maxLossPerDay: 15,
   dailyProfitTarget: 50,
 }
+
 
 const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-1': DEFAULT_BOT1_SETTINGS,
@@ -194,15 +200,15 @@ export const BOT3_RISK_PRESETS = [
     id: DEFAULT_BOT3_RISK_PRESET_ID,
     name: '20 USDT Profit',
     tag: 'Current',
-    description: 'Keeps Bot 3 on its current balance-risk profile. On a 1,000 USDT wallet, a full 2R winner is roughly 20 USDT before fees.',
+    description: 'Bot 3 balance-risk profile, loss-capped for AI training. On a 1,000 USDT wallet a full 2R winner is roughly 15 USDT before fees.',
     mode: 'balance-risk',
-    riskPerTradePercent: 1,
-    suggestedRiskFloorPercent: 1,
-    suggestedRiskCeilingPercent: 1,
-    maxLossesPerDay: 5,
-    dailyMaxLossPercent: 5,
+    riskPerTradePercent: 0.75,
+    suggestedRiskFloorPercent: 0.75,
+    suggestedRiskCeilingPercent: 0.75,
+    maxLossesPerDay: 3,
+    dailyMaxLossPercent: 2,
     estimatedStopLossPercent: 1,
-    summary: 'Bot 3 risks 1% of running balance per trade, stops after 5 losing trades, and caps the day at 5% loss during AI training.',
+    summary: 'Bot 3 risks 0.75% of running balance per trade, stops after 3 losing trades, and caps the day at 2% loss.',
   },
   {
     id: 'bot3-10',

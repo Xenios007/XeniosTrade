@@ -1,6 +1,9 @@
+import { useEffect, useState } from 'react'
 import { BellRing, CheckCircle2, Clock3, ClipboardList, ShieldAlert } from 'lucide-react'
 import { formatDateTimeWithSeconds } from '../lib/formatters'
 import { Panel } from './Panel'
+
+const REVIEW_LOG_PAGE_SIZE = 8
 
 function getNotificationTone(level) {
   if (level === 'success') {
@@ -42,10 +45,9 @@ function getStatusLabel(status) {
   return 'Pending'
 }
 
-export function WorkflowReadinessPanel({ workflow }) {
+export function WorkflowNotificationsPanel({ workflow }) {
   const phases = workflow?.phases || []
   const notifications = workflow?.notifications || []
-  const reviewLog = workflow?.reviewLog || []
 
   return (
     <Panel title="Workflow Notifications" action={<BellRing className="h-4 w-4 text-sky-300" />}>
@@ -107,34 +109,89 @@ export function WorkflowReadinessPanel({ workflow }) {
             </div>
           ))}
         </div>
-
-        <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
-          <div className="mb-4 flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-slate-500">
-            <ClipboardList className="h-4 w-4" />
-            Self-Review Log
-          </div>
-          {reviewLog.length === 0 ? (
-            <div className="text-sm text-slate-400">No review entries yet.</div>
-          ) : (
-            <div className="space-y-3">
-              {reviewLog.slice(0, 5).map((entry) => (
-                <div key={entry.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-white">{entry.headline}</div>
-                      <div className="mt-1 text-sm text-slate-300">{entry.summary}</div>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-                      <Clock3 className="h-3.5 w-3.5" />
-                      {formatDateTimeWithSeconds(entry.timestamp)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
     </Panel>
+  )
+}
+
+export function SelfReviewLogPanel({ workflow }) {
+  const reviewLog = workflow?.reviewLog || []
+  const [currentPage, setCurrentPage] = useState(1)
+  const totalPages = Math.max(1, Math.ceil(reviewLog.length / REVIEW_LOG_PAGE_SIZE))
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, totalPages))
+  }, [totalPages])
+
+  const pageStartIndex = (currentPage - 1) * REVIEW_LOG_PAGE_SIZE
+  const pageEndIndex = Math.min(pageStartIndex + REVIEW_LOG_PAGE_SIZE, reviewLog.length)
+  const pageEntries = reviewLog.slice(pageStartIndex, pageEndIndex)
+
+  return (
+    <Panel title="Self-Review Log" action={<ClipboardList className="h-4 w-4 text-sky-300" />}>
+      {reviewLog.length === 0 ? (
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
+          No review entries yet.
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+            <div>
+              Showing <span className="font-semibold text-white">{pageStartIndex + 1}-{pageEndIndex}</span> of{' '}
+              <span className="font-semibold text-white">{reviewLog.length}</span> entries
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                disabled={currentPage <= 1}
+                className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <div className="min-w-[5.5rem] text-center text-xs uppercase tracking-[0.16em] text-slate-400">
+                Page {currentPage} / {totalPages}
+              </div>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                disabled={currentPage >= totalPages}
+                className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-3">
+            {pageEntries.map((entry) => (
+              <div key={entry.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-white">{entry.headline}</div>
+                    <div className="mt-1 text-sm text-slate-300">{entry.summary}</div>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                    <Clock3 className="h-3.5 w-3.5" />
+                    {formatDateTimeWithSeconds(entry.timestamp)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Panel>
+  )
+}
+
+// Combined view kept for callers that still want notifications, phases, and the
+// review log stacked together.
+export function WorkflowReadinessPanel({ workflow }) {
+  return (
+    <div className="grid gap-6">
+      <WorkflowNotificationsPanel workflow={workflow} />
+      <SelfReviewLogPanel workflow={workflow} />
+    </div>
   )
 }

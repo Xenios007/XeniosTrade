@@ -3,25 +3,29 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { LoaderCircle, LockKeyhole } from 'lucide-react'
 import { AppShell } from './components/shell/AppShell'
 import { BrandMark } from './components/BrandMark'
+import { CodexConsole } from './components/CodexConsole'
 import { DashboardKpis } from './components/DashboardKpis'
 import { PageHeader } from './components/ui/PageHeader'
+import { SubNavTabs } from './components/ui/SubNavTabs'
 import { useToast } from './components/ui/Toast'
 import { DEFAULT_PATH, resolveInitialPath } from './components/shell/navItems'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
-import { JournalSummaryPage } from './components/JournalSummaryPage'
+import { BotStatusGrid } from './components/BotStatusGrid'
+import { ProExitStrategy } from './components/ProExitStrategy'
+import { JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
 import { MockTradingPage } from './components/MockTradingPage'
 import { SettingsPage } from './components/SettingsPage'
-import { SidebarMarketList } from './components/SidebarMarketList'
 import { StatsBar } from './components/StatsBar'
 import { TradeHistoryStatsPanel } from './components/TradeHistoryStatsPanel'
 import { TradeHistoryTable } from './components/TradeHistoryTable'
 import { WalletsPage } from './components/WalletsPage'
-import { WorkflowReadinessPanel } from './components/WorkflowReadinessPanel'
+import { SelfReviewLogPanel, WorkflowNotificationsPanel } from './components/WorkflowReadinessPanel'
 import { getKlines, getSignalModelAnalysis, getVolatileMarkets } from './lib/api'
 import { getStrategyDerivedMaxLossPerTrade, isTradeClosed, summarizeAccount } from './lib/accountMetrics'
 import { formatPrice } from './lib/formatters'
+import { detectChartPatterns } from './lib/chartPatterns'
 import { calculateBollingerBands, calculateEMA, calculateMACD, calculateRSI, calculateSMA } from './lib/indicators'
 import { DEFAULT_MARGIN_MODE } from './lib/marginModes'
 import {
@@ -147,6 +151,19 @@ const DEFAULT_WORKFLOW = {
   reviewLog: [],
 }
 const CURRENT_PAGE_STORAGE_KEY = 'xeniostrade:current-page'
+const JOURNAL_TABS = [
+  { to: '/journal', label: 'Summary', end: true },
+  { to: '/journal/head-to-head', label: 'Head to Head' },
+  { to: '/journal/wallet', label: 'Wallet Journal' },
+]
+const DASHBOARD_TABS = [
+  { to: '/dashboard', label: 'Overview', end: true },
+  { to: '/dashboard/market', label: 'Market' },
+  { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
+  { to: '/dashboard/workflow', label: 'Workflow Notifications' },
+  { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
+  { to: '/dashboard/codex', label: 'Codex Console' },
+]
 const DEFAULT_AI_TRAINING_STATUS = {
   running: false,
   lastRunAt: null,
@@ -321,10 +338,6 @@ export default function App() {
   const [autoTradePhase, setAutoTradePhase] = useState('idle')
   const [autoTradeFeedback, setAutoTradeFeedback] = useState(null)
   const [closingTradeIds, setClosingTradeIds] = useState({})
-  const [dashboardTradeReview, setDashboardTradeReview] = useState(null)
-  const [dashboardTradeReviewLoading, setDashboardTradeReviewLoading] = useState(false)
-  const [dashboardTradeReviewError, setDashboardTradeReviewError] = useState('')
-  const [dashboardTradeActionLoading, setDashboardTradeActionLoading] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -796,6 +809,7 @@ export default function App() {
       symbol: selectedSymbol,
     })
   ), [chartData, indicators, selectedSymbol])
+  const chartPatternResult = useMemo(() => detectChartPatterns(chartData), [chartData])
 
   useEffect(() => {
     if (authState !== AUTH_STATE_AUTHENTICATED) {
@@ -807,6 +821,12 @@ export default function App() {
       setSignalModelAnalyses({})
       return undefined
     }
+
+    // Drop the previous symbol's analyses right away so panels fed by them
+    // (AI Assistant, Pro Exit Strategy, bot status) fall back to the live
+    // signalAnalysis for the new symbol instead of showing stale data until
+    // the refetch resolves.
+    setSignalModelAnalyses({})
 
     let closedByEffect = false
 
@@ -869,47 +889,6 @@ export default function App() {
     () => getEffectiveSignalModelStrategy(settings.strategy, settings.strategy.activeSignalModelId),
     [settings.strategy],
   )
-  const dashboardTradeAnalysis = sidebarModelAnalysis || signalAnalysis
-  const dashboardConfirmedSignals = useMemo(() => {
-    const checklist = Array.isArray(sidebarModelAnalysis?.checklist)
-      ? sidebarModelAnalysis.checklist
-      : Array.isArray(signalAnalysis?.reasons)
-        ? signalAnalysis.reasons
-        : []
-
-    return checklist
-      .filter((item) => item?.passed)
-      .map((item) => ({
-        label: item.label || item.key || 'Signal',
-        detail: item.detail || '',
-      }))
-  }, [sidebarModelAnalysis, signalAnalysis])
-  const dashboardPendingSignals = useMemo(() => {
-    const checklist = Array.isArray(sidebarModelAnalysis?.checklist)
-      ? sidebarModelAnalysis.checklist
-      : Array.isArray(signalAnalysis?.reasons)
-        ? signalAnalysis.reasons
-        : []
-
-    return checklist
-      .filter((item) => !item?.passed)
-      .map((item) => ({
-        label: item.label || item.key || 'Signal',
-        detail: item.detail || '',
-      }))
-  }, [sidebarModelAnalysis, signalAnalysis])
-  const selectedSymbolOpenTrade = useMemo(
-    () => tradeHistory.find((trade) => trade.symbol === selectedSymbol && trade.status === 'OPEN') || null,
-    [selectedSymbol, tradeHistory],
-  )
-
-  useEffect(() => {
-    setDashboardTradeReview(null)
-    setDashboardTradeReviewError('')
-    setDashboardTradeReviewLoading(false)
-    setDashboardTradeActionLoading('')
-  }, [interval, selectedSymbol, settings.strategy.activeSignalModelId])
-
   const latestAutoOrder = useMemo(() => {
     const latestFromLog = autoTradeLog.find((entry) => entry.result?.order)?.result.order
     if (latestFromLog) {
@@ -1236,251 +1215,6 @@ export default function App() {
     }
   }
 
-  async function handleRequestDashboardTradeReview() {
-    if (dashboardTradeReviewLoading) {
-      return
-    }
-
-    setDashboardTradeReviewLoading(true)
-    setDashboardTradeReviewError('')
-    setDashboardTradeReview(null)
-
-    try {
-      const payload = await postJsonResource('/api/dashboard-trade-review', {
-        symbol: selectedSymbol,
-        interval,
-        activeSignalModelId: settings.strategy.activeSignalModelId,
-        activeSignalModelName: activeSignalModel.name,
-        activeModelRiskSummary: activeModelStrategy.riskProfile?.summary || '',
-        marketSnapshot: {
-          lastPrice: Number(selectedMarket?.lastPrice || dashboardTradeAnalysis.entryPrice || 0) || null,
-          priceChangePercent: Number(selectedMarket?.priceChangePercent || 0) || 0,
-          quoteVolume: Number(selectedMarket?.quoteVolume || 0) || 0,
-        },
-        analysis: {
-          direction: dashboardTradeAnalysis.direction,
-          checklistSide: dashboardTradeAnalysis.checklistSide,
-          summary: dashboardTradeAnalysis.summary,
-          entryPrice: dashboardTradeAnalysis.entryPrice,
-          stopLoss: dashboardTradeAnalysis.stopLoss,
-          takeProfit: dashboardTradeAnalysis.takeProfit,
-          support: dashboardTradeAnalysis.support,
-          resistance: dashboardTradeAnalysis.resistance,
-          confidence: dashboardTradeAnalysis.confidence,
-        },
-        confirmedSignals: dashboardConfirmedSignals,
-        pendingSignals: dashboardPendingSignals,
-      })
-
-      setDashboardTradeReview(payload.review || null)
-      setError('')
-    } catch (reviewError) {
-      setDashboardTradeReview(null)
-      setDashboardTradeReviewError(reviewError instanceof Error ? reviewError.message : 'Unable to get ChatGPT review for this trade.')
-    } finally {
-      setDashboardTradeReviewLoading(false)
-    }
-  }
-
-  async function handleDashboardTradeConfirmation(side) {
-    if (!dashboardTradeReview || dashboardTradeReview.verdict !== 'positive') {
-      return
-    }
-
-    setDashboardTradeActionLoading(side)
-    setDashboardTradeReviewError('')
-
-    try {
-      const entryPrice = Number(
-        dashboardTradeReview.suggestedEntryPrice
-        || dashboardTradeAnalysis.entryPrice
-        || selectedMarket?.lastPrice
-        || 0
-      )
-      const stopLoss = Number(dashboardTradeReview.suggestedStopLossPrice || dashboardTradeAnalysis.stopLoss || 0)
-      const takeProfit = Number(
-        dashboardTradeReview.suggestedTakeProfitPrice
-        || dashboardTradeReview.earlierExitPrice
-        || dashboardTradeAnalysis.takeProfit
-        || 0
-      )
-      const margin = Number(activeModelStrategy.marginPerTrade || settings.strategy.marginPerTrade || 0)
-      const leverage = Number(activeModelStrategy.leverage || settings.strategy.leverage || 1)
-      const notional = Math.max(margin * leverage, entryPrice)
-
-      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-        throw new Error('ChatGPT did not return a valid entry price for this trade.')
-      }
-
-      if (!Number.isFinite(stopLoss) || stopLoss <= 0) {
-        throw new Error('A valid stop-loss price is required before opening a manual dashboard trade.')
-      }
-
-      if (!Number.isFinite(takeProfit) || takeProfit <= 0) {
-        throw new Error('A valid take-profit price is required before opening a manual dashboard trade.')
-      }
-
-      const payload = await postJsonResource('/api/mock-order', {
-        symbol: selectedSymbol,
-        side,
-        quantity: 1,
-        entryPrice,
-        stopLoss,
-        takeProfit,
-        notional,
-        margin,
-        leverage,
-        configuredStopLossPercent: activeModelStrategy.stopLossPercent ?? settings.strategy.stopLossPercent,
-        source: 'DASHBOARD_MANUAL',
-        signalSummary: [
-          `Dashboard manual review for ${selectedSymbol} ${side}.`,
-          dashboardTradeReview.summary,
-          ...dashboardTradeReview.reasoning,
-        ].filter(Boolean).join(' '),
-        signalModelId: settings.strategy.activeSignalModelId,
-        signalModelName: activeSignalModel.name,
-        aiReview: dashboardTradeReview,
-      })
-
-      if (payload.order) {
-        handleTradeRecorded(payload.order, payload.mode || tradingMode)
-      }
-    } catch (tradeError) {
-      setDashboardTradeReviewError(tradeError instanceof Error ? tradeError.message : 'Unable to place the dashboard manual trade.')
-    } finally {
-      setDashboardTradeActionLoading('')
-    }
-  }
-
-  async function handleDashboardTakeProfitExit() {
-    if (!selectedSymbolOpenTrade) {
-      return
-    }
-
-    setDashboardTradeActionLoading('take-profit')
-    setDashboardTradeReviewError('')
-
-    try {
-      await handleManualCloseTrade(selectedSymbolOpenTrade.id)
-    } finally {
-      setDashboardTradeActionLoading('')
-    }
-  }
-
-  function renderDashboardTradeReviewPanel() {
-    const hasPositiveVerdict = dashboardTradeReview?.verdict === 'positive'
-    const suggestedEntryPrice = Number(dashboardTradeReview?.suggestedEntryPrice || dashboardTradeAnalysis.entryPrice || 0)
-    const suggestedTakeProfitPrice = Number(
-      dashboardTradeReview?.suggestedTakeProfitPrice
-      || dashboardTradeReview?.earlierExitPrice
-      || dashboardTradeAnalysis.takeProfit
-      || 0
-    )
-    const suggestedStopLossPrice = Number(dashboardTradeReview?.suggestedStopLossPrice || dashboardTradeAnalysis.stopLoss || 0)
-
-    return (
-      <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.96),rgba(15,23,42,0.82))] px-5 py-5 shadow-[0_20px_50px_rgba(2,6,23,0.28)]">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Manual Trade With ChatGPT</div>
-            <div className="mt-2 text-sm text-slate-300">This is the dashboard-only manual trade function. Send the current {selectedSymbol} setup, confirmed signals, and active model context to ChatGPT before deciding whether to continue manually.</div>
-          </div>
-          <button
-            type="button"
-            onClick={handleRequestDashboardTradeReview}
-            disabled={dashboardTradeReviewLoading}
-            className="rounded-full border border-sky-400/30 bg-sky-400/12 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-400/18 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {dashboardTradeReviewLoading ? 'Sending...' : 'Review Current Trade'}
-          </button>
-        </div>
-
-        {dashboardTradeReviewError ? (
-          <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
-            {dashboardTradeReviewError}
-          </div>
-        ) : null}
-
-        {dashboardTradeReview ? (
-          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">ChatGPT Response</div>
-                <div className="mt-2 text-lg font-semibold text-white">
-                  {hasPositiveVerdict ? 'Positive manual-trade opinion' : 'Negative manual-trade opinion'}
-                </div>
-                <div className="mt-2 text-sm leading-6 text-slate-300">{dashboardTradeReview.summary}</div>
-              </div>
-              <div className={`rounded-2xl border px-3 py-2 text-right ${hasPositiveVerdict ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100' : 'border-rose-400/20 bg-rose-400/10 text-rose-100'}`}>
-                <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">Verdict</div>
-                <div className="mt-1 text-lg font-semibold">{dashboardTradeReview.direction}</div>
-                <div className="mt-1 text-xs opacity-80">{dashboardTradeReview.confidence}% confidence</div>
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Suggested Entry</div>
-                <div className="mt-2 text-base font-semibold text-white">{suggestedEntryPrice > 0 ? formatPrice(suggestedEntryPrice, 5) : 'Wait'}</div>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Suggested TP</div>
-                <div className="mt-2 text-base font-semibold text-white">{suggestedTakeProfitPrice > 0 ? formatPrice(suggestedTakeProfitPrice, 5) : 'Wait'}</div>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Suggested SL</div>
-                <div className="mt-2 text-base font-semibold text-white">{suggestedStopLossPrice > 0 ? formatPrice(suggestedStopLossPrice, 5) : 'Wait'}</div>
-              </div>
-            </div>
-
-            {dashboardTradeReview.reasoning?.length ? (
-              <div className="mt-4 space-y-2">
-                {dashboardTradeReview.reasoning.map((item, index) => (
-                  <div key={`${item}-${index}`} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300">
-                    {item}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {hasPositiveVerdict ? (
-              <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => handleDashboardTradeConfirmation('LONG')}
-                  disabled={dashboardTradeActionLoading !== ''}
-                  className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] transition ${dashboardTradeReview.direction === 'LONG' ? 'bg-emerald-400 text-slate-950' : 'border border-emerald-400/30 bg-emerald-400/10 text-emerald-100'} disabled:cursor-not-allowed disabled:opacity-60`}
-                >
-                  {dashboardTradeActionLoading === 'LONG' ? 'Opening Long...' : `Confirm Long ${suggestedEntryPrice > 0 ? `@ ${formatPrice(suggestedEntryPrice, 5)}` : ''}`}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDashboardTradeConfirmation('SHORT')}
-                  disabled={dashboardTradeActionLoading !== ''}
-                  className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] transition ${dashboardTradeReview.direction === 'SHORT' ? 'bg-rose-400 text-slate-950' : 'border border-rose-400/30 bg-rose-400/10 text-rose-100'} disabled:cursor-not-allowed disabled:opacity-60`}
-                >
-                  {dashboardTradeActionLoading === 'SHORT' ? 'Opening Short...' : `Confirm Short ${suggestedEntryPrice > 0 ? `@ ${formatPrice(suggestedEntryPrice, 5)}` : ''}`}
-                </button>
-                {selectedSymbolOpenTrade ? (
-                  <button
-                    type="button"
-                    onClick={handleDashboardTakeProfitExit}
-                    disabled={dashboardTradeActionLoading !== '' || Boolean(closingTradeIds[selectedSymbolOpenTrade.id])}
-                    className="rounded-full border border-amber-400/30 bg-amber-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-amber-100 transition disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {dashboardTradeActionLoading === 'take-profit' || closingTradeIds[selectedSymbolOpenTrade.id]
-                      ? 'Taking Profit...'
-                      : `TP / Early Exit${suggestedTakeProfitPrice > 0 ? ` @ ${formatPrice(suggestedTakeProfitPrice, 5)}` : ''}`}
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-    )
-  }
-
   async function handleSaveSettings(nextSettings) {
     if (!hasLoadedSettingsRef.current) {
       const message = 'Unable to save settings until the latest backend settings have loaded.'
@@ -1667,62 +1401,97 @@ export default function App() {
     }
   }
 
-  function renderDashboard() {
+  function renderDashboardOverview() {
     return (
       <>
-        <PageHeader
-          title="Dashboard"
-          description="Live market, model signal, and automation status for the selected pair."
-        />
         <DashboardKpis account={accountSummary} autoTradeStatus={autoTradeStatus} />
 
-        <div className="grid gap-6 2xl:grid-cols-[320px_minmax(0,1fr)_360px]">
-          <aside>
-            <SidebarMarketList
-              markets={markets}
-              selectedSymbol={selectedSymbol}
-              onSelectSymbol={setSelectedSymbol}
-            />
-          </aside>
+        <BotStatusGrid
+          modelAnalyses={signalModelAnalyses}
+          signalModelPerformance={signalModelPerformance}
+          activeSignalModelId={settings.strategy.activeSignalModelId}
+          activeModelAnalysis={sidebarModelAnalysis}
+        />
+      </>
+    )
+  }
 
-        <section className="grid gap-6">
-          <Suspense fallback={<ChartPanelFallback />}>
-            <CandlestickChart
-              data={chartData}
-              indicators={indicators}
-              indicatorVisibility={indicatorVisibility}
-              symbol={selectedSymbol}
-              interval={interval}
-              activeSignalModelId={settings.strategy.activeSignalModelId}
-              modelAnalyses={signalModelAnalyses}
-              signalModelPerformance={signalModelPerformance}
-              loading={loading}
-              onChangeInterval={setInterval}
-              onToggleIndicator={toggleIndicator}
-              footerContent={renderDashboardTradeReviewPanel()}
-            />
-          </Suspense>
+  function renderDashboardMarket() {
+    return (
+      <div className="grid gap-6">
+        <StatsBar
+          market={selectedMarket}
+          markets={markets}
+          selectedSymbol={selectedSymbol}
+          onSelectSymbol={setSelectedSymbol}
+          signalModels={SIGNAL_MODELS}
+          activeSignalModelId={settings.strategy.activeSignalModelId}
+          onSelectSignalModel={handleSelectSignalModel}
+          switchingSignalModel={switchingSignalModel}
+        />
 
-          <StatsBar market={selectedMarket} />
-          <AutoTradeStatusPanel
-            autoTradeStatus={autoTradeStatus}
-            autoTradePhase={autoTradePhase}
-            trackedSymbols={settings.strategy.preferredSymbols}
-            latestAutoOrder={latestAutoOrder}
-          />
-          <WorkflowReadinessPanel workflow={workflow} />
-        </section>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
+          <section className="grid gap-6">
+            <Suspense fallback={<ChartPanelFallback />}>
+              <CandlestickChart
+                data={chartData}
+                indicators={indicators}
+                indicatorVisibility={indicatorVisibility}
+                symbol={selectedSymbol}
+                interval={interval}
+                activeSignalModelId={settings.strategy.activeSignalModelId}
+                modelAnalyses={signalModelAnalyses}
+                signalModelPerformance={signalModelPerformance}
+                loading={loading}
+                onChangeInterval={setInterval}
+                onToggleIndicator={toggleIndicator}
+                chartPatterns={chartPatternResult.patterns}
+              />
+            </Suspense>
 
-        <aside>
+            <ProExitStrategy analysis={sidebarModelAnalysis || signalAnalysis} />
+          </section>
+
           <AIAssistantSidebar
             analysis={sidebarModelAnalysis || signalAnalysis}
             activeSignalModelId={settings.strategy.activeSignalModelId}
             activeModelRiskSummary={activeModelStrategy.riskProfile?.summary || ''}
             modelChecklistAnalysis={sidebarModelAnalysis}
+            chartPatternSummary={chartPatternResult.summary}
           />
-          </aside>
         </div>
-      </>
+      </div>
+    )
+  }
+
+  function renderDashboard() {
+    return (
+      <div className="grid gap-6">
+        <PageHeader
+          title="Dashboard"
+          description="Live market and model signal for the selected pair, plus automation status, workflow, and the Codex console."
+        />
+        <SubNavTabs tabs={DASHBOARD_TABS} />
+        <Routes>
+          <Route index element={renderDashboardOverview()} />
+          <Route path="market" element={renderDashboardMarket()} />
+          <Route
+            path="auto-trade-status"
+            element={(
+              <AutoTradeStatusPanel
+                autoTradeStatus={autoTradeStatus}
+                autoTradePhase={autoTradePhase}
+                trackedSymbols={settings.strategy.preferredSymbols}
+                latestAutoOrder={latestAutoOrder}
+              />
+            )}
+          />
+          <Route path="workflow" element={<WorkflowNotificationsPanel workflow={workflow} />} />
+          <Route path="self-review-log" element={<SelfReviewLogPanel workflow={workflow} />} />
+          <Route path="codex" element={<CodexConsole />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </div>
     )
   }
 
@@ -1740,14 +1509,7 @@ export default function App() {
         switchingSignalModel={switchingSignalModel}
         tradingMode={tradingMode}
         autoTradePhase={autoTradePhase}
-      >
-        <AIAssistantSidebar
-          analysis={sidebarModelAnalysis || signalAnalysis}
-          activeSignalModelId={settings.strategy.activeSignalModelId}
-          activeModelRiskSummary={activeModelStrategy.riskProfile?.summary || ''}
-          modelChecklistAnalysis={sidebarModelAnalysis}
-        />
-      </MockTradingPage>
+      />
     )
   }
 
@@ -1759,6 +1521,10 @@ export default function App() {
         saving={savingSettings}
         ready={hasLoadedSettingsRef.current}
         runtimeProfile={runtimeProfile}
+        analysis={sidebarModelAnalysis || signalAnalysis}
+        activeSignalModelId={settings.strategy.activeSignalModelId}
+        activeModelRiskSummary={activeModelStrategy.riskProfile?.summary || ''}
+        modelChecklistAnalysis={sidebarModelAnalysis}
       />
     )
   }
@@ -1785,14 +1551,26 @@ export default function App() {
   }
 
   function renderJournal() {
+    const journalProps = {
+      data: journalSummary,
+      trades: tradeHistory,
+      livePrices: liveTradePrices,
+      wallets: settings.wallets,
+    }
+
     return (
       <div className="grid gap-6">
-        <JournalSummaryPage
-          data={journalSummary}
-          trades={tradeHistory}
-          livePrices={liveTradePrices}
-          wallets={settings.wallets}
+        <PageHeader
+          title="Journal"
+          description="Combined performance across wallets 1-4, the head-to-head comparison, and the per-wallet trade calendar."
         />
+        <SubNavTabs tabs={JOURNAL_TABS} />
+        <Routes>
+          <Route index element={<JournalOverviewPage {...journalProps} />} />
+          <Route path="head-to-head" element={<JournalHeadToHeadPage {...journalProps} />} />
+          <Route path="wallet" element={<JournalWalletPage {...journalProps} />} />
+          <Route path="*" element={<Navigate to="/journal" replace />} />
+        </Routes>
       </div>
     )
   }
@@ -1947,11 +1725,11 @@ export default function App() {
     >
       <Routes>
         <Route path="/" element={<Navigate to={initialPath} replace />} />
-        <Route path="/dashboard" element={renderDashboard()} />
-        <Route path="/mock-trading" element={renderMockTrading()} />
-        <Route path="/ai-training" element={renderLearningBot()} />
+        <Route path="/dashboard/*" element={renderDashboard()} />
+        <Route path="/mock-trading/*" element={renderMockTrading()} />
+        <Route path="/ai-training/*" element={renderLearningBot()} />
         <Route path="/wallets" element={renderWallets()} />
-        <Route path="/journal" element={renderJournal()} />
+        <Route path="/journal/*" element={renderJournal()} />
         <Route path="/trade-history" element={renderTradeHistory()} />
         <Route path="/settings/*" element={renderSettings()} />
         <Route path="*" element={<Navigate to={initialPath} replace />} />

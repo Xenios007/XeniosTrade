@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ShieldAlert, Target, WalletCards } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { formatPercent } from '../lib/formatters'
 import { summarizeAccount } from '../lib/accountMetrics'
 import { getWalletById, getWalletEffectiveStartingBalance } from '../lib/wallets'
@@ -244,7 +244,7 @@ function WalletJournalCalendar({ walletView, activeMonth, onMonthChange, availab
   )
 }
 
-export function JournalSummaryPage({ data, trades = [], livePrices = {}, wallets = [] }) {
+function useJournalViews({ data, trades, livePrices, wallets }) {
   const walletItems = data?.wallets || []
   const availableMonths = useMemo(
     () => data?.availableMonths?.length > 0
@@ -286,7 +286,170 @@ export function JournalSummaryPage({ data, trades = [], livePrices = {}, wallets
     })
   ), [livePrices, trades, walletItems, wallets])
 
-  const comparisonViews = walletViews.slice(0, 2)
+  return { walletViews, availableMonths, displayMonth, setActiveMonth, monthIndex }
+}
+
+function JournalEmptyState({ title }) {
+  return (
+    <Panel title={title}>
+      <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
+        No wallet journal entries yet.
+      </div>
+    </Panel>
+  )
+}
+
+/**
+ * Combined view across every wallet (1-4): one capital / P&L / win-rate
+ * readout for the whole book, plus a per-wallet strip.
+ */
+export function JournalOverviewPage(props) {
+  const { walletViews } = useJournalViews(props)
+
+  if (walletViews.length === 0) {
+    return <JournalEmptyState title="All Wallets Summary" />
+  }
+
+  const combined = walletViews.reduce((acc, wallet) => {
+    acc.runningBalance += Number(wallet.accountSnapshot.runningBalance || 0)
+    acc.startingBalance += Number(wallet.accountSnapshot.startingBalance || 0)
+    acc.realizedPnl += Number(wallet.accountSnapshot.realizedPnl || 0)
+    acc.unrealizedPnl += Number(wallet.accountSnapshot.unrealizedPnl || 0)
+    acc.wins += Number(wallet.summary.wins || 0)
+    acc.losses += Number(wallet.summary.losses || 0)
+    acc.closedTrades += Number(wallet.summary.closedTrades || 0)
+    acc.openTrades += Number(wallet.accountSnapshot.openTradeCount || 0)
+    acc.totalTrades += Number(wallet.summary.totalTrades || 0)
+    return acc
+  }, {
+    runningBalance: 0,
+    startingBalance: 0,
+    realizedPnl: 0,
+    unrealizedPnl: 0,
+    wins: 0,
+    losses: 0,
+    closedTrades: 0,
+    openTrades: 0,
+    totalTrades: 0,
+  })
+  const combinedWinRate = combined.closedTrades > 0 ? (combined.wins / combined.closedTrades) * 100 : 0
+  const netPnl = combined.realizedPnl + combined.unrealizedPnl
+  const leader = [...walletViews].sort((left, right) => right.summary.pnl - left.summary.pnl)[0] || null
+  const laggard = [...walletViews].sort((left, right) => left.summary.pnl - right.summary.pnl)[0] || null
+
+  return (
+    <div className="space-y-6">
+      <Panel title="All Wallets Summary">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+          <WalletSummarySection
+            label="Combined Balance"
+            value={formatBalance(combined.runningBalance)}
+            tone={combined.runningBalance > combined.startingBalance ? 'text-emerald-300' : combined.runningBalance < combined.startingBalance ? 'text-rose-300' : 'text-slate-100'}
+          />
+          <WalletSummarySection
+            label="Realized P/L"
+            value={formatPnl(combined.realizedPnl)}
+            tone={combined.realizedPnl > 0 ? 'text-emerald-300' : combined.realizedPnl < 0 ? 'text-rose-300' : 'text-slate-100'}
+          />
+          <WalletSummarySection
+            label="Unrealized P/L"
+            value={formatPnl(combined.unrealizedPnl)}
+            tone={combined.unrealizedPnl > 0 ? 'text-emerald-300' : combined.unrealizedPnl < 0 ? 'text-rose-300' : 'text-slate-100'}
+          />
+          <WalletSummarySection
+            label="Win Rate"
+            value={combined.closedTrades > 0 ? formatPercent(combinedWinRate) : 'No closes yet'}
+            tone={combined.closedTrades === 0 ? 'text-slate-100' : combinedWinRate >= 50 ? 'text-emerald-300' : 'text-amber-300'}
+          />
+          <WalletSummarySection
+            label="Closed Trades"
+            value={`${combined.closedTrades} (${combined.wins}W / ${combined.losses}L)`}
+            tone="text-slate-100"
+          />
+          <WalletSummarySection
+            label="Open Positions"
+            value={`${combined.openTrades}`}
+            tone={combined.openTrades > 0 ? 'text-amber-300' : 'text-slate-100'}
+          />
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <WalletSummarySection
+            label="Net P/L (Realized + Unrealized)"
+            value={formatPnl(netPnl)}
+            tone={netPnl > 0 ? 'text-emerald-300' : netPnl < 0 ? 'text-rose-300' : 'text-slate-100'}
+          />
+          <WalletSummarySection
+            label="Profit Leader"
+            value={leader ? `${leader.walletName} (${formatPnl(leader.summary.pnl)})` : 'Waiting for trades'}
+            tone="text-slate-100"
+          />
+          <WalletSummarySection
+            label="Needs Attention"
+            value={laggard ? `${laggard.walletName} (${formatPnl(laggard.summary.pnl)})` : 'Waiting for trades'}
+            tone="text-slate-100"
+          />
+        </div>
+      </Panel>
+
+      <Panel title="Wallets 1-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {walletViews.map((wallet) => {
+            const tone = getWalletTone(wallet.walletColorKey)
+            const balance = wallet.accountSnapshot.runningBalance
+            const start = wallet.accountSnapshot.startingBalance
+
+            return (
+              <div key={wallet.walletId} className="rounded-[24px] border border-white/10 bg-slate-950/60 p-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-base font-semibold text-white">{wallet.walletName}</span>
+                  <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${tone.badge}`}>
+                    {wallet.assignedSignalModelName}
+                  </span>
+                </div>
+
+                <div className={`mt-4 text-2xl font-semibold ${wallet.summary.pnl > 0 ? 'text-emerald-300' : wallet.summary.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}`}>
+                  {formatPnl(wallet.summary.pnl)}
+                </div>
+                <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">Realized P/L</div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <WalletSummarySection
+                    label="Balance"
+                    value={formatBalance(balance)}
+                    tone={balance > start ? 'text-emerald-300' : balance < start ? 'text-rose-300' : 'text-slate-100'}
+                  />
+                  <WalletSummarySection
+                    label="Win Rate"
+                    value={wallet.summary.closedTrades > 0 ? formatPercent(wallet.summary.winRate * 100) : 'N/A'}
+                    tone="text-slate-100"
+                  />
+                  <WalletSummarySection
+                    label="Closed"
+                    value={`${wallet.summary.closedTrades}`}
+                    tone="text-slate-100"
+                  />
+                  <WalletSummarySection
+                    label="W / L"
+                    value={`${wallet.summary.wins} / ${wallet.summary.losses}`}
+                    tone="text-slate-100"
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+/**
+ * Wallet-vs-wallet comparison for the selected month: summary cards plus a
+ * date-by-date P&L grid across every wallet.
+ */
+export function JournalHeadToHeadPage(props) {
+  const { walletViews, displayMonth } = useJournalViews(props)
   const headToHeadViews = walletViews
   const headToHeadGridStyle = getHeadToHeadGridStyle(headToHeadViews.length)
   const headToHeadMinWidth = Math.max(760, 140 + headToHeadViews.length * 220)
@@ -301,142 +464,148 @@ export function JournalSummaryPage({ data, trades = [], livePrices = {}, wallets
     }))
   }, [displayMonth, headToHeadViews])
 
-  const pnlLeader = [...comparisonViews].sort((left, right) => right.summary.pnl - left.summary.pnl)[0] || null
-  const winRateLeader = [...comparisonViews]
-    .filter((wallet) => wallet.summary.closedTrades > 0)
-    .sort((left, right) => right.summary.winRate - left.summary.winRate || right.summary.closedTrades - left.summary.closedTrades)[0] || null
+  if (headToHeadViews.length < 2) {
+    return <JournalEmptyState title="Head to Head" />
+  }
 
   return (
-    <Panel title="Daily Auto-Trade Journal">
-      {walletViews.length === 0 ? (
-        <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
-          No wallet journal entries yet.
+    <Panel title="Head to Head">
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Comparison Month</div>
+            <div className="mt-1 text-lg font-semibold text-white">{formatMonthLabel(displayMonth)}</div>
+          </div>
+          <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-slate-300">
+            {headToHeadViews.length} wallets compared
+          </div>
         </div>
-      ) : (
-        <div className="space-y-6">
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <WalletSummarySection
-              label="Profit Leader"
-              value={pnlLeader ? pnlLeader.walletName : 'Waiting for trades'}
-              tone="text-slate-100"
-            />
-            <WalletSummarySection
-              label="Best Win Rate"
-              value={winRateLeader ? winRateLeader.walletName : 'Waiting for closes'}
-              tone="text-slate-100"
-            />
-            <WalletSummarySection
-              label={comparisonViews[0]?.walletName || 'Wallet A PnL'}
-              value={comparisonViews[0] ? formatPnl(comparisonViews[0].summary.pnl) : 'N/A'}
-              tone={comparisonViews[0]?.summary.pnl > 0 ? 'text-emerald-300' : comparisonViews[0]?.summary.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}
-            />
-            <WalletSummarySection
-              label={comparisonViews[1]?.walletName || 'Wallet B PnL'}
-              value={comparisonViews[1] ? formatPnl(comparisonViews[1].summary.pnl) : 'N/A'}
-              tone={comparisonViews[1]?.summary.pnl > 0 ? 'text-emerald-300' : comparisonViews[1]?.summary.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}
-            />
-          </div>
 
-          <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
-            The journal is split by wallet so each model can be judged on its own capital curve, trade distribution, and realized profit instead of mixing both experiments together.
-          </div>
-
-          <div className="grid gap-6 xl:grid-cols-2">
-            {walletViews.map((walletView) => (
-              <WalletJournalCalendar
-                key={walletView.walletId}
-                walletView={walletView}
-                activeMonth={displayMonth}
-                onMonthChange={setActiveMonth}
-                availableMonths={availableMonths}
-                monthIndex={monthIndex}
-              />
-            ))}
-          </div>
-
-          {headToHeadViews.length >= 2 ? (
-            <div className="rounded-[28px] border border-white/10 bg-slate-950/60 p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Head To Head</div>
-                  <div className="mt-1 text-lg font-semibold text-white">{formatMonthLabel(displayMonth)}</div>
-                </div>
-                <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-slate-300">
-                  {headToHeadViews.length} wallets compared
-                </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {headToHeadViews.map((wallet) => (
+            <div key={`${wallet.walletId}-summary`} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{wallet.walletName}</div>
+              <div className="mt-2 text-sm text-slate-300">{wallet.assignedSignalModelName}</div>
+              <div className={`mt-3 text-xl font-semibold ${wallet.summary.pnl > 0 ? 'text-emerald-300' : wallet.summary.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}`}>
+                {formatPnl(wallet.summary.pnl)}
               </div>
-
-              <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                {headToHeadViews.map((wallet) => (
-                  <div key={`${wallet.walletId}-summary`} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{wallet.walletName}</div>
-                    <div className="mt-2 text-sm text-slate-300">{wallet.assignedSignalModelName}</div>
-                    <div className={`mt-3 text-xl font-semibold ${wallet.summary.pnl > 0 ? 'text-emerald-300' : wallet.summary.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}`}>
-                      {formatPnl(wallet.summary.pnl)}
-                    </div>
-                    <div className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
-                      {wallet.summary.wins} wins / {wallet.summary.losses} losses / {formatPercent(wallet.summary.winRate * 100)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-5 overflow-x-auto pb-1">
-                <div className="space-y-3" style={{ minWidth: headToHeadMinWidth }}>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
-                    <div className="grid gap-3 xl:items-center" style={headToHeadGridStyle}>
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500">Date</div>
-                      {headToHeadViews.map((wallet) => {
-                        const tone = getWalletTone(wallet.walletColorKey)
-                        return (
-                          <div key={`${wallet.walletId}-header`} className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${tone.badge}`}>
-                                {wallet.walletName}
-                              </span>
-                              <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">{wallet.assignedSignalModelName}</span>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-
-                  {comparisonRows.length === 0 ? (
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                      No current-month entries yet.
-                    </div>
-                  ) : (
-                    comparisonRows.map((row) => (
-                      <div key={row.date} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
-                        <div className="grid gap-3 xl:items-center" style={headToHeadGridStyle}>
-                          <div className="text-sm font-semibold text-white">{row.date}</div>
-                          {row.items.map((item, index) => (
-                            <div key={`${row.date}-${headToHeadViews[index]?.walletId || index}`} className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
-                              {item ? (
-                                <>
-                                  <div className={`text-sm font-semibold ${item.pnl > 0 ? 'text-emerald-300' : item.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}`}>
-                                    {formatPnl(item.pnl)}
-                                  </div>
-                                  <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                                    {item.entries} entries / {item.wins}W {item.losses}L
-                                  </div>
-                                </>
-                              ) : (
-                                <div className="text-sm text-slate-400">No trades</div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+              <div className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
+                {wallet.summary.wins} wins / {wallet.summary.losses} losses / {formatPercent(wallet.summary.winRate * 100)}
               </div>
             </div>
-          ) : null}
+          ))}
         </div>
-      )}
+
+        <div className="overflow-x-auto pb-1">
+          <div className="space-y-3" style={{ minWidth: headToHeadMinWidth }}>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+              <div className="grid gap-3 xl:items-center" style={headToHeadGridStyle}>
+                <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500">Date</div>
+                {headToHeadViews.map((wallet) => {
+                  const tone = getWalletTone(wallet.walletColorKey)
+                  return (
+                    <div key={`${wallet.walletId}-header`} className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${tone.badge}`}>
+                          {wallet.walletName}
+                        </span>
+                        <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">{wallet.assignedSignalModelName}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {comparisonRows.length === 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                No current-month entries yet.
+              </div>
+            ) : (
+              comparisonRows.map((row) => (
+                <div key={row.date} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                  <div className="grid gap-3 xl:items-center" style={headToHeadGridStyle}>
+                    <div className="text-sm font-semibold text-white">{row.date}</div>
+                    {row.items.map((item, index) => (
+                      <div key={`${row.date}-${headToHeadViews[index]?.walletId || index}`} className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
+                        {item ? (
+                          <>
+                            <div className={`text-sm font-semibold ${item.pnl > 0 ? 'text-emerald-300' : item.pnl < 0 ? 'text-rose-300' : 'text-slate-100'}`}>
+                              {formatPnl(item.pnl)}
+                            </div>
+                            <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                              {item.entries} entries / {item.wins}W {item.losses}L
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-sm text-slate-400">No trades</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
     </Panel>
+  )
+}
+
+/**
+ * Full-width trade calendar for one wallet at a time. The wallet dropdown
+ * selects which of wallets 1-4 is shown.
+ */
+export function JournalWalletPage(props) {
+  const { walletViews, availableMonths, displayMonth, setActiveMonth, monthIndex } = useJournalViews(props)
+  const [selectedWalletId, setSelectedWalletId] = useState('')
+
+  useEffect(() => {
+    if (walletViews.length === 0) {
+      return
+    }
+
+    if (!walletViews.some((wallet) => wallet.walletId === selectedWalletId)) {
+      setSelectedWalletId(walletViews[0].walletId)
+    }
+  }, [walletViews, selectedWalletId])
+
+  if (walletViews.length === 0) {
+    return <JournalEmptyState title="Wallet Journal" />
+  }
+
+  const activeView = walletViews.find((wallet) => wallet.walletId === selectedWalletId) || walletViews[0]
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Viewing wallet</span>
+        <label className="relative">
+          <span className="sr-only">Select wallet</span>
+          <select
+            value={activeView.walletId}
+            onChange={(event) => setSelectedWalletId(event.target.value)}
+            className="appearance-none rounded-full border border-sky-400/40 bg-sky-400/12 py-2 pl-4 pr-10 text-sm font-semibold text-sky-100 outline-none transition focus:border-sky-300/60 focus:ring-2 focus:ring-sky-400/20"
+          >
+            {walletViews.map((wallet) => (
+              <option key={wallet.walletId} value={wallet.walletId} className="bg-slate-900 text-white">
+                {wallet.walletName} — {wallet.assignedSignalModelName}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-sky-200" />
+        </label>
+      </div>
+
+      <WalletJournalCalendar
+        key={activeView.walletId}
+        walletView={activeView}
+        activeMonth={displayMonth}
+        onMonthChange={setActiveMonth}
+        availableMonths={availableMonths}
+        monthIndex={monthIndex}
+      />
+    </div>
   )
 }

@@ -65,6 +65,52 @@ export async function startLearningBotTraining() {
   return payload
 }
 
+export function getLearningBotBacktests() {
+  return fetchAppJson('/api/learning-bot/backtests')
+}
+
+export function getLearningBotBacktestReport(id) {
+  return fetchAppJson(`/api/learning-bot/backtests/${encodeURIComponent(id)}/report`)
+}
+
+export function getLearningBotSignalInsights() {
+  return fetchAppJson('/api/learning-bot/signal-insights')
+}
+
+export async function updateLearningBotBacktest(id, patch) {
+  const response = await fetch(`/api/learning-bot/backtests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch || {}),
+  })
+  const payload = await readAppJson(response)
+
+  if (!response.ok) {
+    throw new Error(payload.error || 'Unable to update backtest run')
+  }
+
+  return payload
+}
+
+export function getCodexConsoleStatus() {
+  return fetchAppJson('/api/codex-console/status')
+}
+
+export async function sendCodexConsoleMessage({ message, threadId = null }) {
+  const response = await fetch('/api/codex-console/message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, threadId }),
+  })
+  const payload = await readAppJson(response)
+
+  if (!response.ok) {
+    throw new Error(payload.error || 'Codex console request failed')
+  }
+
+  return payload
+}
+
 export function getSignalModelAnalysis(symbol, modelId) {
   const params = new URLSearchParams({
     symbol,

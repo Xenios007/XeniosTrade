@@ -24,3 +24,7 @@ launcher-logs/
 .DS_Store
 .idea/
 *.swp
+
+# Backtest run data & generated reports (large / machine-generated — rsync, not git)
+server/data/backtest-runs/
+server/backtest/runs/

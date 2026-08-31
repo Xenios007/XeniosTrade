@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
-import { Bot, CheckCircle2, Circle, Radar, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react'
+import { Bot, CheckCircle2, Circle, Radar, ScanLine, TrendingDown, TrendingUp } from 'lucide-react'
 import { formatPercent, formatPrice } from '../lib/formatters'
+import { patternScoreForSide } from '../lib/chartPatterns'
 import { getSignalModel } from '../lib/signalModels'
 import { Panel } from './Panel'
 
@@ -37,11 +38,18 @@ function getChecklistLabel(checklistSide) {
   return 'Signal Checklist'
 }
 
+function patternBiasTone(bias) {
+  if (bias === 'bullish') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+  if (bias === 'bearish') return 'border-rose-400/20 bg-rose-400/10 text-rose-100'
+  return 'border-sky-400/20 bg-sky-400/10 text-sky-100'
+}
+
 export function AIAssistantSidebar({
   analysis,
   activeSignalModelId,
   activeModelRiskSummary = '',
   modelChecklistAnalysis = null,
+  chartPatternSummary = null,
 }) {
   const displayAnalysis = modelChecklistAnalysis || analysis
   const tone = useMemo(() => toneForDirection(displayAnalysis.direction), [displayAnalysis.direction])
@@ -76,6 +84,16 @@ export function AIAssistantSidebar({
     return `${activeModel.totalSignals} total signals. Need ${activeModel.minimumScore} aligned before auto-entry.${riskSummary}`
   }, [activeModel, activeModelRiskSummary, modelChecklistAnalysis?.professionalRequiredCount])
 
+  const checklistSide = modelChecklistAnalysis?.checklistSide || displayAnalysis.checklistSide
+    || (displayAnalysis.direction === 'SHORT' ? 'SHORT' : 'LONG')
+  const patternScore = patternScoreForSide(chartPatternSummary, checklistSide)
+  const hasPatterns = Boolean(chartPatternSummary && chartPatternSummary.count > 0)
+  const patternAlignmentLabel = patternScore > 0.15
+    ? `Confirms the ${checklistSide.toLowerCase()} setup`
+    : patternScore < -0.15
+      ? `Works against the ${checklistSide.toLowerCase()} setup`
+      : 'Neutral for this setup'
+
   return (
     <div className="xl:sticky xl:top-4">
       <Panel
@@ -83,7 +101,7 @@ export function AIAssistantSidebar({
         action={<Bot className="h-4 w-4 text-sky-300" />}
       >
         <div className="space-y-5">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
               <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Coin</div>
               <div className="mt-2 break-all text-xl font-bold tracking-[0.08em] text-white">{activeSymbol}</div>
@@ -98,14 +116,7 @@ export function AIAssistantSidebar({
                 <DirectionIcon className="h-5 w-5" />
               </div>
             </div>
-          </div>
 
-          <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-            <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Summary</div>
-            <p className="mt-2 text-sm leading-6 text-slate-200">{displayAnalysis.summary}</p>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
               <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Entry</div>
               <div className="mt-2 text-lg font-semibold text-white">{displayAnalysis.entryPrice ? formatPrice(displayAnalysis.entryPrice, 5) : 'Wait'}</div>
@@ -114,6 +125,50 @@ export function AIAssistantSidebar({
               <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Confidence</div>
               <div className="mt-2 text-lg font-semibold text-white">{formatPercent((displayAnalysis.confidence || 0) * 100)}</div>
             </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+            <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Summary</div>
+            <p className="mt-2 text-sm leading-6 text-slate-200">{displayAnalysis.summary}</p>
+          </div>
+
+          <div className={`rounded-2xl border p-4 ${hasPatterns ? patternBiasTone(chartPatternSummary.bias) : 'border-white/10 bg-slate-950/60'}`}>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] opacity-80">
+                <ScanLine className="h-4 w-4" />
+                Chart Pattern
+              </div>
+              {hasPatterns ? (
+                <span className="rounded-full border border-white/15 bg-black/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]">
+                  {chartPatternSummary.bias}
+                </span>
+              ) : null}
+            </div>
+
+            {hasPatterns ? (
+              <>
+                <div className="text-sm font-semibold">
+                  {chartPatternSummary.top?.name}
+                  {chartPatternSummary.top ? ` · ${Math.round(chartPatternSummary.top.confidence * 100)}%` : ''}
+                </div>
+                <div className="mt-1 text-xs leading-5 opacity-90">{chartPatternSummary.top?.detail}</div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] uppercase tracking-[0.14em]">
+                  <div>
+                    <div className="opacity-70">Patterns</div>
+                    <div className="mt-1 font-semibold">{chartPatternSummary.count} detected</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="opacity-70">AI score nudge</div>
+                    <div className="mt-1 font-semibold">
+                      {patternScore > 0 ? '+' : ''}{patternScore.toFixed(2)}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 text-[11px] uppercase tracking-[0.14em] opacity-75">{patternAlignmentLabel}</div>
+              </>
+            ) : (
+              <div className="text-sm text-slate-400">No candlestick or chart pattern detected right now.</div>
+            )}
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
@@ -183,31 +238,6 @@ export function AIAssistantSidebar({
                 {modelChecklistAnalysis.professionalRequiredCount > 0 ? ` Professional filters: ${modelChecklistAnalysis.professionalSignalScore}/${activeModel.professionalSignalCount}.` : ''}
               </div>
             ) : null}
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-            <div className="mb-3 flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-slate-500">
-              <ShieldAlert className="h-4 w-4" />
-              Pro Exit Strategy
-            </div>
-            <div className="space-y-3 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Take Profit</span>
-                <span className="font-medium text-slate-100">{displayAnalysis.takeProfit ? formatPrice(displayAnalysis.takeProfit, 5) : 'Wait'}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Stop Loss</span>
-                <span className="font-medium text-slate-100">{displayAnalysis.stopLoss ? formatPrice(displayAnalysis.stopLoss, 5) : 'Wait'}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Support</span>
-                <span className="font-medium text-slate-100">{displayAnalysis.support ? formatPrice(displayAnalysis.support, 5) : 'N/A'}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Resistance</span>
-                <span className="font-medium text-slate-100">{displayAnalysis.resistance ? formatPrice(displayAnalysis.resistance, 5) : 'N/A'}</span>
-              </div>
-            </div>
           </div>
         </div>
       </Panel>

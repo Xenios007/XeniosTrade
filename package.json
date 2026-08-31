@@ -8,10 +8,12 @@
     "dev:server": "node server/mock-trading-server.js",
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
+    "backtest:dataset": "node server/backtest/replay-dataset.js",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@openai/codex-sdk": "^0.151.0",
     "concurrently": "^9.2.1",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",

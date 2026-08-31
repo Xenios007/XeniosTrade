@@ -12,16 +12,58 @@ export const NAV_GROUPS = [
   {
     label: 'Trading',
     items: [
-      { to: '/dashboard', label: 'Dashboard', Icon: LayoutDashboard },
-      { to: '/mock-trading', label: 'Mock Trading', Icon: Bot },
+      {
+        to: '/dashboard',
+        label: 'Dashboard',
+        Icon: LayoutDashboard,
+        children: [
+          { to: '/dashboard', label: 'Overview' },
+          { to: '/dashboard/market', label: 'Market' },
+          { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
+          { to: '/dashboard/workflow', label: 'Workflow Notifications' },
+          { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
+          { to: '/dashboard/codex', label: 'Codex Console' },
+        ],
+      },
+      {
+        to: '/mock-trading',
+        label: 'Mock Trading',
+        Icon: Bot,
+        children: [
+          { to: '/mock-trading', label: 'Overview' },
+          { to: '/mock-trading/signal-models', label: 'Signal Models' },
+          { to: '/mock-trading/auto-trade-controller', label: 'Auto Trade Controller' },
+          { to: '/mock-trading/auto-trade-activity', label: 'Auto Trade Activity' },
+        ],
+      },
       { to: '/trade-history', label: 'Trade History', Icon: History },
     ],
   },
   {
     label: 'Analysis',
     items: [
-      { to: '/journal', label: 'Journal', Icon: CalendarDays },
-      { to: '/ai-training', label: 'AI Training', Icon: BrainCircuit },
+      {
+        to: '/journal',
+        label: 'Journal',
+        Icon: CalendarDays,
+        children: [
+          { to: '/journal', label: 'Summary' },
+          { to: '/journal/head-to-head', label: 'Head to Head' },
+          { to: '/journal/wallet', label: 'Wallet Journal' },
+        ],
+      },
+      {
+        to: '/ai-training',
+        label: 'AI Training',
+        Icon: BrainCircuit,
+        children: [
+          { to: '/ai-training', label: 'Training' },
+          { to: '/ai-training/backtests', label: 'Backtests' },
+          { to: '/ai-training/insights', label: 'Signal Insights' },
+          { to: '/ai-training/advisory', label: 'AI Advisory' },
+          { to: '/ai-training/assistant', label: 'AI Assistant' },
+        ],
+      },
     ],
   },
   {
