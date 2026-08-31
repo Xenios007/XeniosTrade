@@ -29,6 +29,25 @@ rate, still deeply negative on all three. **NOT merged into training** (no live
 counterpart — Bot 4 only; would skew the shared policy bucket). Data kept at
 `server/data/backtest-moneystop.json`.
 
+### Pocket-mining + "give it room" backtest — no edge found
+
+Mined all 117k baseline rows for a positive conditional pocket (bot × side ×
+family × candle pattern × session/hour × SL-width band × pattern-score band ×
+symbol tier), IS/OOS split Sep–Feb / Feb–Aug, metric R = pnl/(notional·SL%).
+- The only strong signal (`hold ≥4h` = +0.19R all bots, both windows) is
+  **look-ahead** — hold time is only known after the fact. The honest version
+  ("survived first 30min without stopping") is still −0.09 to −0.10R.
+- Everything knowable at entry stays negative in OOS. Session/family/hour pockets
+  that looked positive IS flipped negative OOS (overfit — the split caught them).
+- One real takeaway: **stops are too tight.** SL <0.6% → −0.35R; SL ≥1.3% → −0.10R.
+
+Confirmatory backtest `giveitroom-2x-2026-08` (Bots 1–3, 12mo, 66 sym, 2× stop
+distance, 2× TP distance, `--sl-mult 2 --tp-mult 2`): meanR **−0.18 → −0.08** on
+all three (win 32.7→35.3%), IS −0.07 / OOS −0.11, ~10% now time out at 48h.
+**Cuts the bleed ~half, does not cross zero.** No tradeable edge. Not flagged for
+training. Harness now has `--sl-mult` / `--tp-mult` knobs (backtest-only, scale
+stop/TP distance from entry; `configuredStopLossPercent` scaled to match).
+
 ### NEW: backtest run registry + AI Training UI
 
 Every `replay-dataset.js` run now records itself:
