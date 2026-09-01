@@ -49,6 +49,10 @@ const BOT_LABELS = {
   'model-2': 'Bot 2',
   'model-3': 'Bot 3',
   'model-4': 'Bot 4',
+  'model-5': 'Bot 5',
+  'model-6': 'Bot 6',
+  'model-7': 'Bot 7',
+  'model-8': 'Bot 8',
 }
 
 const DEFAULT_FORM = {
@@ -83,6 +87,10 @@ const DEFAULT_FORM = {
     'model-2': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-3': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-4': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-5': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-6': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-7': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-8': { enabled: false, paperOnly: true, thresholdScore: 55 },
   },
 }
 
@@ -404,14 +412,27 @@ export function LearningBotPage({
         </div>
         <h1 className="mt-4 text-3xl font-semibold text-white">PyTorch training for the Learning Bot</h1>
         <p className="mt-4 max-w-4xl text-sm leading-7 text-slate-300">
-          The trainer now learns from two sources at once: every closed live/paper trade, and the historical
-          <span className="text-white"> backtest runs you flag for training</span> on the Backtests tab. It retrains
-          after each new closed trade, so live activity keeps the policy fresh on its own.
+          The policy is trained on two sources: every closed live/paper trade, and the historical
+          <span className="text-white"> backtest runs flagged for training</span> on the Backtests tab.
+          {form.aiTrainer.enabled
+            ? ' This deployment retrains on-box after each new closed trade.'
+            : ' Training is disabled on this deployment — the live filter applies the most recently uploaded policy (trained off-box on the workstation GPU). No training runs on this server.'}
         </p>
         <div className="mt-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-100">
           The trained artifact drives the live AI entry filter — per bot it scores each candidate against the
           historical expectancy of that setup family and can hard-block weak entries (see Live AI Gate below).
           Real-money trading stays locked until {realMoneyTradeTarget} reviewed trades.
+        </div>
+        <div className={`mt-4 rounded-2xl border px-4 py-4 text-sm ${form.aiTrainer.enabled ? 'border-sky-400/20 bg-sky-400/10 text-sky-100' : 'border-amber-400/20 bg-amber-400/10 text-amber-100'}`}>
+          <div className="font-medium">
+            {form.aiTrainer.enabled ? 'On-box training: ENABLED' : 'On-box training: DISABLED — policy trained locally and uploaded'}
+          </div>
+          <div className="mt-1 text-[13px] leading-6 opacity-90">
+            Policy basis: <span className="font-semibold">{Number(metrics?.rows || 0).toLocaleString()} backtest/trade rows</span>
+            {' • '}{metrics?.framework || 'model'} on {metrics?.deviceUsed || 'n/a'}
+            {' • '}last built {latestLearningUpdatedAt ? formatLearningRelativeTime(latestLearningUpdatedAt) : 'never'}.
+            {!form.aiTrainer.enabled && ' Re-enable aiTrainer in settings to let this server retrain; leave off to keep the uploaded policy frozen.'}
+          </div>
         </div>
         <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Stat label="Reviewed Trades" value={String(eligibleClosedTradeCount || 0)} detail={`${realMoneyTradesRemaining} until ${realMoneyTradeTarget} real-money signal`} />
@@ -474,10 +495,9 @@ export function LearningBotPage({
               <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Focus Bot</div>
               <select disabled={controlsDisabled} value={form.focusSignalModelId} onChange={(event) => setForm((current) => ({ ...current, focusSignalModelId: event.target.value }))} className="mt-3 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none disabled:cursor-not-allowed disabled:opacity-60">
                 <option value="all">All bots</option>
-                <option value="model-1">Bot 1</option>
-                <option value="model-2">Bot 2</option>
-                <option value="model-3">Bot 3</option>
-                <option value="model-4">Bot 4</option>
+                {Object.entries(BOT_LABELS).map(([modelId, label]) => (
+                  <option key={modelId} value={modelId}>{label}</option>
+                ))}
               </select>
             </label>
             <label className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-300">

@@ -48,10 +48,37 @@ function getStatusLabel(status) {
 export function WorkflowNotificationsPanel({ workflow }) {
   const phases = workflow?.phases || []
   const notifications = workflow?.notifications || []
+  const operations = workflow?.operations || null
 
   return (
     <Panel title="Workflow Notifications" action={<BellRing className="h-4 w-4 text-sky-300" />}>
       <div className="space-y-5">
+        {operations && (
+          <div className={`rounded-2xl border px-4 py-4 ${operations.canTrade ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-amber-400/25 bg-amber-400/10'}`}>
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-white">
+                Operational self-check — {operations.canTrade ? 'server is able to trade' : 'trading is impaired'}
+              </div>
+              <span className="text-[11px] uppercase tracking-[0.18em] text-slate-300">
+                {operations.memory?.rssMb}MB / {operations.memory?.totalMemMb}MB • up {Math.floor((operations.uptimeSec || 0) / 60)}m
+              </span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {(operations.checks || []).map((check) => (
+                <div key={check.label} className="flex items-start gap-3 text-sm">
+                  {check.ok ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                  ) : (
+                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                  )}
+                  <span className={check.ok ? 'text-slate-100' : 'text-amber-100'}>
+                    <span className="font-medium">{check.label}:</span> {check.detail}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {notifications.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
             No workflow notifications yet.
@@ -176,6 +203,18 @@ export function SelfReviewLogPanel({ workflow }) {
                     {formatDateTimeWithSeconds(entry.timestamp)}
                   </div>
                 </div>
+                {entry.operations && (
+                  <div className="mt-3 border-t border-white/5 pt-3 text-xs text-slate-400">
+                    <span className={entry.operations.canTrade ? 'text-emerald-300' : 'text-amber-300'}>
+                      {entry.operations.canTrade ? 'able to trade' : 'trading impaired'}
+                    </span>
+                    {' · '}mem {entry.operations.memory?.rssMb}/{entry.operations.memory?.totalMemMb}MB
+                    {' · '}up {Math.floor((entry.operations.uptimeSec || 0) / 60)}m
+                    {(entry.operations.checks || []).filter((c) => !c.ok).map((c) => (
+                      <span key={c.label} className="ml-2 rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-200">{c.label}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

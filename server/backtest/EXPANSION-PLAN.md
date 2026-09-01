@@ -5,7 +5,25 @@ log (autonomous `/loop` build on this machine).** §11 = STATUS DASHBOARD (read 
 
 ---
 
-## 11. STATUS DASHBOARD  (updated 2026-09-01 18:17 local — RESUME after power cut)
+## 11. STATUS DASHBOARD  (updated 2026-09-02 00:08 local — 7-run program COMPLETE)
+
+**ALL 7 RUNS DONE.** RUN 1 (primary, trained) + RUNS 2-7 (validation, replay+report only) all
+`complete` in the registry. RUN 7 experimental unseen-symbol model trained (exit 0).
+Final: `server/backtest/reports/COMBINED-validation-report.md` (7/7 runs present).
+Server backtest UI now lists all 10 runs (7 new + 3 pre-existing), `includeInTraining:false` on
+every validation run except `validation-stress` (flipped to `true` on the server — see
+[[server-deployment]]; harmless, its NDJSON isn't on the server so it just contributes 0 rows).
+Big datasets (primary ndjson 578 MB, all validation ndjsons, historical-cache 586 MB) stayed
+local as instructed — only the registry summaries + `runs/*.md` reports were pushed.
+
+Also this session: Bots 5-8 + 8-wallet allocation (750 USDT each) deployed live to the 24/7
+server (`xenios@139.180.209.238:/home/xenios/app`, PM2 `xeniostrade-api`), AI scoring frozen on
+the RUN 1 CUDA policy (auto-retrain gated off), nginx docroot re-synced. Full detail in the
+`server-deployment` memory, not duplicated here.
+
+---
+
+## 11-a. STATUS DASHBOARD  (superseded — kept for history, was: updated 2026-09-01 18:17 local — RESUME after power cut)
 
 ### RESUME 2026-09-01 18:17 (power interruption recovery)
 

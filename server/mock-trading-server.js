@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -324,6 +325,12 @@ const defaultLearningBotSettings = {
     // Bot 4 is fully AI-gated: the entry score is the sole decision, so it runs as a hard block, not paper-only.
     // Threshold kept modest during the data-gathering phase; raise it once Bot 4 has a self-trained policy.
     'model-4': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    // Bots 5-8 (mean-reversion / volatility-breakout / range-fade / funding-contrarian) are AI-gated
+    // the same way during their observation phase.
+    'model-5': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-6': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-7': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-8': { enabled: true, paperOnly: false, thresholdScore: 45 },
   },
 }
 
@@ -6941,7 +6948,7 @@ function summarizeMissingChecks(checks) {
   return checks.filter((check) => !check.passed).map((check) => check.label)
 }
 
-function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus = defaultLearningBotTrainStatus) {
+function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus = defaultLearningBotTrainStatus, backtestRuns = []) {
   const { apiKey, secretKey } = getEffectiveCredentials(settings)
   const trackedSymbols = Array.from(new Set((settings.strategy.preferredSymbols || []).filter(Boolean)))
   const validatedTestnetTrades = history.filter((trade) => (
@@ -7098,6 +7105,121 @@ function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotT
     ))
   }
 
+  // ---- Operational self-check: is the box actually able to trade right now? ----
+  const opsChecks = []
+  const opsNote = (label, ok, detail) => opsChecks.push({ label, ok: Boolean(ok), detail })
+
+  // 1. Backend process / crash-loop
+  const uptimeSec = Math.round(process.uptime())
+  const uptimeH = Math.floor(uptimeSec / 3600)
+  const uptimeM = Math.floor((uptimeSec % 3600) / 60)
+  opsNote(
+    'Backend process',
+    uptimeSec >= 300,
+    uptimeSec >= 300
+      ? `UP — uptime ${uptimeH}h ${uptimeM}m`
+      : `restarted ${uptimeSec}s ago — if this keeps resetting the server is crash-looping (check memory below)`,
+  )
+  if (uptimeSec < 180) {
+    notifications.push(createNotification('ops-restart', 'warning', 'Backend restarted moments ago',
+      `Process uptime is only ${uptimeSec}s. If it does not stabilise the AI filter and auto-trader will not run reliably.`))
+  }
+
+  // 2. Machine specs — memory headroom (the OOM / "can't trade because of specs" check)
+  const totalMemMb = Math.round(os.totalmem() / 1048576)
+  const freeMemMb = Math.round(os.freemem() / 1048576)
+  const rssMb = Math.round(process.memoryUsage().rss / 1048576)
+  const memOk = freeMemMb >= 300 && rssMb < totalMemMb * 0.62
+  opsNote(
+    'Machine memory headroom',
+    memOk,
+    `process ${rssMb} MB • free ${freeMemMb} MB / ${totalMemMb} MB total` +
+      (memOk ? '' : ' — headroom low; a policy refresh or dataset load can OOM-kill the process and stop trading'),
+  )
+  if (!memOk) {
+    notifications.push(createNotification('ops-memory', 'warning', 'Server memory is constrained',
+      `${rssMb} MB in use, ${freeMemMb} MB free of ${totalMemMb} MB. Large in-memory work (training / flagged-dataset assembly) will OOM this box and interrupt trading.`))
+  }
+
+  // 3. Flagged training data vs this box's budget (why the checkbox must stay off here)
+  const flaggedRuns = (Array.isArray(backtestRuns) ? backtestRuns : [])
+    .filter((r) => r && r.includeInTraining === true && r.dataFile)
+  let flaggedBytes = 0
+  const flaggedPresent = []
+  for (const r of flaggedRuns) {
+    try {
+      const st = statSync(path.resolve(dataDir, String(r.dataFile)))
+      flaggedBytes += st.size
+      flaggedPresent.push(`${r.id} (${Math.round(st.size / 1048576)} MB)`)
+    } catch { /* file not on this box — contributes nothing */ }
+  }
+  const flaggedMb = Math.round(flaggedBytes / 1048576)
+  const trainBudgetMb = Math.max(30, Math.round((totalMemMb * 0.6 - rssMb) / 16)) // ~16 MB heap per 1k feature rows
+  const flaggedOk = flaggedMb <= 40
+  opsNote(
+    'Flagged training data within box budget',
+    flaggedOk,
+    flaggedPresent.length === 0
+      ? 'no flagged backtest datasets are present on this box (training happens on the workstation)'
+      : `${flaggedMb} MB present: ${flaggedPresent.join(', ')}` +
+        (flaggedOk ? '' : ` — exceeds this box's ~40 MB safe budget; loading it will OOM. Un-flag these runs here.`),
+  )
+  if (!flaggedOk) {
+    notifications.push(createNotification('ops-flagged-data', 'warning', 'Flagged backtest data too large for this server',
+      `${flaggedMb} MB of flagged training data is on this box. This deployment does not train — un-flag includeInTraining for these runs or it will OOM-loop.`))
+  }
+
+  // 4. Trading actually enabled + market data healthy
+  const autoOn = Boolean(settings?.strategy?.autoTradingEnabled)
+  opsNote('Auto-trading enabled', autoOn, autoOn ? 'ON' : 'OFF — no orders will be placed regardless of signals')
+  if (!autoOn) {
+    notifications.push(createNotification('ops-autotrade-off', 'warning', 'Auto-trading is OFF',
+      'The auto-trader is disabled in settings, so no trades will be placed even when bots find setups.'))
+  }
+  const mdOk = !marketDataHealth.degraded && marketDataHealth.timeouts === 0 && marketDataHealth.rateLimited === 0 && marketDataHealth.circuitOpened === 0
+  opsNote('Market data feed', mdOk,
+    mdOk ? 'healthy' : `degraded=${marketDataHealth.degraded} timeouts=${marketDataHealth.timeouts} rateLimited=${marketDataHealth.rateLimited} circuitOpened=${marketDataHealth.circuitOpened} — candidate scanning is impaired`)
+  if (!mdOk) {
+    notifications.push(createNotification('ops-marketdata', 'warning', 'Market-data feed degraded',
+      'Upstream market data is throttled or circuit-broken; the scanner cannot evaluate all symbols.'))
+  }
+
+  // 5. Recent order flow — is something blocking every trade?
+  const recentRuns = (Array.isArray(autoTradeLog) ? autoTradeLog : []).slice(0, 15)
+  const executedRuns = recentRuns.filter((e) => e?.result?.executed)
+  const blockReasonCounts = {}
+  for (const e of recentRuns) {
+    if (e?.result?.executed) continue
+    const reason = String(e?.result?.reason || 'unspecified').slice(0, 80)
+    blockReasonCounts[reason] = (blockReasonCounts[reason] || 0) + 1
+  }
+  const topBlock = Object.entries(blockReasonCounts).sort((a, b) => b[1] - a[1])[0]
+  const flowOk = recentRuns.length === 0 || executedRuns.length > 0
+  opsNote('Recent auto-trade flow', flowOk,
+    recentRuns.length === 0
+      ? 'no auto-trade runs recorded yet'
+      : `last ${recentRuns.length} runs: ${executedRuns.length} placed an order, ${recentRuns.length - executedRuns.length} blocked` +
+        (topBlock ? ` (top reason: "${topBlock[0]}")` : ''))
+  if (!flowOk && recentRuns.length >= 5) {
+    notifications.push(createNotification('ops-flow-blocked', 'info', 'No orders placed in recent runs',
+      `The last ${recentRuns.length} auto-trade runs placed 0 orders${topBlock ? ` — most common reason: "${topBlock[0]}"` : ''}.`))
+  }
+
+  // 6. AI policy in use (trained off-box)
+  const policyBots = Object.keys(learningBotTrainStatus?.metrics?.policy?.bySignalModel || {})
+  const aiOn = Boolean(settings?.learningBot?.aiEntryFilter?.enabled)
+  opsNote('AI entry filter', policyBots.length > 0 && aiOn,
+    `${aiOn ? 'ON' : 'OFF'} — policy covers ${policyBots.length} bot(s), ${aiRows} rows, ${trainMetrics.deviceUsed || 'n/a'} (trained off this server${settings?.learningBot?.aiTrainer?.enabled ? '' : '; on-box training disabled'})`)
+
+  const operations = {
+    checks: opsChecks,
+    allOk: opsChecks.every((c) => c.ok),
+    canTrade: autoOn && memOk && uptimeSec >= 60,
+    memory: { totalMemMb, freeMemMb, rssMb },
+    uptimeSec,
+    generatedAt: Date.now(),
+  }
+
   const currentPhase = !phase1Passed
     ? 'phase-1'
     : !phase2Passed
@@ -7117,12 +7239,14 @@ function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotT
     realizedDailyPnl,
     realizedMonthlyPnl,
     notifications: notifications.map((item) => item.id),
+    ops: operations.checks.map((c) => `${c.label}:${c.ok ? 1 : 0}`).join('|'),
   })
 
   return {
     currentPhase,
     phases: [phase1, phase2, phase3],
     notifications,
+    operations,
     trackedSymbols,
     validatedSymbols,
     summary: notifications[0]?.message || phase3.summary,
@@ -7144,6 +7268,7 @@ async function persistWorkflowReview(snapshot) {
     headline: snapshot.notifications[0]?.title || 'Workflow status updated',
     summary: snapshot.summary,
     notifications: snapshot.notifications,
+    operations: snapshot.operations || null,
     phases: snapshot.phases.map((phase) => ({
       key: phase.key,
       title: phase.title,
@@ -9685,13 +9810,14 @@ app.get('/api/settings-audit-log', async (_request, response) => {
 })
 
 app.get('/api/workflow-readiness', async (_request, response) => {
-  const [settings, history, autoTradeLog, learningBotTrainStatus] = await Promise.all([
+  const [settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns] = await Promise.all([
     syncPreferredSymbolsWithVolatility(await getSettings()),
     getTradeHistory(),
     getAutoTradeLog(),
     getLearningBotTrainStatus(),
+    getBacktestRunRegistry().catch(() => []),
   ])
-  const snapshot = evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus)
+  const snapshot = evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns)
   const reviewLog = await persistWorkflowReview(snapshot)
 
   response.json({
@@ -9701,6 +9827,7 @@ app.get('/api/workflow-readiness', async (_request, response) => {
     trackedSymbols: snapshot.trackedSymbols,
     validatedSymbols: snapshot.validatedSymbols,
     notifications: snapshot.notifications,
+    operations: snapshot.operations,
     phases: snapshot.phases,
     reviewLog,
   })
