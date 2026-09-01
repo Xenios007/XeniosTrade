@@ -11,7 +11,9 @@ export const DEFAULT_WALLET_SYNC_PROVIDER = 'BINANCE_FUTURES'
 export const MAIN_WALLET_KIND = 'MAIN'
 export const BOT_WALLET_KIND = 'BOT'
 export const MAIN_WALLET_ID = 'wallet-main'
-export const DEFAULT_BOT_ALLOCATION_USDT = 1000
+// 6000 USDT Binance Futures Testnet demo funds split evenly across 8 bot wallets.
+export const DEFAULT_BOT_WALLET_COUNT = 8
+export const DEFAULT_BOT_ALLOCATION_USDT = 750
 
 const DEFAULT_WALLET_BLUEPRINTS = [
   {
@@ -20,7 +22,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
     name: 'Main Wallet',
     colorKey: 'slate',
     balanceMode: EXCHANGE_SYNC_WALLET_BALANCE_MODE,
-    manualBalance: DEFAULT_BOT_ALLOCATION_USDT * 4,
+    manualBalance: DEFAULT_BOT_ALLOCATION_USDT * DEFAULT_BOT_WALLET_COUNT,
   },
   {
     id: 'wallet-model-1',
@@ -52,6 +54,38 @@ const DEFAULT_WALLET_BLUEPRINTS = [
     name: 'Wallet 4',
     assignedSignalModelId: 'model-4',
     colorKey: 'rose',
+    allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
+  },
+  {
+    id: 'wallet-model-5',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 5',
+    assignedSignalModelId: 'model-5',
+    colorKey: 'violet',
+    allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
+  },
+  {
+    id: 'wallet-model-6',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 6',
+    assignedSignalModelId: 'model-6',
+    colorKey: 'cyan',
+    allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
+  },
+  {
+    id: 'wallet-model-7',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 7',
+    assignedSignalModelId: 'model-7',
+    colorKey: 'fuchsia',
+    allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
+  },
+  {
+    id: 'wallet-model-8',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 8',
+    assignedSignalModelId: 'model-8',
+    colorKey: 'lime',
     allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
   },
 ]
