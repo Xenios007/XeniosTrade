@@ -3,7 +3,7 @@ import { DEFAULT_MARGIN_MODE, normalizeMarginMode } from './marginModes.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID, resolveTradeStylePresetId } from './strategyPresets.js'
 
 export const DEFAULT_SIGNAL_MODEL_ID = 'model-1'
-export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4']
+export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4', 'model-5', 'model-6', 'model-7', 'model-8']
 export const SIGNAL_MODEL_STRATEGY_OVERRIDE_KEYS = [
   'tradeStylePresetId',
   'marginMode',
@@ -140,6 +140,43 @@ const model4Signals = [
   },
 ]
 
+const model5Signals = [
+  { key: 'mr-regime-not-trend', label: 'Market not in a strong trend', detail: 'Mean reversion only fires when the higher-timeframe regime is range / low-vol / transition — never a strong bull or bear trend continuation.' },
+  { key: 'mr-zscore-stretch', label: 'Price statistically stretched from mean', detail: 'Close is at least ~1.6 standard deviations from the 20-bar mean (z-score), i.e. an outlier, not normal noise.' },
+  { key: 'mr-bollinger-extreme', label: 'Outside / at the Bollinger band', detail: 'Price sits beyond the outer Bollinger band on the fade side.' },
+  { key: 'mr-rsi-extreme', label: 'RSI oversold / overbought', detail: 'RSI14 confirms the exhaustion (below ~42 for longs, above ~58 for shorts).' },
+  { key: 'mr-atr-stretch', label: 'ATR-normalised deviation elevated', detail: '(close − mean) / ATR is stretched, so the move is large relative to recent volatility.' },
+  { key: 'mr-momentum-weakening', label: 'Pressure in the move is weakening', detail: 'RSI slope is no longer accelerating against the trade — selling (or buying) is losing steam.' },
+  { key: 'mr-reversal-candle', label: 'Reversal / reclaim candle', detail: 'The latest closed candle reclaims back toward the mean instead of extending the stretch.' },
+  { key: 'mr-volume-exhaustion', label: 'Volume exhaustion, not fresh impulse', detail: 'Relative volume is not spiking — the stretch looks like capitulation, not a new trend leg.' },
+]
+
+const model6Signals = [
+  { key: 'vb-compression', label: 'Prior compression / squeeze', detail: 'Bollinger band width was in the lower band of its recent range, or ATR had compressed — energy was coiling.' },
+  { key: 'vb-atr-expansion', label: 'ATR now expanding', detail: 'Current ATR is meaningfully above its value ~20 bars ago — volatility is releasing.' },
+  { key: 'vb-range-break', label: 'Break of the recent range', detail: 'Close is beyond the prior 20-bar high (long) or low (short).' },
+  { key: 'vb-not-overextended', label: 'Breakout not overextended', detail: 'Distance past the broken level is within ~0.8 ATR, so the entry is not chasing a stretched candle.' },
+  { key: 'vb-volume-expansion', label: 'Volume expansion on the break', detail: 'Relative volume above ~1.5× confirms real participation behind the move.' },
+  { key: 'vb-trend-context', label: 'Higher-timeframe not fighting it', detail: 'The 1h EMA structure / BTC context is aligned with, or at least neutral to, the breakout direction.' },
+]
+
+const model7Signals = [
+  { key: 'rf-is-ranging', label: 'Market is genuinely ranging', detail: 'Low ADX, flat EMA slope, bounded normalised price range, and a non-trending regime — proven sideways, not a pause in a trend.' },
+  { key: 'rf-range-not-broken', label: 'Range boundary intact', detail: 'Price has not closed beyond the range boundary by more than ~0.2 ATR. A range break invalidates the setup.' },
+  { key: 'rf-at-boundary', label: 'Price at a range extreme', detail: 'Price is in the lower ~20% of the range for longs, upper ~20% for shorts.' },
+  { key: 'rf-rejection-candle', label: 'Rejection candle off the boundary', detail: 'A prominent wick shows the boundary is being defended.' },
+  { key: 'rf-room-to-mid', label: 'Sufficient room toward the midpoint', detail: 'The distance to the range midpoint is at least ~1.2× the stop distance.' },
+]
+
+const model8Signals = [
+  { key: 'fc-funding-extreme', label: 'Funding rate at an extreme', detail: 'Funding is significantly negative (longs) or positive (shorts), or in the top/bottom decile of its own history. Funding alone never triggers a trade — it is only context.' },
+  { key: 'fc-funding-available', label: 'Genuine funding history for the period', detail: 'If funding history is missing for the period, the funding-dependent setup is skipped rather than assumed.' },
+  { key: 'fc-price-stretched', label: 'Price extended from VWAP / mean', detail: 'Z-score and VWAP distance confirm the crowd is offside, not just the funding print.' },
+  { key: 'fc-momentum-decelerating', label: 'Momentum decelerating', detail: 'RSI slope shows the prevailing push is losing force.' },
+  { key: 'fc-reversal-confirmation', label: 'Reversal candle confirmation', detail: 'A reclaim (longs) or rejection (shorts) candle closes against the crowded side.' },
+  { key: 'fc-structure-hold', label: 'Support / resistance evidence', detail: 'Price is holding above a recent swing low (longs) or below a recent swing high (shorts).' },
+]
+
 
 export const DEFAULT_BOT3_RISK_PRESET_ID = 'bot3-20'
 // Risk profiles tightened 2026-08-31 to cap the loss side: lower leverage,
@@ -189,10 +226,74 @@ export const DEFAULT_BOT4_MOMENTUM_SETTINGS = {
 }
 
 
+// Bots 5-8 risk profiles. Deliberately modest leverage and asymmetric SL/TP that
+// match each family's hypothesis (mean-reversion / range = small tight targets,
+// breakout / contrarian = wider room). These are starting points the backtest
+// then evaluates — the objective is dataset diversity, not tuned returns.
+export const DEFAULT_BOT5_MEAN_REVERSION_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 100,
+  leverage: 6,
+  maxOpenPositions: 1,
+  stopLossPercent: 0.7,
+  takeProfitPercent: 0.9,
+  maxTradesPerDay: 8,
+  maxLossesPerDay: 4,
+  maxLossPerDay: 18,
+  dailyProfitTarget: 50,
+}
+
+export const DEFAULT_BOT6_VOLATILITY_BREAKOUT_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 80,
+  leverage: 10,
+  maxOpenPositions: 1,
+  stopLossPercent: 0.8,
+  takeProfitPercent: 1.6,
+  maxTradesPerDay: 6,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 18,
+  dailyProfitTarget: 60,
+}
+
+export const DEFAULT_BOT7_RANGE_FADE_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 100,
+  leverage: 6,
+  maxOpenPositions: 1,
+  stopLossPercent: 0.5,
+  takeProfitPercent: 0.8,
+  maxTradesPerDay: 8,
+  maxLossesPerDay: 4,
+  maxLossPerDay: 15,
+  dailyProfitTarget: 45,
+}
+
+export const DEFAULT_BOT8_FUNDING_CONTRARIAN_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 100,
+  leverage: 8,
+  maxOpenPositions: 1,
+  stopLossPercent: 0.9,
+  takeProfitPercent: 1.4,
+  maxTradesPerDay: 4,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 15,
+  dailyProfitTarget: 45,
+}
+
 const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-1': DEFAULT_BOT1_SETTINGS,
   'model-2': DEFAULT_BOT2_SETTINGS,
   'model-4': DEFAULT_BOT4_MOMENTUM_SETTINGS,
+  'model-5': DEFAULT_BOT5_MEAN_REVERSION_SETTINGS,
+  'model-6': DEFAULT_BOT6_VOLATILITY_BREAKOUT_SETTINGS,
+  'model-7': DEFAULT_BOT7_RANGE_FADE_SETTINGS,
+  'model-8': DEFAULT_BOT8_FUNDING_CONTRARIAN_SETTINGS,
 }
 
 export const BOT3_RISK_PRESETS = [
@@ -288,6 +389,7 @@ export const SIGNAL_MODELS = [
     name: 'Bot 1',
     tag: 'Zone Confirmation',
     status: 'live',
+    strategyFamily: 'zone-reversal-breakout',
     description: 'Baseline professional support/resistance engine: treat levels as zones, wait for a real rejection pattern or a decisive breakout close, and only enter after a closed 5M confirmation.',
     executionRule: 'Auto-trade only after a closed 15M zone reaction or breakout plus a closed 5M confirmation. Need 6 of 8 signals aligned.',
     minimumScore: 6,
@@ -300,6 +402,7 @@ export const SIGNAL_MODELS = [
     name: 'Bot 2',
     tag: 'Order-Flow Filters',
     status: 'ready',
+    strategyFamily: 'flow-funding-confirmation',
     description: 'Bot 1 plus professional order-flow filters from delta, order book imbalance, and funding bias before the bot is allowed to enter.',
     executionRule: 'Auto-trade only after the Bot 1 structure confirms. Need 8 of 11 signals aligned and at least 2 of 3 professional filters.',
     minimumScore: 8,
@@ -313,6 +416,7 @@ export const SIGNAL_MODELS = [
     name: 'Bot 3',
     tag: 'Trend Pullback + Retest',
     status: 'ready',
+    strategyFamily: 'trend-pullback',
     description: 'Trend-following model built around structure, EMA, VWAP, and professional retests. It waits for pullbacks or breakout retests in trend direction and only acts after a closed 5M continuation trigger.',
     executionRule: 'Auto-trade when a pullback / retest context, a closed 5M continuation trigger, and 1:2 reward room line up. Need 4 of 8 signals. Higher-timeframe structure alignment is scored but no longer mandatory. Risk is handled by Bot 3\'s selected profit preset.',
     minimumScore: 4,
@@ -326,12 +430,65 @@ export const SIGNAL_MODELS = [
     name: 'Bot 4',
     tag: 'AI-Gated EMA/RSI Scalper',
     status: 'ready',
+    strategyFamily: 'momentum',
     description: 'Derives a simple 15M EMA20/EMA50 + 5M RSI14 directional bias across the full preferred-symbols universe, then hands the entry decision entirely to the AI entry score. Fixed 10 USDT margin at 50x with a hard 1 USDT loss cut per trade.',
     executionRule: 'Scan every preferred symbol. Long bias when 15M EMA20 > EMA50 and 5M RSI14 >= 50 (short bias mirrored). The AI entry score is the only go / no-go gate (hard block); while it has no self-trained policy it runs in bootstrap mode and takes every biased setup to build the dataset. Each trade uses 10 USDT margin at 50x, exits immediately once unrealized PnL hits -1 USDT, lets the take-profit run, and is capped at 40 trades per day.',
     minimumScore: 0,
     totalSignals: model4Signals.length,
     professionalSignalCount: 0,
     signals: model4Signals,
+  },
+  {
+    id: 'model-5',
+    name: 'Bot 5',
+    tag: 'Mean Reversion',
+    status: 'ready',
+    strategyFamily: 'mean-reversion',
+    description: 'Fades statistically stretched moves back toward the 20-bar mean / VWAP during non-trending or exhausted markets. Requires exhaustion and reclaim evidence — it does not blindly buy every oversold reading.',
+    executionRule: 'Only when the regime is not a strong trend. Needs 7 of 8 signals: z-score stretch, Bollinger extreme, RSI extreme, ATR-normalised stretch, weakening pressure, reversal/reclaim candle, and volume exhaustion. Targets the mean; stop beyond the extreme.',
+    minimumScore: 7,
+    totalSignals: model5Signals.length,
+    professionalSignalCount: 0,
+    signals: model5Signals,
+  },
+  {
+    id: 'model-6',
+    name: 'Bot 6',
+    tag: 'Volatility Breakout',
+    status: 'ready',
+    strategyFamily: 'volatility-breakout',
+    description: 'Captures genuine expansion out of compression: Bollinger squeeze / ATR compression followed by an ATR-normalised break of the recent range on expanding volume. Avoids chasing overextended breakout candles.',
+    executionRule: 'Needs 5 of 6 signals: prior compression, ATR now expanding, range break within ~0.8 ATR, relative volume > 1.5, a decisive closed breakout candle, and higher-timeframe context not fighting the move. Stop back inside the range; target a measured move capped at 3R.',
+    minimumScore: 5,
+    totalSignals: model6Signals.length,
+    professionalSignalCount: 0,
+    signals: model6Signals,
+  },
+  {
+    id: 'model-7',
+    name: 'Bot 7',
+    tag: 'Range / S-R Fade',
+    status: 'ready',
+    strategyFamily: 'range-fade',
+    description: 'Trades established sideways ranges rather than trend continuation. First proves the market is ranging (low ADX, flat EMA slope, bounded range, non-trending regime), then fades the boundaries toward the midpoint. A range break invalidates the setup. Complements Bot 3.',
+    executionRule: 'Range must be proven first. Needs 4 of 5 fade signals: price at a range extreme, rejection candle, momentum stabilising, and room to the midpoint of at least 1.2× the stop. Does not fade trend breakouts.',
+    minimumScore: 4,
+    totalSignals: model7Signals.length,
+    professionalSignalCount: 0,
+    signals: model7Signals,
+  },
+  {
+    id: 'model-8',
+    name: 'Bot 8',
+    tag: 'Funding Contrarian',
+    status: 'ready',
+    strategyFamily: 'funding-contrarian',
+    description: 'Trades crowded futures positioning when funding and price extension both indicate a contrarian opportunity. Funding alone never triggers a trade — price/action confirmation is mandatory. If funding history is missing for a period, the setup is skipped, never assumed.',
+    executionRule: 'Needs the funding-extreme condition plus 4 of 5 price/action confirmations: z-score / VWAP extension, decelerating momentum, a reversal candle, and swing-structure hold. Stop with ATR room; target back to VWAP / mean.',
+    minimumScore: 5,
+    totalSignals: model8Signals.length,
+    professionalSignalCount: 0,
+    signals: model8Signals,
   },
 ]
 

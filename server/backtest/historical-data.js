@@ -25,6 +25,14 @@ export const INTERVAL_MS = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+class PermanentHttpError extends Error {
+  constructor(status, url) {
+    super(`HTTP ${status} for ${url}`)
+    this.status = status
+    this.permanent = true
+  }
+}
+
 async function fetchJsonWithRetry(url, { retries = 4 } = {}) {
   let lastError = null
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -38,6 +46,11 @@ async function fetchJsonWithRetry(url, { retries = 4 } = {}) {
           await sleep(wait)
           continue
         }
+        // 4xx other than rate-limit is permanent (e.g. -1121 "Invalid symbol"
+        // when a symbol has no spot listing) — do not burn retries + backoff.
+        if (response.status >= 400 && response.status < 500) {
+          throw new PermanentHttpError(response.status, url)
+        }
         if (!response.ok) {
           throw new Error(`HTTP ${response.status} for ${url}`)
         }
@@ -47,6 +60,7 @@ async function fetchJsonWithRetry(url, { retries = 4 } = {}) {
       }
     } catch (error) {
       lastError = error
+      if (error instanceof PermanentHttpError) break
       if (attempt < retries) {
         await sleep(Math.round(400 * (2 ** attempt) * (1 + Math.random() * 0.4)))
       }
@@ -55,16 +69,33 @@ async function fetchJsonWithRetry(url, { retries = 4 } = {}) {
   throw lastError
 }
 
+// Symbols that returned a permanent 4xx on spot — skip spot for them entirely
+// on subsequent pages (e.g. 1000PEPEUSDT is USD-M futures only).
+const spotUnavailable = new Set()
+
 async function fetchKlinePage(symbol, interval, startTime, endTime) {
   let lastError = null
-  for (const base of SPOT_BASES) {
-    try {
-      const url = `${base}/klines?symbol=${symbol}&interval=${interval}&limit=1000`
-        + `&startTime=${startTime}&endTime=${endTime}`
-      return await fetchJsonWithRetry(url)
-    } catch (error) {
-      lastError = error
+  if (!spotUnavailable.has(symbol)) {
+    for (const base of SPOT_BASES) {
+      try {
+        const url = `${base}/klines?symbol=${symbol}&interval=${interval}&limit=1000`
+          + `&startTime=${startTime}&endTime=${endTime}`
+        return await fetchJsonWithRetry(url)
+      } catch (error) {
+        lastError = error
+        if (error && error.permanent) { spotUnavailable.add(symbol); break }
+      }
     }
+  }
+  // Fallback to USD-M futures klines for symbols that do not trade on Binance
+  // spot (e.g. 1000PEPEUSDT). Same row shape as spot klines. This is genuine
+  // Binance data for the exact symbol, not a substitute.
+  try {
+    const url = `${FUTURES_BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=1000`
+      + `&startTime=${startTime}&endTime=${endTime}`
+    return await fetchJsonWithRetry(url)
+  } catch (error) {
+    lastError = error
   }
   throw lastError
 }

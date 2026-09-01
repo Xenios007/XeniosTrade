@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +52,7 @@ import {
   normalizeAutoTradeSessions,
 } from '../src/lib/tradingSessions.js'
 import { getCodexConsoleStatus, runCodexConsoleTurn } from './codex-console.js'
+import { BOT5TO8_BUILDERS } from './strategy/bots5to8.js'
 
 dotenv.config()
 
@@ -1479,6 +1481,19 @@ function isLiveServerRuntime() {
 function resolveLearningBotRuntimeCommand(command) {
   const normalizedCommand = typeof command === 'string' ? command.trim() : ''
 
+  // Local backtest/dev box: prefer the bundled trainer venv when present so
+  // `python3` (which is a Store stub on Windows) resolves to a real interpreter
+  // with torch installed. Falls back to `python` on win32, `python3` elsewhere.
+  if (process.platform === 'win32') {
+    const venvPython = path.join(__dirname, 'learning-bot', '.venv', 'Scripts', 'python.exe')
+    if ((!normalizedCommand || normalizedCommand === 'python3' || normalizedCommand === 'python') && existsSync(venvPython)) {
+      return venvPython
+    }
+    if (normalizedCommand === 'python3') {
+      return 'python'
+    }
+  }
+
   if (!normalizedCommand) {
     return defaultLearningBotTrainerRuntimeCommand
   }
@@ -1588,6 +1603,24 @@ async function readJson(filePath, fallback) {
 async function writeJson(filePath, value) {
   await ensureDir()
   await fs.writeFile(filePath, JSON.stringify(value, null, 2))
+}
+
+// The learning-bot training dataset artifact ({generatedAt, config, rows}) can
+// carry 80k+ feature-rich rows (~600 MB) — past V8's max string length, so it
+// must be streamed. Produces valid JSON that Python's json.load reads fine.
+async function writeDatasetArtifact(filePath, artifact) {
+  await ensureDir()
+  const { rows = [], ...rest } = artifact || {}
+  if (!Array.isArray(rows) || rows.length < 20_000) {
+    await fs.writeFile(filePath, JSON.stringify(artifact ?? {}, null, 2))
+    return
+  }
+  const { writeDatasetArtifactStreamed } = await import('./backtest/ndjson.js')
+  await writeDatasetArtifactStreamed(filePath, {
+    generatedAt: rest.generatedAt ?? Date.now(),
+    config: rest.config ?? {},
+    rows,
+  })
 }
 
 function getContentHash(value = '') {
@@ -1994,7 +2027,75 @@ function getLearningBotEligibleClosedTrades(history = [], config = defaultLearni
     .filter((trade) => (focusSignalModelId ? ensureSignalModelId(trade.signalModelId) === focusSignalModelId : true))
 }
 
-function buildLearningBotDataset(history = [], config = defaultLearningBotSettings) {
+// Forbidden as AI INPUT — anything known only after the entry. These may appear
+// on a training row only inside `label` / `reward` / `mistakeTags` (targets and
+// reporting), never inside `features`. buildLearningBotTrainingRowV2 enforces
+// this and rl_trainer.py re-checks it at load.
+const LEARNING_BOT_FORBIDDEN_FEATURE_KEYS = new Set([
+  'status', 'result', 'outcome', 'pnl', 'grossPnl', 'netPnl', 'netR', 'netReturn',
+  'exitPrice', 'exitReason', 'win', 'tpBeforeSl', 'timedOut', 'holdBars', 'holdHours',
+  'mfe', 'mae', 'maxFavorableExcursion', 'maxAdverseExcursion', 'mistakeTags',
+  'reward', 'label', 'closedAt', 'closedDateKey', 'tradeDuration',
+])
+
+export function assertNoLeakageInFeatures(features, rowId) {
+  if (!features || typeof features !== 'object') return
+  for (const key of Object.keys(features)) {
+    if (LEARNING_BOT_FORBIDDEN_FEATURE_KEYS.has(key)) {
+      throw new Error(`Leakage: forbidden outcome key "${key}" found in features of row ${rowId}`)
+    }
+  }
+}
+
+// v2 training row: explicit features{} (entry-time only) vs label{}/reward (outcome).
+export function buildLearningBotTrainingRowV2(trade) {
+  const features = trade.features && typeof trade.features === 'object' ? { ...trade.features } : {}
+  assertNoLeakageInFeatures(features, trade.id)
+  const label = trade.label && typeof trade.label === 'object' ? trade.label : {
+    outcome: trade.status,
+    win: Number(trade.pnl || 0) > 0 ? 1 : 0,
+    tpBeforeSl: trade.status === 'CLOSED_TP' && !trade.timedOut ? 1 : 0,
+    netR: null,
+    netReturn: null,
+    pnl: Number(trade.pnl || 0),
+    grossPnl: Number(trade.grossPnl ?? trade.pnl ?? 0),
+    frictionUsd: Number(trade.frictionUsd || 0),
+    timedOut: Boolean(trade.timedOut),
+  }
+  return {
+    schemaVersion: 2,
+    id: trade.id,
+    runId: trade.runId || null,
+    symbol: trade.symbol,
+    isExtendedUniverse: Boolean(trade.isExtendedUniverse),
+    timestamp: trade.timestamp || trade.transactTime || null,
+    signalModelId: ensureSignalModelId(trade.signalModelId),
+    signalModelName: trade.signalModelName || 'Unknown',
+    strategyFamily: trade.strategyFamily || getSignalModel(trade.signalModelId)?.strategyFamily || 'legacy',
+    setupFamily: trade.setupFamily || inferLearningBotSetupFamily(trade.signalSummary),
+    side: trade.side,
+    marketRegime: trade.marketRegime || 'UNKNOWN',
+    split: trade.split || 'train',
+    featureVersion: trade.featureVersion || 'unknown',
+    features,
+    entryQualityScore: scoreLearningBotEntryQuality(trade), // clean: summary text + SL% + leverage only
+    configuredStopLossPercent: Number(Number(trade.configuredStopLossPercent || 0).toFixed(4)),
+    leverage: Number(trade.leverage || 0),
+    summary: String(trade.signalSummary || '').trim(),
+    // ---- targets / reporting only ----
+    label,
+    reward: Number(trade.reward ?? 0),
+    mistakeTags: buildLearningBotMistakeTags(trade), // reporting only — NOT a feature
+    // legacy mirrors for existing summarisers
+    status: trade.status,
+    result: trade.result,
+    pnl: Number(Number(trade.pnl || 0).toFixed(2)),
+    closedAt: trade.closedAt || trade.transactTime || null,
+    tradeDateKey: trade.tradeDateKey || null,
+  }
+}
+
+export function buildLearningBotDataset(history = [], config = defaultLearningBotSettings) {
   const eligibleClosedTrades = getLearningBotEligibleClosedTrades(history, config)
   // reviewWindowTrades <= 0 means "no window" - train on every eligible closed trade.
   const closedTrades = Number(config.reviewWindowTrades) > 0
@@ -2002,11 +2103,18 @@ function buildLearningBotDataset(history = [], config = defaultLearningBotSettin
     : eligibleClosedTrades
 
   return closedTrades.map((trade) => {
+    // v2 rows from the 8-bot replay carry an explicit feature vector + label.
+    if (trade.schemaVersion === 2 || (trade.features && typeof trade.features === 'object')) {
+      return buildLearningBotTrainingRowV2(trade)
+    }
+
+    // Legacy v1 row (old 4-bot data / real trades without a captured feature vector).
     const setupFamily = inferLearningBotSetupFamily(trade.signalSummary)
     const mistakeTags = buildLearningBotMistakeTags(trade)
     const pnl = Number(trade.pnl || 0)
 
     return {
+      schemaVersion: 1,
       id: trade.id,
       symbol: trade.symbol,
       side: trade.side,
@@ -2015,10 +2123,15 @@ function buildLearningBotDataset(history = [], config = defaultLearningBotSettin
       result: trade.result,
       signalModelId: ensureSignalModelId(trade.signalModelId),
       signalModelName: trade.signalModelName || 'Unknown',
+      strategyFamily: getSignalModel(trade.signalModelId)?.strategyFamily || 'legacy',
       setupFamily,
+      marketRegime: trade.marketRegime || 'UNKNOWN',
+      split: trade.split || 'train',
+      features: null,
       entryQualityScore: scoreLearningBotEntryQuality(trade),
       mistakeTags,
       pnl: Number(pnl.toFixed(2)),
+      reward: Number(pnl.toFixed(2)),
       leverage: Number(trade.leverage || 0),
       configuredStopLossPercent: Number(Number(trade.configuredStopLossPercent || 0).toFixed(4)),
       summary: String(trade.signalSummary || '').trim(),
@@ -2182,10 +2295,20 @@ async function getFlaggedBacktestRunRows(alreadyLoadedPaths = []) {
   const skip = new Set(alreadyLoadedPaths.map((p) => path.resolve(p)))
   const flagged = registry.filter((run) => run && run.includeInTraining === true && run.dataFile)
   const out = []
+  const { readRunRows, readRowsNdjson } = await import('./backtest/ndjson.js')
   for (const run of flagged) {
     const abs = path.resolve(dataDir, String(run.dataFile))
     if (skip.has(abs)) continue
     skip.add(abs)
+    // Full-feature 5-year datasets are ~600 MB NDJSON — past V8's max string
+    // length, so they must be streamed, never JSON.parsed as one blob.
+    if (String(run.dataFile).endsWith('.ndjson')) {
+      const rows = existsSync(abs)
+        ? await readRowsNdjson(abs)
+        : await readRunRows(dataDir, run.id)
+      for (const row of rows) out.push(row)
+      continue
+    }
     const rows = await readJson(abs, [])
     if (Array.isArray(rows)) {
       for (const row of rows) out.push(row)
@@ -2262,7 +2385,7 @@ function buildLearningBotDatasetFingerprint(dataset = []) {
 
 export async function refreshLearningBotDatasetArtifact(config = defaultLearningBotSettings) {
   const { artifact, dataset, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady, source } = await getPreferredLearningBotDataset(config)
-  await writeJson(learningBotDatasetFilePath, artifact)
+  await writeDatasetArtifact(learningBotDatasetFilePath, artifact)
 
   return {
     artifact,
@@ -2300,7 +2423,7 @@ export async function launchLearningBotTraining({ config, dataset }) {
   }
 
   const datasetArtifact = buildLearningBotTrainingDatasetArtifact(dataset, config)
-  await writeJson(learningBotDatasetFilePath, datasetArtifact)
+  await writeDatasetArtifact(learningBotDatasetFilePath, datasetArtifact)
   await writeJson(learningBotTrainConfigFilePath, {
     generatedAt: Date.now(),
     learningBot: config,
@@ -6231,6 +6354,29 @@ export function buildSignalAnalysisSnapshot(
     }), closedEntryTimeframe)
   }
 
+  // Bots 5-8 — mean-reversion / volatility-breakout / range-fade / funding-contrarian.
+  // Genuinely different families with their own indicator stacks; they read mostly
+  // from the closed 5m window plus the 1h window for regime context.
+  if (BOT5TO8_BUILDERS[signalModel.id]) {
+    const builder = BOT5TO8_BUILDERS[signalModel.id]
+    const snapshot = builder({
+      symbol,
+      signalModel,
+      effectiveStrategy,
+      closedBiasTimeframe,
+      closedSetupTimeframe,
+      closedEntryTimeframe,
+      marketContext,
+      regime4hTimeframe: marketContext?.regime4hCandles || null,
+    }) || buildEmptySignalSnapshot({
+      symbol,
+      signalModel,
+      effectiveStrategy,
+      entryPrice: latestEntry?.close ?? null,
+    })
+    return attachPatternInsight(snapshot, closedEntryTimeframe)
+  }
+
   if (
     closedBiasTimeframe.length < 24
     || closedSetupTimeframe.length < 34
@@ -6341,6 +6487,8 @@ export function analyzeSymbolStrategy(
     direction: snapshot.direction,
     signalModelId: snapshot.signalModelId,
     signalModelName: snapshot.signalModelName,
+    strategyFamily: snapshot.strategyFamily || getSignalModel(snapshot.signalModelId)?.strategyFamily || null,
+    setupFamily: snapshot.setupFamily || null,
     score: snapshot.score,
     maxScore: snapshot.maxScore,
     professionalSignalScore: snapshot.professionalSignalScore,

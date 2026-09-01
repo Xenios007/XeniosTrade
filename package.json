@@ -9,6 +9,8 @@
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",
+    "test": "node --test --test-force-exit \"test/**/*.test.js\"",
+    "test:py": "server/learning-bot/.venv/Scripts/python.exe -m pytest server/learning-bot/tests -q",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -21,7 +23,7 @@
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^6.30.6"
+    "react-router-dom": "^7.18.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.5.0",

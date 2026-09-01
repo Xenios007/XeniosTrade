@@ -28,3 +28,18 @@ launcher-logs/
 # Backtest run data & generated reports (large / machine-generated — rsync, not git)
 server/data/backtest-runs/
 server/backtest/runs/
+
+# Historical market-data cache (raw Binance candles/funding — large, re-fetchable)
+server/data/historical-cache/
+
+# AI training artifacts — model binaries, checkpoints, generated datasets, reports
+server/data/learning-bot-*.json
+server/data/ai-training/
+server/data/models/
+server/learning-bot/artifacts/
+server/learning-bot/**/*.pt
+server/learning-bot/**/*.pth
+server/learning-bot/**/*.ckpt
+server/learning-bot/**/__pycache__/
+server/backtest/reports/
+*.parquet

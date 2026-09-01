@@ -51,7 +51,7 @@ if (-not (Test-Path $viteScriptPath)) {
 if (-not (Test-HttpEndpoint -Url $backendHealthUrl)) {
   Start-Process `
     -FilePath $nodePath `
-    -ArgumentList 'server/mock-trading-server.js' `
+    -ArgumentList '--max-old-space-size=8192', 'server/mock-trading-server.js' `
     -WorkingDirectory $projectRoot `
     -WindowStyle Minimized `
     -RedirectStandardOutput (Join-Path $logDir 'backend.out.log') `
