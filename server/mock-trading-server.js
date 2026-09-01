@@ -1593,6 +1593,19 @@ async function readJson(filePath, fallback) {
     }
 
     if (error instanceof SyntaxError) {
+      // Primary file is corrupt (e.g. a write interrupted by a crash). Try the
+      // last-good backup before falling back to the empty default — silently
+      // returning `fallback` here is how a read/modify/write caller can wipe
+      // months of trade history after one bad shutdown.
+      try {
+        const backup = await fs.readFile(`${filePath}.bak`, 'utf8')
+        if (backup.trim()) {
+          const parsed = JSON.parse(backup)
+          console.error(`readJson: ${path.basename(filePath)} was corrupt — recovered from .bak`)
+          return parsed
+        }
+      } catch { /* no usable backup */ }
+      console.error(`readJson: ${path.basename(filePath)} was corrupt and no .bak — using fallback`)
       return fallback
     }
 
@@ -1600,9 +1613,31 @@ async function readJson(filePath, fallback) {
   }
 }
 
+// Files that are large and fully derived from other sources — not worth a .bak
+// copy on every write (atomic rename still applies).
+const WRITE_JSON_NO_BACKUP = new Set([learningBotDatasetFilePath])
+
 async function writeJson(filePath, value) {
   await ensureDir()
-  await fs.writeFile(filePath, JSON.stringify(value, null, 2))
+  const json = JSON.stringify(value, null, 2)
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`
+  await fs.writeFile(tmp, json)
+
+  if (!WRITE_JSON_NO_BACKUP.has(filePath)) {
+    try {
+      const prev = await fs.readFile(filePath, 'utf8')
+      const trimmed = prev.trim()
+      if (trimmed && trimmed !== '[]' && trimmed !== '{}') {
+        // Only keep a backup if the current file parses — never overwrite a good
+        // .bak with a corrupt primary.
+        JSON.parse(prev)
+        await fs.writeFile(`${filePath}.bak`, prev)
+      }
+    } catch { /* no prior file, or prior file already corrupt — leave .bak as-is */ }
+  }
+
+  // Atomic replace: a crash leaves either the old file or the complete new one.
+  await fs.rename(tmp, filePath)
 }
 
 // The learning-bot training dataset artifact ({generatedAt, config, rows}) can
@@ -2383,11 +2418,42 @@ function buildLearningBotDatasetFingerprint(dataset = []) {
   ].join(':')
 }
 
+// The training dataset is derived from trade-history.json + backtest-history.json
+// + flagged per-run files. backtest-history.json alone is ~120 MB / ~117k rows,
+// so rebuilding + re-serialising it on every /api/learning-bot/* poll (train
+// status polls every 20 s) exhausts the heap. Cache the built artifact and only
+// rebuild when an input file's mtime or a relevant config field actually changes.
+let learningBotArtifactCache = { key: null, value: null }
+
+async function computeLearningBotDatasetCacheKey(config) {
+  const parts = [
+    config.includeBacktestData !== false ? 'bt1' : 'bt0',
+    `rw${config.reviewWindowTrades || 0}`,
+    `fs${config.focusSource || ''}`,
+    `sc${config.trainingScope || ''}`,
+    `fm${config.focusSignalModelId || ''}`,
+  ]
+  for (const filePath of [historyFilePath, backtestHistoryFilePath, backtestRunsRegistryFilePath]) {
+    try {
+      const stat = await fs.stat(filePath)
+      parts.push(`${path.basename(filePath)}:${stat.mtimeMs}:${stat.size}`)
+    } catch {
+      parts.push(`${path.basename(filePath)}:0`)
+    }
+  }
+  return parts.join('|')
+}
+
 export async function refreshLearningBotDatasetArtifact(config = defaultLearningBotSettings) {
+  const cacheKey = await computeLearningBotDatasetCacheKey(config)
+  if (learningBotArtifactCache.key === cacheKey && learningBotArtifactCache.value) {
+    return learningBotArtifactCache.value
+  }
+
   const { artifact, dataset, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady, source } = await getPreferredLearningBotDataset(config)
   await writeDatasetArtifact(learningBotDatasetFilePath, artifact)
 
-  return {
+  const result = {
     artifact,
     dataset,
     eligibleClosedTradeCount,
@@ -2395,6 +2461,8 @@ export async function refreshLearningBotDatasetArtifact(config = defaultLearning
     realMoneyTradeReady,
     source,
   }
+  learningBotArtifactCache = { key: cacheKey, value: result }
+  return result
 }
 
 function hydrateLearningBotTrainStatus(status = defaultLearningBotTrainStatus, datasetSnapshot = null) {
@@ -9037,6 +9105,9 @@ app.get('/api/learning-bot/dataset', async (_request, response) => {
     const config = normalizeLearningBotSettings(settings.learningBot)
     const { artifact, source, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady } = await refreshLearningBotDatasetArtifact(config)
 
+    // The full dataset can be ~117k rows / ~90 MB. The UI only needs the count
+    // plus a small preview, and this endpoint is polled every 20 s, so cap it.
+    const allRows = Array.isArray(artifact?.rows) ? artifact.rows : []
     response.json({
       ok: true,
       source,
@@ -9044,7 +9115,11 @@ app.get('/api/learning-bot/dataset', async (_request, response) => {
       realMoneyTradeTarget,
       realMoneyTradeReady,
       realMoneyTradesRemaining: Math.max(realMoneyTradeTarget - eligibleClosedTradeCount, 0),
-      ...artifact,
+      generatedAt: artifact?.generatedAt || null,
+      config: artifact?.config || null,
+      rowCount: allRows.length,
+      rows: allRows.slice(0, 200),
+      truncated: allRows.length > 200,
     })
   } catch (error) {
     response.status(500).json({

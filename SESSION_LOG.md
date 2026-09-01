@@ -29,6 +29,39 @@ rate, still deeply negative on all three. **NOT merged into training** (no live
 counterpart — Bot 4 only; would skew the shared policy bucket). Data kept at
 `server/data/backtest-moneystop.json`.
 
+### 2026-08-31 ~19:50 UTC — OOM wipe, hardening, fresh-month config
+
+**Incident:** server OOM crash-looped (33+ restarts). Cause: `giveitroom-2x`
+run got re-flagged `includeInTraining:true` during the git sync → 175k-row
+dataset → `refreshLearningBotDatasetArtifact` rebuilt + re-serialised ~130 MB on
+*every* `/api/learning-bot/*` poll (train-status polls 20 s) → heap exhausted at
+the 896 MB cap. A `writeJson` interrupted mid-write left `trade-history.json`
+corrupt; `readJson` silently returns `[]` on parse error, so the trade-close
+read/modify/write path **rebuilt trade-history.json from empty** → the ~1,182
+historical real trades were lost. **No backup existed** (gitignored, no `.bak`,
+no snapshot). Only ~50 partial opens salvageable from `auto-trade-log.json`
+(→ `server/data/_recovery/`). The trained policy survived — real trades were
+~1% of the 118k training set; retrained clean on the 117k backtest rows.
+
+**Fixes (all in `server/mock-trading-server.js`, uncommitted):**
+- `refreshLearningBotDatasetArtifact` now caches on an mtime+config fingerprint
+  (`computeLearningBotDatasetCacheKey`) — rebuilds only when trade-history /
+  backtest-history / the registry actually change, not every poll.
+- `/api/learning-bot/dataset` response capped to 200 rows + `rowCount`.
+- `writeJson` is now **atomic** (tmp + `rename`) and keeps a `.bak` of the last
+  good version (except the derived `learning-bot-dataset.json`).
+- `readJson` recovers from `<file>.bak` on `SyntaxError` before falling back.
+- pm2 `--max-old-space-size` 896 → **2048**, `pm2 save`d.
+- Registry: only `main-12mo-2026-08` is `includeInTraining:true`.
+
+**Fresh-month config (settings revision 64 → 65, recovery synced):**
+`aiEntryFilter.paperOnly:false` (hard-block) kept; **all thresholds 60/62/62/60/50
+→ 35** (global + every perBotOverride). Server serves this as a PAPER test bench
+for a clean month of live paper trades scored by the 117k-row policy; local PC
+does backtest generation. Real money only if the month is profitable. Confirmed
+live: scan logs show "hard-block with threshold 35"; all 4 bots scanning, bots
+1/3/4 already traded today.
+
 ### Pocket-mining + "give it room" backtest — no edge found
 
 Mined all 117k baseline rows for a positive conditional pocket (bot × side ×
