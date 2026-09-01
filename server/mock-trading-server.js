@@ -2640,6 +2640,15 @@ async function maybeRefreshLearningBotPolicy(trigger = 'UNKNOWN', settingsOverri
       return { started: false, reason: 'up-to-date', rows: dataset.length }
     }
 
+    // aiEntryFilter can be on (scoring live candidates against the current policy)
+    // while aiTrainer is off (the policy is a frozen, deliberately-uploaded model —
+    // e.g. a CUDA-trained multi-bot artifact). Without this gate every trade close
+    // would relaunch a full CPU retrain over the whole backtest-history dataset and
+    // overwrite that model.
+    if (!config.aiTrainer.enabled) {
+      return { started: false, reason: 'auto-retrain-disabled', rows: dataset.length }
+    }
+
     logTerminalLine('AI', `Refreshing AI policy after ${trigger.toLowerCase().replace(/_/g, ' ')} using ${dataset.length} closed trades.`, 'accent')
     await launchLearningBotTraining({ config, dataset })
     return { started: true, rows: dataset.length }
