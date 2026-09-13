@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { formatPercent } from '../lib/formatters'
 import { summarizeAccount } from '../lib/accountMetrics'
-import { getWalletById, getWalletEffectiveStartingBalance } from '../lib/wallets'
+import { getRealMoneyWallet, getWalletById, getWalletEffectiveStartingBalance, isRealMoneyWallet } from '../lib/wallets'
 import { Panel } from './Panel'
 
 const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -98,6 +98,13 @@ function getWalletTone(walletColorKey) {
     return {
       badge: 'border-white/10 bg-white/[0.04] text-slate-100',
       accent: 'text-slate-100',
+    }
+  }
+
+  if (walletColorKey === 'crimson') {
+    return {
+      badge: 'border-red-400/20 bg-red-400/10 text-red-100',
+      accent: 'text-red-300',
     }
   }
 
@@ -606,6 +613,121 @@ export function JournalWalletPage(props) {
         availableMonths={availableMonths}
         monthIndex={monthIndex}
       />
+    </div>
+  )
+}
+
+function RealMoneyFundingCard({ wallet }) {
+  if (!wallet) {
+    return (
+      <Panel title="Real Money Funding Wallet">
+        <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-4 text-sm text-amber-100">
+          The real money wallet has not been created yet. Reopen this page after the backend has synced settings once.
+        </div>
+      </Panel>
+    )
+  }
+
+  const status = String(wallet.production?.syncStatus || 'NOT_CONNECTED')
+  const statusTone = status === 'CONNECTED'
+    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+    : status === 'ERROR' || status === 'MISSING_CREDENTIALS'
+      ? 'border-rose-400/20 bg-rose-400/10 text-rose-100'
+      : 'border-amber-400/20 bg-amber-400/10 text-amber-100'
+  const fundingBalance = wallet.production?.lastSyncedBalance ?? wallet.manualBalance
+  const availableBalance = wallet.production?.lastSyncedAvailableBalance ?? wallet.manualBalance
+
+  return (
+    <Panel title="Real Money Funding Wallet">
+      <div className="rounded-2xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-100">
+        This is the live Binance Futures account — real funds, not a simulation. No bot places live orders yet; this card only reflects the funding balance once live API keys are connected.
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <WalletSummarySection label="Funding Balance" value={formatBalance(fundingBalance)} />
+        <WalletSummarySection label="Available Balance" value={formatBalance(availableBalance)} />
+        <WalletSummarySection label="Sync Status" value={status.replace(/_/g, ' ')} />
+      </div>
+      <div className={`mt-4 rounded-2xl border px-4 py-4 text-sm ${statusTone}`}>
+        {status === 'CONNECTED'
+          ? 'Live Binance Futures account connected. No bot is trading real money yet.'
+          : 'Add the live Binance Futures API key and secret in Settings → API Credentials, then sync from Wallets → Real Money.'}
+      </div>
+    </Panel>
+  )
+}
+
+/**
+ * Real-money counterpart to the Wallet Journal. Shows the live funding
+ * wallet's status plus a calendar for any real-money trading wallet — empty
+ * today since real money trading has not started, but wired the same way as
+ * the testnet wallet journal so it activates automatically once one exists.
+ */
+export function JournalRealMoneyPage(props) {
+  const { walletViews, availableMonths, displayMonth, setActiveMonth, monthIndex } = useJournalViews(props)
+  const realMoneyViews = walletViews.filter((view) => {
+    const walletConfig = getWalletById(view.walletId, props.wallets)
+    return walletConfig && isRealMoneyWallet(walletConfig)
+  })
+  const fundingWallet = props.data?.realMoneyMainWallet || getRealMoneyWallet(props.wallets) || null
+  const [selectedWalletId, setSelectedWalletId] = useState('')
+
+  useEffect(() => {
+    if (realMoneyViews.length === 0) {
+      return
+    }
+
+    if (!realMoneyViews.some((wallet) => wallet.walletId === selectedWalletId)) {
+      setSelectedWalletId(realMoneyViews[0].walletId)
+    }
+  }, [realMoneyViews, selectedWalletId])
+
+  const activeView = realMoneyViews.find((wallet) => wallet.walletId === selectedWalletId) || realMoneyViews[0]
+
+  return (
+    <div className="space-y-4">
+      <RealMoneyFundingCard wallet={fundingWallet} />
+
+      {realMoneyViews.length === 0 ? (
+        <Panel title="Real Money Journal">
+          <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
+            No live trades yet — real money trading has not started. See Wallets → Real Money and Settings → API Credentials
+            to prepare, and GO_LIVE_READINESS.md for the go-live checklist. Once a live trading wallet is funded and enabled,
+            its trade calendar will appear here automatically.
+          </div>
+        </Panel>
+      ) : (
+        <>
+          {realMoneyViews.length > 1 ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Viewing wallet</span>
+              <label className="relative">
+                <span className="sr-only">Select wallet</span>
+                <select
+                  value={activeView.walletId}
+                  onChange={(event) => setSelectedWalletId(event.target.value)}
+                  className="appearance-none rounded-full border border-red-400/40 bg-red-400/12 py-2 pl-4 pr-10 text-sm font-semibold text-red-100 outline-none transition focus:border-red-300/60 focus:ring-2 focus:ring-red-400/20"
+                >
+                  {realMoneyViews.map((wallet) => (
+                    <option key={wallet.walletId} value={wallet.walletId} className="bg-slate-900 text-white">
+                      {wallet.walletName} — {wallet.assignedSignalModelName}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-red-200" />
+              </label>
+            </div>
+          ) : null}
+
+          <WalletJournalCalendar
+            key={activeView.walletId}
+            walletView={activeView}
+            activeMonth={displayMonth}
+            onMonthChange={setActiveMonth}
+            availableMonths={availableMonths}
+            monthIndex={monthIndex}
+          />
+        </>
+      )}
     </div>
   )
 }

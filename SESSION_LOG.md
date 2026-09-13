@@ -10,7 +10,138 @@ every session. Times are UTC. Server logs are UTC+8 (Asia/Manila).
 
 ---
 
-## WHERE WE LEFT OFF  — as of 2026-08-31 17:30 UTC
+## WHERE WE LEFT OFF  — as of 2026-09-13
+
+### Real-money dashboard control page follow-up (frontend rebuilt and deployed)
+
+Dashboard -> Real Money Trading now has a clearer live-money control surface:
+status cards for live-trade lock/sync/readiness, a summary row for assigned bot,
+funding balance, available balance, realized P/L, and win rate, plus a bot
+assignment selector wired to `strategy.realMoneySignalModelId`. It also receives
+`aiTrainingStatus` so the page can show the reviewed-trade gate progress. This
+remains UI/control-state only: live order placement is still intentionally
+disabled, matching `GO_LIVE_READINESS.md`. Ran `npm run build` and copied
+`dist/` to `/var/www/xeniostrade`.
+
+### Real-money wallet, live-API credential, and journal scaffolding (deployed — pm2 restarted, dist rebuilt)
+
+Owner asked to "prepare the system for real money trading so that we just need
+to add the API for it when real money trading is on." This is infrastructure
+only — **no order-placement code path was touched**, so `GO_LIVE_READINESS.md`'s
+answer stays **NO** exactly as before. What changed:
+
+1. **Wallet model gets an `environment` field** (`src/lib/wallets.js`):
+   `TESTNET` (existing main + 8 bot wallets, unchanged behavior) vs
+   `REAL_MONEY` (new). New default wallet `wallet-real-money` (kind `MAIN`,
+   `balanceMode: EXCHANGE_SYNC`, `syncProvider: BINANCE_FUTURES_LIVE`,
+   `enabled: false`, `manualBalance: 0`) is synthesized automatically by
+   `normalizeWallets` the same way the other 9 always have been — no manual
+   settings.json edit was needed. `getMainWallet(wallets, environment)` now
+   takes an environment (defaults to `TESTNET`, so every existing call site is
+   unaffected); new `getRealMoneyWallet()` / `isRealMoneyWallet()` /
+   `isTestnetWallet()` exports. **Fixed a latent collision**: with a second
+   `MAIN`-kind blueprint, `findMatchingWallet` would have matched both
+   blueprints to the same incoming `wallet-main` row (untagged legacy wallets
+   have no `environment` field) and produced two wallets sharing one id — now
+   matches main-kind wallets by environment too, with "untagged = testnet".
+   Verified with a throwaway script against the live `wallet-main` (real
+   $853.45 synced balance) before touching the running server — no collision,
+   old wallet's data untouched, new wallet synthesized clean.
+2. **Live Binance Futures credentials** (`server/mock-trading-server.js`):
+   new `liveApiKey`/`liveSecretKey` settings fields, stored, masked, and
+   self-healed via the recovery snapshot exactly like the existing testnet
+   `apiKey`/`secretKey` (mirrored through `normalizeSettings`,
+   `buildSettingsRecoverySnapshot`, `getSettingsRecoverySnapshot`,
+   `inspectSettingsRegressionRisk`, `selfHealSettingsIfNeeded`,
+   `mergeSettingsUpdate`, `sanitizeSettingsForClient`, and the settings audit
+   log). `getEffectiveCredentials(settings, environment)` now branches on
+   environment; new `futuresLiveBaseUrl` (`fapi.binance.com`) +
+   `getFuturesBaseUrl(environment)`. **Only wired into the read-only wallet
+   balance sync** (`syncExchangeWalletBalance` picks creds + base URL from the
+   wallet being synced) — every order-placement function
+   (`placeBinanceOrder`, `setBinanceLeverage`, etc.) still defaults to the
+   testnet base URL and was not touched, since the real-money wallet is `MAIN`
+   kind and therefore structurally excluded from `getTradingWallets()` / the
+   auto-trade loop. It can never place an order regardless of what credentials
+   are saved.
+3. **Wallets page** (`WalletsPage.jsx`): new Testnet / Real Money tab toggle.
+   Testnet tab is the unchanged existing UI. Real Money tab shows a single
+   `RealMoneyWalletCard` (red/danger theme) with its own Sync Now, guardrail
+   copy, and an explicit "no bot places live orders yet" banner.
+4. **Settings → API Credentials**: new "Real Money — Binance Futures Live API"
+   panel below the existing testnet one, same present/masked pattern, red
+   warning banner reiterating that saving keys here does not enable trading.
+5. **Journal → Real Money Journal** (new tab, `JournalRealMoneyPage` in
+   `JournalSummaryPage.jsx`): shows the real-money wallet's live funding
+   balance/sync status, and a wallet-calendar section that activates
+   automatically once a real-money *trading* wallet exists (none does yet, so
+   today it shows "no live trades yet"). Server's `/api/journal-summary` now
+   also returns `realMoneyMainWallet`.
+
+**Verified before/after restart:** `node --test` 51/51 both before and after;
+`npm run build` clean; imported the server module standalone
+(`XENIOS_SERVER_AUTOSTART=off`) and inspected `getSettings()` output against
+the live `server/data/settings.json` before restarting pm2. `pm2 restart
+xeniostrade-api` came back clean (`AI: READY`, 4 open testnet trades intact,
+`Wallets 8 enabled` unchanged). `npm run build` output redeployed to `dist/`.
+
+**Gotcha for next session:** a stray diagnostic `node -e` import of the new
+module (before the pm2 restart) called `getSettings()`, which triggered the
+existing auto-heal-on-read path and wrote the new wallet + `liveApiKey`/
+`liveSecretKey` fields into the *live* `settings.json` while the *old* pm2
+process was still running. The old process's own next read-normalize-write
+cycle (old code, fixed-shape `normalizeSettings`) dropped the two new
+top-level fields again and kept the new wallet only as an untyped "extra"
+entry — harmless (still `MAIN` kind, still disabled, still excluded from
+trading) but a reminder: **don't import `mock-trading-server.js` and call
+`getSettings()`/anything that can write while the live pm2 process is running
+old code** — either restart pm2 first, or test against a copied settings.json.
+
+**Not done (deliberately out of scope — this was infra prep, not a go-live
+step):** no bot wallet has a `REAL_MONEY` environment yet, so the Real Money
+Journal has nothing to show; no order-placement function reads live
+credentials or the live base URL; `normalizeWallets`' final mapping loop still
+hard-codes every non-main wallet to `MANUAL`/local-paper, so a "real-money bot
+wallet" that actually executes live orders does not exist yet and would need
+its own careful design (that hard-coded branch, plus threading `baseUrl`
+through the order-placement functions, plus a real execution-path review) —
+exactly the "Live execution path unreviewed" gap `GO_LIVE_READINESS.md` already
+called out.
+
+---
+
+## WHERE WE LEFT OFF  — as of 2026-09-04
+
+### Bots 1–4: AI entry reversed to win-biased + AI loss-minimising early exit (uncommitted, needs pm2 restart)
+
+All in `server/mock-trading-server.js`:
+
+1. **Entry (`scoreCandidateWithAiFilter`)** — new `WIN_BIASED_SIGNAL_MODELS`
+   set (`model-1..4`). For those bots the loss-averse asymmetry is flipped:
+   winning setup families rewarded ×3.2 (up to +32) / losers only ×1.6 (−16);
+   win-rate >50 lifts ×0.7 / <50 trims ×0.3; `provenLoser` force-skip disabled;
+   new `provenWinner` (reliable family, win rate ≥50% or avgReward ≥1) lifts the
+   score to `threshold + 12`. Bots 5–8 untouched (still loss-averse).
+2. **Exit — new `evaluateAiLossExit()`**, wired into `updateOpenTrades()` next
+   to the Bot 4 money stop. Only for `model-1..4`, only on a losing open trade,
+   only once it is ≥35 % of the way to its stop (`AI_EARLY_EXIT_MIN_DRAWDOWN_FRACTION`).
+   Scores 0–100 from the backtest **losing-trade profile** for the trade's setup
+   family (sub-50 % win rate = dominant term, negative avgReward adds, a
+   positive-expectancy family subtracts) + live behaviour (drawdown fraction ×42,
+   +12 gave-back-profit, +10/+18 stalled 90 m/4 h). Score ≥ `AI_EARLY_EXIT_SCORE`
+   (60) → close at mark price as `CLOSED_SL`/`SL` with an `aiLossExit` metadata
+   block. Winners and bots 5–8 are never touched. Verified by an in-process
+   harness against the live `learning-bot-train-status.json`: model-1 exits
+   ~dd 0.85 (or dd 0.5 + stalled/gave-back), model-4 (worst avgReward) by ~dd 0.6.
+   `node --test` (51/51) still green.
+
+**Still to do:** `npx pm2 restart xeniostrade-api` to load it; watch the AI
+early-exit terminal lines and whether realised losses on 1–4 shrink vs the full
+stop. Thresholds/weights are module constants — tune in place.
+
+---
+
+## Earlier — as of 2026-08-31 17:30 UTC
 
 ### −1 USD hard money-stop backtest (Bots 1–3) — done, still net-negative
 

@@ -5,6 +5,44 @@ questions. Update this file at every review; keep the newest assessment on top.
 
 ---
 
+## Update — 2026-09-13: real-money infrastructure prepared, answer unchanged
+
+The owner asked to prepare the system so real-money trading just needs an API
+key added later. Done — see `SESSION_LOG.md` for the full change list:
+
+- A dedicated `wallet-real-money` wallet (environment `REAL_MONEY`, its own
+  `BINANCE_FUTURES_LIVE` sync provider) alongside the existing testnet wallets,
+  visible under Wallets → Real Money.
+- Separate live Binance Futures credential fields (`liveApiKey`/
+  `liveSecretKey`) in Settings → API Credentials, stored and self-healed the
+  same way as the testnet pair, but **not read by any order-placement
+  function** — only by the read-only wallet balance sync.
+- A Real Money Journal tab, ready to show trade history the moment a
+  real-money trading wallet exists (none does yet).
+
+**This does not change the answer below.** Real money is still **NO**, for the
+same reasons as 2026-08-30 (no track record, AI dataset still not a real
+trading edge per the backtest work, execution path unreviewed) plus one new,
+more specific one: **no code path exists yet that would place a live order**,
+by design. `getTradingWallets()` structurally excludes `MAIN`-kind wallets
+(including the new real-money one) from the auto-trade loop, and
+`normalizeWallets()` still hard-codes every bot wallet to `MANUAL`/local-paper
+balance mode — so even with live keys saved and a wallet showing a connected
+balance, nothing in the system is capable of sending an order to
+`fapi.binance.com`. That is intentional: building the actual live
+order-execution path (a real-money bot wallet, threading `baseUrl` through
+`placeBinanceOrder`/`setBinanceLeverage`/etc., and reviewing that path for
+partial fills, disconnect-mid-position behavior, and exchange-side stop
+placement) is real Phase 3 work and should happen as its own deliberate,
+reviewed change — not as a side effect of adding credential fields.
+
+**What "just add the API" now actually means:** paste the live key/secret into
+Settings → API Credentials, then Wallets → Real Money → Sync Now to confirm
+the real balance reads correctly. That's it — it verifies the account, it does
+not arm anything.
+
+---
+
 ## Assessment — 2026‑08‑30
 
 ### Q: Am I (Claude) confident real money can go on this system now?

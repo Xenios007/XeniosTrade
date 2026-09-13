@@ -13,7 +13,8 @@ import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
 import { BotStatusGrid } from './components/BotStatusGrid'
 import { ProExitStrategy } from './components/ProExitStrategy'
-import { JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
+import { RealMoneyTradingPage, getRealMoneyTrades } from './components/RealMoneyTradingPage'
+import { JournalHeadToHeadPage, JournalOverviewPage, JournalRealMoneyPage, JournalWalletPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
 import { MockTradingPage } from './components/MockTradingPage'
 import { SettingsPage } from './components/SettingsPage'
@@ -41,7 +42,7 @@ import { MANUAL_TRADE_STYLE_PRESET_ID } from './lib/strategyPresets'
 import { DEFAULT_PREFERRED_SYMBOLS } from './lib/tradingConfig'
 import { DEFAULT_AUTO_TRADE_SESSIONS } from './lib/tradingSessions'
 import { isAutoTradeSource } from './lib/trades'
-import { buildDefaultWallets, getTotalWalletStartingBalance } from './lib/wallets'
+import { buildDefaultWallets, getRealMoneyWallet, getTotalWalletStartingBalance } from './lib/wallets'
 import { analyzeTradeSignal } from './lib/tradeSignal'
 
 const CandlestickChart = lazy(() => import('./components/CandlestickChart').then((module) => ({
@@ -56,6 +57,7 @@ const DEFAULT_STRATEGY_SETTINGS_BASE = {
   autoTradingEnabled: false,
   preferredSymbols: DEFAULT_PREFERRED_SYMBOLS,
   activeSignalModelId: DEFAULT_SIGNAL_MODEL_ID,
+  realMoneySignalModelId: DEFAULT_SIGNAL_MODEL_ID,
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   bot3RiskPresetId: DEFAULT_BOT3_RISK_PRESET_ID,
   sessionScheduleEnabled: false,
@@ -140,6 +142,7 @@ const DEFAULT_JOURNAL_SUMMARY = {
   items: [],
   wallets: [],
   availableMonths: [],
+  realMoneyMainWallet: getRealMoneyWallet(buildDefaultWallets()),
 }
 const DEFAULT_WORKFLOW = {
   currentPhase: 'phase-1',
@@ -155,14 +158,20 @@ const JOURNAL_TABS = [
   { to: '/journal', label: 'Summary', end: true },
   { to: '/journal/head-to-head', label: 'Head to Head' },
   { to: '/journal/wallet', label: 'Wallet Journal' },
+  { to: '/journal/real-money', label: 'Real Money Journal' },
 ]
 const DASHBOARD_TABS = [
   { to: '/dashboard', label: 'Overview', end: true },
   { to: '/dashboard/market', label: 'Market' },
   { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
+  { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
   { to: '/dashboard/workflow', label: 'Workflow Notifications' },
   { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
   { to: '/dashboard/codex', label: 'Codex Console' },
+]
+const TRADE_HISTORY_TABS = [
+  { to: '/trade-history', label: 'All Trades', end: true },
+  { to: '/trade-history/real-money', label: 'Real Money Trades' },
 ]
 const DEFAULT_AI_TRAINING_STATUS = {
   running: false,
@@ -412,6 +421,7 @@ export default function App() {
         items: journalResult.value.items || [],
         wallets: journalResult.value.wallets || [],
         availableMonths: journalResult.value.availableMonths || [],
+        realMoneyMainWallet: journalResult.value.realMoneyMainWallet || null,
       })
     } else {
       console.error('Failed to refresh journal summary:', journalResult.reason)
@@ -1486,6 +1496,20 @@ export default function App() {
               />
             )}
           />
+          <Route
+            path="real-money-trading"
+            element={(
+              <RealMoneyTradingPage
+                settings={settings}
+                trades={tradeHistory}
+                livePrices={liveTradePrices}
+                aiTrainingStatus={aiTrainingStatus}
+                onSave={handleSaveSettings}
+                saving={savingSettings}
+                ready={hasLoadedSettingsRef.current}
+              />
+            )}
+          />
           <Route path="workflow" element={<WorkflowNotificationsPanel workflow={workflow} />} />
           <Route path="self-review-log" element={<SelfReviewLogPanel workflow={workflow} />} />
           <Route path="codex" element={<CodexConsole />} />
@@ -1530,22 +1554,61 @@ export default function App() {
   }
 
   function renderTradeHistory() {
+    const realMoneyTrades = getRealMoneyTrades(tradeHistory, settings.wallets)
+
     return (
       <div className="grid gap-6">
-        <TradeHistoryStatsPanel
-          trades={tradeHistory}
-          livePrices={liveTradePrices}
-          liveDirections={liveTradeDirections}
-          trackedSymbols={settings.strategy.preferredSymbols}
-          wallets={settings.wallets}
+        <PageHeader
+          title="Trade History"
+          description="Review all recorded trades or isolate real-money trade records."
         />
-        <TradeHistoryTable
-          trades={tradeHistory}
-          livePrices={liveTradePrices}
-          liveDirections={liveTradeDirections}
-          closingTradeIds={closingTradeIds}
-          onManualClose={handleManualCloseTrade}
-        />
+        <SubNavTabs tabs={TRADE_HISTORY_TABS} />
+        <Routes>
+          <Route
+            index
+            element={(
+              <div className="grid gap-6">
+                <TradeHistoryStatsPanel
+                  trades={tradeHistory}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  trackedSymbols={settings.strategy.preferredSymbols}
+                  wallets={settings.wallets}
+                />
+                <TradeHistoryTable
+                  trades={tradeHistory}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  closingTradeIds={closingTradeIds}
+                  onManualClose={handleManualCloseTrade}
+                />
+              </div>
+            )}
+          />
+          <Route
+            path="real-money"
+            element={(
+              <div className="grid gap-6">
+                <TradeHistoryStatsPanel
+                  trades={realMoneyTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  trackedSymbols={settings.strategy.preferredSymbols}
+                  wallets={settings.wallets}
+                />
+                <TradeHistoryTable
+                  title="Real Money Trade History"
+                  trades={realMoneyTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  closingTradeIds={closingTradeIds}
+                  onManualClose={handleManualCloseTrade}
+                />
+              </div>
+            )}
+          />
+          <Route path="*" element={<Navigate to="/trade-history" replace />} />
+        </Routes>
       </div>
     )
   }
@@ -1569,6 +1632,7 @@ export default function App() {
           <Route index element={<JournalOverviewPage {...journalProps} />} />
           <Route path="head-to-head" element={<JournalHeadToHeadPage {...journalProps} />} />
           <Route path="wallet" element={<JournalWalletPage {...journalProps} />} />
+          <Route path="real-money" element={<JournalRealMoneyPage {...journalProps} />} />
           <Route path="*" element={<Navigate to="/journal" replace />} />
         </Routes>
       </div>
@@ -1730,7 +1794,7 @@ export default function App() {
         <Route path="/ai-training/*" element={renderLearningBot()} />
         <Route path="/wallets" element={renderWallets()} />
         <Route path="/journal/*" element={renderJournal()} />
-        <Route path="/trade-history" element={renderTradeHistory()} />
+        <Route path="/trade-history/*" element={renderTradeHistory()} />
         <Route path="/settings/*" element={renderSettings()} />
         <Route path="*" element={<Navigate to={initialPath} replace />} />
       </Routes>

@@ -37,13 +37,16 @@ import {
 import {
   buildDefaultWallets,
   EXCHANGE_SYNC_WALLET_BALANCE_MODE,
+  getRealMoneyWallet,
   getTradingWallets,
   getWalletById,
   getWalletEffectiveStartingBalance,
   hydrateWalletMetadata,
   isExchangeSyncWallet,
   MANUAL_WALLET_BALANCE_MODE,
+  normalizeWalletEnvironment,
   normalizeWallets,
+  REAL_MONEY_WALLET_ENVIRONMENT,
 } from '../src/lib/wallets.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID } from '../src/lib/strategyPresets.js'
 import { detectChartPatterns, patternScoreForSide } from '../src/lib/chartPatterns.js'
@@ -61,6 +64,12 @@ const app = express()
 const port = Number(process.env.PORT || process.env.MOCK_TRADING_PORT || 3001)
 const host = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1')
 const futuresTestnetBaseUrl = 'https://demo-fapi.binance.com'
+// Live Binance Futures (real money). Nothing in the auto-trade / order-placement
+// path uses this yet — it is only wired into the read-only wallet balance sync
+// so the Real Money wallet can be verified once live keys are added. Routing
+// actual order placement through this host is a separate, deliberately
+// unbuilt step — see GO_LIVE_READINESS.md.
+const futuresLiveBaseUrl = 'https://fapi.binance.com'
 const publicDataBaseUrl = 'https://data-api.binance.vision/api/v3'
 const publicDataFallbackBaseUrl = 'https://api.binance.com/api/v3'
 const __filename = fileURLToPath(import.meta.url)
@@ -259,10 +268,30 @@ let lastSettingsRegressionWarningSignature = ''
 // Bot 4 (model-4) cuts any open position the instant its unrealized PnL reaches this loss, in USDT.
 const MODEL4_HARD_MONEY_STOP_USDT = 1
 
+// Bots 1-4: AI loss-minimising early exit.
+// While a trade on one of these bots is open AND under water, the AI scores it
+// against the backtest's LOSING-trade profile for its setup family (negative
+// avg reward, sub-50% win rate) combined with how the live trade is actually
+// behaving (how far it has run against the entry, whether it round-tripped a
+// profit, how long it has been stuck losing). Once that exit-risk score crosses
+// AI_EARLY_EXIT_SCORE the position is cut at the mark price instead of waiting
+// for the full stop, so the realised loss is a fraction of the configured stop.
+// Winners are never touched here - protect-profit / extend-target still live in
+// applyAiOpenTradeManagement.
+const AI_EARLY_EXIT_SIGNAL_MODELS = new Set(['model-1', 'model-3', 'model-4'])
+// Exit-risk score (0-100) at or above which the trade is cut early.
+const AI_EARLY_EXIT_SCORE = 60
+// Never bail before the trade has given back at least this fraction of its
+// entry->stop distance. The -1 USDT money-stop backtest showed that tapping out
+// inside 5-minute noise craters the win rate, so the trade has to be genuinely
+// going wrong before the AI is allowed to close it.
+const AI_EARLY_EXIT_MIN_DRAWDOWN_FRACTION = 0.35
+
 const defaultStrategySettingsBase = {
   autoTradingEnabled: false,
   preferredSymbols: DEFAULT_PREFERRED_SYMBOLS,
   activeSignalModelId: DEFAULT_SIGNAL_MODEL_ID,
+  realMoneySignalModelId: DEFAULT_SIGNAL_MODEL_ID,
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   bot3RiskPresetId: DEFAULT_BOT3_RISK_PRESET_ID,
   sessionScheduleEnabled: false,
@@ -338,6 +367,11 @@ const defaultSettings = {
   settingsRevision: 1,
   apiKey: process.env.BINANCE_TESTNET_API_KEY || '',
   secretKey: process.env.BINANCE_TESTNET_SECRET_KEY || '',
+  // Live Binance Futures (real money) credentials. Stored and masked the same
+  // way as the testnet pair, but nothing reads these for order placement yet —
+  // only the Real Money wallet's manual "Sync Now" balance check.
+  liveApiKey: process.env.BINANCE_LIVE_API_KEY || '',
+  liveSecretKey: process.env.BINANCE_LIVE_SECRET_KEY || '',
   strategy: {
     ...defaultStrategySettings,
     maxLossPerTrade: getStrategyDerivedMaxLossPerTrade(defaultStrategySettings),
@@ -842,6 +876,7 @@ function normalizeSettings(rawSettings = {}) {
   }, {})
 
   strategy.activeSignalModelId = ensureSignalModelId(strategy.activeSignalModelId)
+  strategy.realMoneySignalModelId = ensureSignalModelId(strategy.realMoneySignalModelId)
   strategy.bot3RiskPresetId = resolveBot3RiskPresetId(strategy.bot3RiskPresetId)
   strategy.sessionScheduleEnabled = Boolean(strategy.sessionScheduleEnabled)
   strategy.scheduledSessions = normalizeAutoTradeSessions(strategy.scheduledSessions)
@@ -853,6 +888,8 @@ function normalizeSettings(rawSettings = {}) {
     settingsRevision: normalizedSettingsRevision,
     apiKey: typeof rawSettings.apiKey === 'string' ? rawSettings.apiKey : defaultSettings.apiKey,
     secretKey: typeof rawSettings.secretKey === 'string' ? rawSettings.secretKey : defaultSettings.secretKey,
+    liveApiKey: typeof rawSettings.liveApiKey === 'string' ? rawSettings.liveApiKey : defaultSettings.liveApiKey,
+    liveSecretKey: typeof rawSettings.liveSecretKey === 'string' ? rawSettings.liveSecretKey : defaultSettings.liveSecretKey,
     strategy,
     learningBot: normalizeLearningBotSettings(rawSettings.learningBot),
     wallets: normalizeWallets(rawSettings.wallets),
@@ -868,6 +905,15 @@ function hasDirectBinanceCredentials(settings = {}) {
   )
 }
 
+function hasDirectLiveBinanceCredentials(settings = {}) {
+  return Boolean(
+    typeof settings?.liveApiKey === 'string'
+    && settings.liveApiKey.trim()
+    && typeof settings?.liveSecretKey === 'string'
+    && settings.liveSecretKey.trim(),
+  )
+}
+
 function buildSettingsRecoverySnapshot(settings = defaultSettings) {
   const normalizedSettings = normalizeSettings(settings)
 
@@ -876,6 +922,8 @@ function buildSettingsRecoverySnapshot(settings = defaultSettings) {
     settingsRevision: normalizedSettings.settingsRevision,
     apiKey: typeof normalizedSettings.apiKey === 'string' ? normalizedSettings.apiKey : '',
     secretKey: typeof normalizedSettings.secretKey === 'string' ? normalizedSettings.secretKey : '',
+    liveApiKey: typeof normalizedSettings.liveApiKey === 'string' ? normalizedSettings.liveApiKey : '',
+    liveSecretKey: typeof normalizedSettings.liveSecretKey === 'string' ? normalizedSettings.liveSecretKey : '',
     strategy: {
       autoTradingEnabled: Boolean(normalizedSettings.strategy.autoTradingEnabled),
     },
@@ -895,6 +943,8 @@ async function getSettingsRecoverySnapshot() {
     settingsRevision: Number(snapshot.settingsRevision || 0),
     apiKey: typeof snapshot.apiKey === 'string' ? snapshot.apiKey : '',
     secretKey: typeof snapshot.secretKey === 'string' ? snapshot.secretKey : '',
+    liveApiKey: typeof snapshot.liveApiKey === 'string' ? snapshot.liveApiKey : '',
+    liveSecretKey: typeof snapshot.liveSecretKey === 'string' ? snapshot.liveSecretKey : '',
     strategy: {
       autoTradingEnabled: Boolean(snapshot?.strategy?.autoTradingEnabled),
     },
@@ -912,9 +962,12 @@ function inspectSettingsRegressionRisk(settings = defaultSettings, recoverySnaps
   const snapshotIsAtLeastCurrent = snapshotRevision >= currentRevision
   const currentHasCredentials = hasDirectBinanceCredentials(normalizedSettings)
   const snapshotHasCredentials = Boolean(String(snapshot?.apiKey || '').trim() && String(snapshot?.secretKey || '').trim())
+  const currentHasLiveCredentials = hasDirectLiveBinanceCredentials(normalizedSettings)
+  const snapshotHasLiveCredentials = Boolean(String(snapshot?.liveApiKey || '').trim() && String(snapshot?.liveSecretKey || '').trim())
   const currentAutoEnabled = Boolean(normalizedSettings.strategy.autoTradingEnabled)
   const snapshotAutoEnabled = Boolean(snapshot?.strategy?.autoTradingEnabled)
   const credentialsRegression = snapshotIsAtLeastCurrent && snapshotHasCredentials && !currentHasCredentials
+  const liveCredentialsRegression = snapshotIsAtLeastCurrent && snapshotHasLiveCredentials && !currentHasLiveCredentials
   const autoEnabledRegression = snapshotIsAtLeastCurrent && snapshotAutoEnabled && !currentAutoEnabled
 
   return {
@@ -923,6 +976,7 @@ function inspectSettingsRegressionRisk(settings = defaultSettings, recoverySnaps
       && (
         snapshotRevision > currentRevision
         || credentialsRegression
+        || liveCredentialsRegression
         || autoEnabledRegression
       )
     ),
@@ -931,9 +985,12 @@ function inspectSettingsRegressionRisk(settings = defaultSettings, recoverySnaps
     snapshotIsAtLeastCurrent,
     currentHasCredentials,
     snapshotHasCredentials,
+    currentHasLiveCredentials,
+    snapshotHasLiveCredentials,
     currentAutoEnabled,
     snapshotAutoEnabled,
     credentialsRegression,
+    liveCredentialsRegression,
     autoEnabledRegression,
   }
 }
@@ -945,9 +1002,12 @@ function buildSettingsRegressionWarningSignature(regressionRisk = {}) {
     snapshotIsAtLeastCurrent: Boolean(regressionRisk.snapshotIsAtLeastCurrent),
     currentHasCredentials: Boolean(regressionRisk.currentHasCredentials),
     snapshotHasCredentials: Boolean(regressionRisk.snapshotHasCredentials),
+    currentHasLiveCredentials: Boolean(regressionRisk.currentHasLiveCredentials),
+    snapshotHasLiveCredentials: Boolean(regressionRisk.snapshotHasLiveCredentials),
     currentAutoEnabled: Boolean(regressionRisk.currentAutoEnabled),
     snapshotAutoEnabled: Boolean(regressionRisk.snapshotAutoEnabled),
     credentialsRegression: Boolean(regressionRisk.credentialsRegression),
+    liveCredentialsRegression: Boolean(regressionRisk.liveCredentialsRegression),
     autoEnabledRegression: Boolean(regressionRisk.autoEnabledRegression),
   })
 }
@@ -988,6 +1048,8 @@ async function persistSettingsRecoverySnapshot(settings = defaultSettings, {
       settingsRevision: Number(previousSnapshot.settingsRevision || 0),
       apiKey: previousSnapshot.apiKey,
       secretKey: previousSnapshot.secretKey,
+      liveApiKey: previousSnapshot.liveApiKey,
+      liveSecretKey: previousSnapshot.liveSecretKey,
       autoTradingEnabled: Boolean(previousSnapshot.strategy?.autoTradingEnabled),
       learningBot: normalizeLearningBotSettings(previousSnapshot.learningBot),
     }
@@ -996,6 +1058,8 @@ async function persistSettingsRecoverySnapshot(settings = defaultSettings, {
     settingsRevision: Number(nextSnapshot.settingsRevision || 0),
     apiKey: nextSnapshot.apiKey,
     secretKey: nextSnapshot.secretKey,
+    liveApiKey: nextSnapshot.liveApiKey,
+    liveSecretKey: nextSnapshot.liveSecretKey,
     autoTradingEnabled: Boolean(nextSnapshot.strategy.autoTradingEnabled),
     learningBot: normalizeLearningBotSettings(nextSnapshot.learningBot),
   }
@@ -1022,15 +1086,22 @@ async function selfHealSettingsIfNeeded(settings = null, {
   const regressionRisk = inspectSettingsRegressionRisk(currentSettings, recoverySnapshot)
   const fallbackApiKey = recoverySnapshot?.apiKey || process.env.BINANCE_TESTNET_API_KEY || ''
   const fallbackSecretKey = recoverySnapshot?.secretKey || process.env.BINANCE_TESTNET_SECRET_KEY || ''
+  const fallbackLiveApiKey = recoverySnapshot?.liveApiKey || process.env.BINANCE_LIVE_API_KEY || ''
+  const fallbackLiveSecretKey = recoverySnapshot?.liveSecretKey || process.env.BINANCE_LIVE_SECRET_KEY || ''
   const missingApiKey = !String(currentSettings.apiKey || '').trim()
   const missingSecretKey = !String(currentSettings.secretKey || '').trim()
+  const missingLiveApiKey = !String(currentSettings.liveApiKey || '').trim()
+  const missingLiveSecretKey = !String(currentSettings.liveSecretKey || '').trim()
   const shouldRestoreRevision = regressionRisk.dangerous && regressionRisk.snapshotRevision > regressionRisk.currentRevision
   const shouldRestoreCredentials = regressionRisk.credentialsRegression
     && (missingApiKey || missingSecretKey)
     && Boolean(fallbackApiKey && fallbackSecretKey)
+  const shouldRestoreLiveCredentials = regressionRisk.liveCredentialsRegression
+    && (missingLiveApiKey || missingLiveSecretKey)
+    && Boolean(fallbackLiveApiKey && fallbackLiveSecretKey)
   const shouldRestoreAutoTrading = regressionRisk.autoEnabledRegression
 
-  if (!shouldRestoreRevision && !shouldRestoreCredentials && !shouldRestoreAutoTrading) {
+  if (!shouldRestoreRevision && !shouldRestoreCredentials && !shouldRestoreLiveCredentials && !shouldRestoreAutoTrading) {
     logSettingsRegressionWarningOnce(regressionRisk)
     return {
       settings: currentSettings,
@@ -1047,6 +1118,8 @@ async function selfHealSettingsIfNeeded(settings = null, {
     ...currentSettings,
     apiKey: missingApiKey ? fallbackApiKey : currentSettings.apiKey,
     secretKey: missingSecretKey ? fallbackSecretKey : currentSettings.secretKey,
+    liveApiKey: missingLiveApiKey ? fallbackLiveApiKey : currentSettings.liveApiKey,
+    liveSecretKey: missingLiveSecretKey ? fallbackLiveSecretKey : currentSettings.liveSecretKey,
     settingsRevision: shouldRestoreRevision
       ? Math.max(regressionRisk.snapshotRevision, regressionRisk.currentRevision)
       : currentSettings.settingsRevision,
@@ -1068,6 +1141,7 @@ async function selfHealSettingsIfNeeded(settings = null, {
       writeMeta: {
         restoredSettingsRevision: shouldRestoreRevision,
         restoredCredentials: shouldRestoreCredentials,
+        restoredLiveCredentials: shouldRestoreLiveCredentials,
         restoredAutoTradingEnabled: shouldRestoreAutoTrading,
         usedRecoverySnapshot: Boolean(recoverySnapshot?.apiKey && recoverySnapshot?.secretKey),
         usedEnvironmentCredentials: !recoverySnapshot && Boolean(
@@ -1082,6 +1156,7 @@ async function selfHealSettingsIfNeeded(settings = null, {
     'RECOVERY',
     `Auto-restored ${[
       shouldRestoreCredentials ? 'Binance credentials' : null,
+      shouldRestoreLiveCredentials ? 'Binance live credentials' : null,
       shouldRestoreAutoTrading ? 'auto trading' : null,
     ].filter(Boolean).join(' and ')} from the armed recovery snapshot.`,
     'warning',
@@ -1158,6 +1233,8 @@ function mergeSettingsUpdate(currentSettings = defaultSettings, updates = {}) {
     ...requestedRootUpdates,
     apiKey: resolveCredentialUpdate(normalizedCurrentSettings.apiKey, requestedRootUpdates.apiKey),
     secretKey: resolveCredentialUpdate(normalizedCurrentSettings.secretKey, requestedRootUpdates.secretKey),
+    liveApiKey: resolveCredentialUpdate(normalizedCurrentSettings.liveApiKey, requestedRootUpdates.liveApiKey),
+    liveSecretKey: resolveCredentialUpdate(normalizedCurrentSettings.liveSecretKey, requestedRootUpdates.liveSecretKey),
     strategy: mergedStrategy,
     wallets: 'wallets' in requestedRootUpdates ? requestedRootUpdates.wallets : normalizedCurrentSettings.wallets,
   }
@@ -1687,9 +1764,13 @@ function sanitizeSettingsForClient(settings = defaultSettings) {
     ...normalizedSettings,
     apiKey: '',
     secretKey: '',
+    liveApiKey: '',
+    liveSecretKey: '',
     credentials: {
       apiKey: summarizeSettingsCredential(normalizedSettings.apiKey),
       secretKey: summarizeSettingsCredential(normalizedSettings.secretKey),
+      liveApiKey: summarizeSettingsCredential(normalizedSettings.liveApiKey),
+      liveSecretKey: summarizeSettingsCredential(normalizedSettings.liveSecretKey),
     },
   }
 }
@@ -1706,6 +1787,8 @@ function summarizeSettingsSaveRequestBody(body = {}) {
     rootKeys: Object.keys(body || {}).sort(),
     includesApiKey: typeof body?.apiKey === 'string',
     includesSecretKey: typeof body?.secretKey === 'string',
+    includesLiveApiKey: typeof body?.liveApiKey === 'string',
+    includesLiveSecretKey: typeof body?.liveSecretKey === 'string',
     strategyKeys: Object.keys(strategy).filter((key) => key !== 'signalModelStrategies').sort(),
     signalModelStrategyKeys: Object.fromEntries(
       Object.entries(signalModelStrategies).map(([modelId, value]) => [
@@ -2699,6 +2782,17 @@ function estimateCandidateEntryQuality(candidate = {}) {
   return Math.max(0, Math.min(100, Math.round(score)))
 }
 
+// Bots 1-4 run a WIN-BIASED variant of the AI entry score. The default scoring
+// is loss-averse (a setup family the model has lost on is penalised harder than
+// a winning one is rewarded, and a "proven loser" family is force-skipped) —
+// that combination was blocking every entry for these four bots because the
+// backtest policy they train on has higher losses and fewer wins. For these
+// bots the asymmetry is flipped: winning families are rewarded harder than
+// losing ones are penalised, the proven-loser hard-skip is disabled, and a
+// reliably-winning family is lifted to the accept threshold. Entry is gated on
+// wins, not losses.
+const WIN_BIASED_SIGNAL_MODELS = new Set(['model-1', 'model-3', 'model-4'])
+
 export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, config = defaultLearningBotSettings) {
   const overallPolicy = trainStatus?.metrics?.policy?.setupFamilyScores || {}
   const modelPolicyMap = trainStatus?.metrics?.policy?.bySignalModel || {}
@@ -2735,9 +2829,12 @@ export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, c
   )
   const liveFilterPaperOnly = perBotOverride?.paperOnly ?? config.aiEntryFilter?.paperOnly ?? true
 
-  // Loss-averse scoring: a setup family this model has historically lost on is
-  // penalised harder than a winning one is rewarded, and a proven loser is
-  // pushed below the accept threshold so the AI filter skips it outright.
+  // Scoring is loss-averse by default: a setup family this model has historically
+  // lost on is penalised harder than a winning one is rewarded, and a proven
+  // loser is pushed below the accept threshold so the AI filter skips it
+  // outright. Bots 1-4 (see WIN_BIASED_SIGNAL_MODELS) invert this so entry is
+  // driven by wins instead of losses.
+  const winBiased = WIN_BIASED_SIGNAL_MODELS.has(candidateSignalModelId)
   const rewardValue = setupStats ? Number(setupStats.avgReward || 0) : 0
   const winRateValue = setupStats && setupStats.winRate != null ? Number(setupStats.winRate) : null
   const sampleCount = setupStats ? Number(setupStats.count || 0) : 0
@@ -2751,20 +2848,47 @@ export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, c
     ? 1
     : Math.min(1, sampleCount / MIN_POLICY_SAMPLES) * 0.3
   const rewardAdjustment = (setupStats
-    ? (rewardValue < 0
-      ? Math.max(-32, rewardValue * 3.2)
-      : Math.min(16, rewardValue * 1.6))
+    ? (winBiased
+      // Win-biased: reward winning families hard (up to +32), penalise losing
+      // ones only lightly (down to -16).
+      ? (rewardValue > 0
+        ? Math.min(32, rewardValue * 3.2)
+        : Math.max(-16, rewardValue * 1.6))
+      // Loss-averse default: penalise losers hard, reward winners lightly.
+      : (rewardValue < 0
+        ? Math.max(-32, rewardValue * 3.2)
+        : Math.min(16, rewardValue * 1.6)))
     : 0) * reliabilityWeight
   const winRateAdjustment = (winRateValue == null
     ? 0
-    : (winRateValue < 50
-      ? (winRateValue - 50) * 0.7
-      : (winRateValue - 50) * 0.3)) * reliabilityWeight
+    : (winBiased
+      // Win-biased: a high win rate lifts the score hard (x0.7), a low one only
+      // trims it lightly (x0.3).
+      ? (winRateValue > 50
+        ? (winRateValue - 50) * 0.7
+        : (winRateValue - 50) * 0.3)
+      // Loss-averse default: a low win rate cuts the score hard, a high one
+      // only lifts it lightly.
+      : (winRateValue < 50
+        ? (winRateValue - 50) * 0.7
+        : (winRateValue - 50) * 0.3))) * reliabilityWeight
+  // Proven-loser hard-skip only applies to loss-averse bots. For win-biased
+  // bots it is disabled entirely.
   const provenLoser = policyReliable
+    && !winBiased
     && ((winRateValue != null && winRateValue < 40) || rewardValue <= -3)
+  // Win-biased mirror: a reliably-winning setup family (win rate >= 50% or a
+  // positive avg reward) is lifted to the accept threshold so the filter lets
+  // it through.
+  const provenWinner = policyReliable
+    && winBiased
+    && ((winRateValue != null && winRateValue >= 50) || rewardValue >= 1)
   let finalScore = Math.max(0, Math.min(100, Math.round(baseScore + rewardAdjustment + winRateAdjustment)))
   if (provenLoser) {
     finalScore = Math.min(finalScore, Math.max(0, thresholdScore - 12))
+  }
+  if (provenWinner) {
+    finalScore = Math.max(finalScore, Math.min(100, thresholdScore + 12))
   }
   // "Own" policy = trained on this signal model's own trades (not the shared fallback pool).
   const hasOwnModelPolicy = policySource === candidateSignalModelId
@@ -2786,7 +2910,9 @@ export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, c
     thresholdScore,
     hasOwnModelPolicy,
     bootstrapAccept,
+    winBiased,
     provenLoser,
+    provenWinner,
     accept,
   }
 }
@@ -3199,10 +3325,16 @@ function collectSettingsAuditChanges(beforeSettings = defaultSettings, afterSett
   const afterApiSummary = summarizeSettingsCredential(after.apiKey)
   const beforeSecretSummary = summarizeSettingsCredential(before.secretKey)
   const afterSecretSummary = summarizeSettingsCredential(after.secretKey)
+  const beforeLiveApiSummary = summarizeSettingsCredential(before.liveApiKey)
+  const afterLiveApiSummary = summarizeSettingsCredential(after.liveApiKey)
+  const beforeLiveSecretSummary = summarizeSettingsCredential(before.liveSecretKey)
+  const afterLiveSecretSummary = summarizeSettingsCredential(after.liveSecretKey)
 
   pushSettingsAuditChange(changes, 'settingsRevision', before.settingsRevision, after.settingsRevision)
   pushSettingsAuditChange(changes, 'apiKey', beforeApiSummary, afterApiSummary)
   pushSettingsAuditChange(changes, 'secretKey', beforeSecretSummary, afterSecretSummary)
+  pushSettingsAuditChange(changes, 'liveApiKey', beforeLiveApiSummary, afterLiveApiSummary)
+  pushSettingsAuditChange(changes, 'liveSecretKey', beforeLiveSecretSummary, afterLiveSecretSummary)
   pushSettingsAuditChange(changes, 'strategy.autoTradingEnabled', Boolean(before.strategy.autoTradingEnabled), Boolean(after.strategy.autoTradingEnabled))
   pushSettingsAuditChange(changes, 'strategy.activeSignalModelId', before.strategy.activeSignalModelId, after.strategy.activeSignalModelId)
   pushSettingsAuditChange(changes, 'strategy.sessionScheduleEnabled', Boolean(before.strategy.sessionScheduleEnabled), Boolean(after.strategy.sessionScheduleEnabled))
@@ -3291,6 +3423,8 @@ async function appendSettingsAuditLog({
       settingsRevision: normalizedBefore.settingsRevision,
       apiKey: summarizeSettingsCredential(normalizedBefore.apiKey),
       secretKey: summarizeSettingsCredential(normalizedBefore.secretKey),
+      liveApiKey: summarizeSettingsCredential(normalizedBefore.liveApiKey),
+      liveSecretKey: summarizeSettingsCredential(normalizedBefore.liveSecretKey),
       autoTradingEnabled: Boolean(normalizedBefore.strategy.autoTradingEnabled),
       activeSignalModelId: normalizedBefore.strategy.activeSignalModelId,
     },
@@ -3298,6 +3432,8 @@ async function appendSettingsAuditLog({
       settingsRevision: normalizedAfter.settingsRevision,
       apiKey: summarizeSettingsCredential(normalizedAfter.apiKey),
       secretKey: summarizeSettingsCredential(normalizedAfter.secretKey),
+      liveApiKey: summarizeSettingsCredential(normalizedAfter.liveApiKey),
+      liveSecretKey: summarizeSettingsCredential(normalizedAfter.liveSecretKey),
       autoTradingEnabled: Boolean(normalizedAfter.strategy.autoTradingEnabled),
       activeSignalModelId: normalizedAfter.strategy.activeSignalModelId,
     },
@@ -3311,6 +3447,8 @@ async function appendSettingsAuditLog({
   if (changes.some((change) => (
     change.startsWith('apiKey:')
     || change.startsWith('secretKey:')
+    || change.startsWith('liveApiKey:')
+    || change.startsWith('liveSecretKey:')
     || change.startsWith('strategy.autoTradingEnabled:')
   ))) {
     logTerminalLine(
@@ -3575,16 +3713,29 @@ function ensureNotCancelled(runSteps) {
   return true
 }
 
-function getEffectiveCredentials(settings) {
+function getEffectiveCredentials(settings, environment) {
+  if (normalizeWalletEnvironment(environment) === REAL_MONEY_WALLET_ENVIRONMENT) {
+    return {
+      apiKey: settings.liveApiKey || process.env.BINANCE_LIVE_API_KEY || '',
+      secretKey: settings.liveSecretKey || process.env.BINANCE_LIVE_SECRET_KEY || '',
+    }
+  }
+
   return {
     apiKey: settings.apiKey || process.env.BINANCE_TESTNET_API_KEY || '',
     secretKey: settings.secretKey || process.env.BINANCE_TESTNET_SECRET_KEY || '',
   }
 }
 
-function hasExchangeCredentials(settings) {
-  const { apiKey, secretKey } = getEffectiveCredentials(settings)
+function hasExchangeCredentials(settings, environment) {
+  const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
   return Boolean(apiKey && secretKey)
+}
+
+function getFuturesBaseUrl(environment) {
+  return normalizeWalletEnvironment(environment) === REAL_MONEY_WALLET_ENVIRONMENT
+    ? futuresLiveBaseUrl
+    : futuresTestnetBaseUrl
 }
 
 function getExchangeSyncedWallets(wallets = []) {
@@ -3624,9 +3775,10 @@ async function fetchSignedFuturesApi(pathname, {
   params = {},
   apiKey,
   secretKey,
+  baseUrl = futuresTestnetBaseUrl,
 } = {}) {
   if (!apiKey || !secretKey) {
-    throw new Error('Binance testnet API credentials are required.')
+    throw new Error('Binance API credentials are required.')
   }
 
   const urlSearchParams = new URLSearchParams()
@@ -3656,7 +3808,7 @@ async function fetchSignedFuturesApi(pathname, {
     },
   }
 
-  const targetUrl = `${futuresTestnetBaseUrl}${pathname}`
+  const targetUrl = `${baseUrl}${pathname}`
   const response = method === 'GET'
     ? await fetch(`${targetUrl}?${urlSearchParams.toString()}`, requestInit)
     : await fetch(targetUrl, {
@@ -3668,7 +3820,8 @@ async function fetchSignedFuturesApi(pathname, {
   const parsed = safeParseJson(text)
 
   if (!response.ok) {
-    throw new Error(parsed.msg || `Binance Futures Testnet request failed: ${method} ${pathname}`)
+    const environmentLabel = baseUrl === futuresLiveBaseUrl ? 'Binance Futures Live' : 'Binance Futures Testnet'
+    throw new Error(parsed.msg || `${environmentLabel} request failed: ${method} ${pathname}`)
   }
 
   return parsed
@@ -3714,10 +3867,11 @@ async function setBinanceLeverage({ symbol, leverage, apiKey, secretKey }) {
   })
 }
 
-async function fetchBinanceAccountSnapshot({ apiKey, secretKey }) {
+async function fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   return fetchSignedFuturesApi('/fapi/v2/account', {
     apiKey,
     secretKey,
+    baseUrl,
   })
 }
 
@@ -7354,15 +7508,19 @@ async function syncExchangeWalletBalance({
     }
   }
 
-  const { apiKey, secretKey } = getEffectiveCredentials(currentSettings)
+  const walletEnvironment = normalizeWalletEnvironment(syncedWallet.environment)
+  const environmentLabel = walletEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
+    ? 'Binance Futures Live'
+    : 'Binance Futures Testnet'
+  const { apiKey, secretKey } = getEffectiveCredentials(currentSettings, walletEnvironment)
   if (!apiKey || !secretKey) {
     const nextSettings = await persistWalletSyncResult(currentSettings, syncedWallet.id, {
       syncStatus: 'MISSING_CREDENTIALS',
-      lastError: 'Binance Futures Testnet API key and secret are required for Phase 2 wallet sync.',
+      lastError: `${environmentLabel} API key and secret are required for this wallet to sync.`,
       lastSyncedAt: Date.now(),
     })
 
-    const error = new Error('Binance Futures Testnet API key and secret are required for Phase 2 wallet sync.')
+    const error = new Error(`${environmentLabel} API key and secret are required for this wallet to sync.`)
     if (!suppressErrors) {
       throw error
     }
@@ -7376,7 +7534,11 @@ async function syncExchangeWalletBalance({
   }
 
   try {
-    const accountSnapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey })
+    const accountSnapshot = await fetchBinanceAccountSnapshot({
+      apiKey,
+      secretKey,
+      baseUrl: getFuturesBaseUrl(walletEnvironment),
+    })
     const openPositionCount = Array.isArray(accountSnapshot.positions)
       ? accountSnapshot.positions.filter((position) => Math.abs(Number(position?.positionAmt || 0)) > 1e-8).length
       : 0
@@ -8041,6 +8203,134 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
   }
 }
 
+// Bots 1-4 loss-minimising early exit. Returns { exit, score, ... }; when
+// `exit` is true the caller closes the open trade at `currentPrice` instead of
+// waiting for the price-based stop. Only ever fires on a losing trade - the
+// goal is to bank a smaller loss than the configured stop would.
+export function evaluateAiLossExit(trade = {}, currentPrice = 0, trainStatus = null, learningBotSettings = defaultLearningBotSettings) {
+  const idle = { exit: false, score: 0, reason: '' }
+
+  if (trade.status !== 'OPEN' || isBinanceTestnetTrade(trade)) {
+    return idle
+  }
+
+  const signalModelId = ensureSignalModelId(trade.signalModelId)
+  if (!AI_EARLY_EXIT_SIGNAL_MODELS.has(signalModelId)) {
+    return idle
+  }
+
+  const entryPrice = Number(trade.entryPrice || 0)
+  const stopLoss = Number(trade.stopLoss || 0)
+  const takeProfit = Number(trade.takeProfit || 0)
+  const livePrice = Number(currentPrice || 0)
+
+  if (![entryPrice, stopLoss, takeProfit, livePrice].every((value) => Number.isFinite(value) && value > 0)) {
+    return idle
+  }
+
+  const config = normalizeLearningBotSettings(learningBotSettings)
+  const perBotOverride = config.perBotOverrides?.[signalModelId] || null
+  const aiEnabled = Boolean(perBotOverride?.enabled || config.aiEntryFilter.enabled)
+  if (!aiEnabled || !trainStatus?.metrics) {
+    return idle
+  }
+
+  const direction = trade.side === 'BUY' ? 1 : -1
+  const initialRisk = direction === 1 ? entryPrice - stopLoss : stopLoss - entryPrice
+  const initialReward = direction === 1 ? takeProfit - entryPrice : entryPrice - takeProfit
+  if (!(initialRisk > 0) || !(initialReward > 0)) {
+    return idle
+  }
+
+  const unrealizedPnl = getTradePnlForExitPrice(trade, livePrice)
+  // Only cut losers. A flat or winning trade is left to protect-profit / TP.
+  if (!(Number.isFinite(unrealizedPnl) && unrealizedPnl < 0)) {
+    return idle
+  }
+
+  // How far the trade has run against the entry, as a fraction of the
+  // entry->stop distance. 0 = at entry, 1 = at the stop.
+  const adverseMove = direction === 1 ? entryPrice - livePrice : livePrice - entryPrice
+  const drawdownFraction = Math.max(0, Math.min(1.2, adverseMove / initialRisk))
+  if (drawdownFraction < AI_EARLY_EXIT_MIN_DRAWDOWN_FRACTION) {
+    return idle
+  }
+
+  // --- Backtest losing-trade profile for this setup family --------------------
+  const decision = scoreCandidateWithAiFilter({
+    summary: trade.signalSummary,
+    configuredStopLossPercent: trade.configuredStopLossPercent,
+    leverage: trade.leverage,
+    signalModelId,
+  }, trainStatus, config)
+  const setupStats = decision.setupStats
+  const sampleCount = Number(setupStats?.count || 0)
+  const rewardValue = Number(setupStats?.avgReward || 0)
+  const winRateValue = setupStats && setupStats.winRate != null ? Number(setupStats.winRate) : null
+  const MIN_POLICY_SAMPLES = 5
+  const policyReliable = sampleCount >= MIN_POLICY_SAMPLES
+  const reliabilityWeight = policyReliable ? 1 : Math.min(1, sampleCount / MIN_POLICY_SAMPLES) * 0.3
+
+  // Losing family = sub-50% win rate and/or negative avg reward in the backtest.
+  // A sub-50% win rate is the dominant term (these bots' families sit near 32%);
+  // a positive-expectancy family (win rate >= 50 AND avg reward > 0) SUBTRACTS
+  // from the score so a proven winner is left to run to its real stop.
+  const lossWinRatePoints = (winRateValue == null || winRateValue >= 50
+    ? 0
+    : Math.min(34, (50 - winRateValue) * 1.3)) * reliabilityWeight
+  const lossRewardPoints = (rewardValue < 0
+    ? Math.min(16, -rewardValue * 24)
+    : Math.max(-12, -rewardValue * 12)) * reliabilityWeight
+
+  // --- Live behaviour of this specific trade --------------------------------
+  // Deeper into drawdown -> higher risk it just runs to the full stop.
+  const excursionPoints = drawdownFraction * 42
+  // Round-tripped a real profit back into the red.
+  const peakProgress = Number(trade.aiManagement?.action === 'protect-profit' ? 1 : 0)
+  const giveBackPoints = peakProgress > 0 ? 12 : 0
+  // Stuck losing for a long time.
+  const timeInTradeMs = Date.now() - Number(trade.transactTime || trade.openedAt || Date.now())
+  const stallPoints = timeInTradeMs >= 3 * 60 * 60 * 1000
+    ? 18
+    : timeInTradeMs >= 90 * 60 * 1000
+      ? 10
+      : 0
+
+  const score = Math.round(
+    Math.max(0, Math.min(100, lossRewardPoints + lossWinRatePoints + excursionPoints + giveBackPoints + stallPoints)),
+  )
+
+  const exit = score >= AI_EARLY_EXIT_SCORE
+  const reason = exit
+    ? `AI loss-exit ${score}/${AI_EARLY_EXIT_SCORE}: ${decision.setupFamily} backtest profile `
+      + `(avgReward ${rewardValue.toFixed(2)}, win ${winRateValue == null ? 'n/a' : `${winRateValue.toFixed(0)}%`}, n=${sampleCount}) `
+      + `+ ${Math.round(drawdownFraction * 100)}% to stop`
+      + `${stallPoints ? ` + ${Math.round(timeInTradeMs / 60000)}m stalled` : ''}`
+      + `${giveBackPoints ? ' + gave back profit' : ''}; cutting at ${unrealizedPnl.toFixed(2)} USDT to cap the loss.`
+    : ''
+
+  return {
+    exit,
+    score,
+    threshold: AI_EARLY_EXIT_SCORE,
+    reason,
+    setupFamily: decision.setupFamily,
+    policySource: decision.policySource,
+    drawdownFraction: Number(drawdownFraction.toFixed(3)),
+    unrealizedPnl: Number(unrealizedPnl.toFixed(4)),
+    avgReward: rewardValue,
+    winRate: winRateValue,
+    sampleCount,
+    components: {
+      lossRewardPoints: Number(lossRewardPoints.toFixed(1)),
+      lossWinRatePoints: Number(lossWinRatePoints.toFixed(1)),
+      excursionPoints: Number(excursionPoints.toFixed(1)),
+      giveBackPoints,
+      stallPoints,
+    },
+  }
+}
+
 async function updateOpenTrades() {
   let settings = await getSettings()
   const learningBotTrainStatus = await getLearningBotTrainStatus().catch(() => defaultLearningBotTrainStatus)
@@ -8160,21 +8450,50 @@ async function updateOpenTrades() {
     const hitMoneyStop = isBot4Trade
       && Number.isFinite(unrealizedPnlNow)
       && unrealizedPnlNow <= -MODEL4_HARD_MONEY_STOP_USDT
-    const hitStopLoss = hitPriceStopLoss || hitMoneyStop
+
+    // Bots 1-4 AI loss-minimising early exit: score the losing open trade against
+    // the backtest's losing-trade profile for its setup family + how it is
+    // actually behaving, and cut it early (at the mark price) if it looks like a
+    // trade that just runs to the full stop.
+    const aiLossExit = evaluateAiLossExit(managedTrade, currentPrice, learningBotTrainStatus, settings.learningBot)
+    const hitAiLossExit = aiLossExit.exit
+
+    const hitStopLoss = hitPriceStopLoss || hitMoneyStop || hitAiLossExit
 
     if (!hitTakeProfit && !hitStopLoss) {
       updated.push(managedTrade)
       continue
     }
 
+    if (hitAiLossExit && !hitPriceStopLoss && !hitTakeProfit) {
+      logTerminalLine('AI', `${managedTrade.symbol} ${managedTrade.side} early exit — ${aiLossExit.reason}`, 'accent')
+    }
+
     // If both levels were touched in the same observed range, prefer the stop for conservative risk handling.
-    // A money-stop-only exit settles at the current price where the -1 USDT threshold was crossed.
+    // A money-stop / AI-loss-exit settles at the current mark price where the threshold was crossed.
     const exitPrice = hitStopLoss
       ? (hitPriceStopLoss ? effectiveStopLoss : currentPrice)
       : Number(managedTrade.takeProfit)
     changed = true
     const closedTrade = closeTradeRecord({
-      trade: managedTrade,
+      trade: (hitAiLossExit && !hitPriceStopLoss)
+        ? {
+          ...managedTrade,
+          aiLossExit: {
+            score: aiLossExit.score,
+            threshold: aiLossExit.threshold,
+            setupFamily: aiLossExit.setupFamily,
+            policySource: aiLossExit.policySource,
+            drawdownFraction: aiLossExit.drawdownFraction,
+            avgReward: aiLossExit.avgReward,
+            winRate: aiLossExit.winRate,
+            sampleCount: aiLossExit.sampleCount,
+            components: aiLossExit.components,
+            reason: aiLossExit.reason,
+            exitedAt: Date.now(),
+          },
+        }
+        : managedTrade,
       exitPrice,
       status: hitStopLoss ? 'CLOSED_SL' : 'CLOSED_TP',
       result: hitStopLoss ? 'SL' : 'TP',
@@ -9082,7 +9401,7 @@ app.post('/api/wallets/:walletId/sync', async (request, response) => {
 
     if (!isExchangeSyncWallet(wallet)) {
       response.status(409).json({
-        error: 'Only a Phase 2 exchange-sync wallet can be synced with Binance Futures Testnet.',
+        error: 'Only an exchange-sync wallet (Testnet or Real Money) can be synced with Binance Futures.',
       })
       return
     }
@@ -9760,6 +10079,10 @@ app.get('/api/journal-summary', async (_request, response) => {
     items,
     wallets: walletItems,
     availableMonths,
+    // Funding-only wallet (kind MAIN, never itself traded) — surfaced here so
+    // the Real Money Journal can show live funding status even before any
+    // real-money trading wallet exists to produce journal entries.
+    realMoneyMainWallet: getRealMoneyWallet(wallets),
   })
 })
 

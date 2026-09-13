@@ -237,6 +237,8 @@ function buildSettingsFormState(settings = {}) {
     ...settings,
     apiKey: '',
     secretKey: '',
+    liveApiKey: '',
+    liveSecretKey: '',
   }
 }
 
@@ -251,6 +253,14 @@ function buildSettingsPatch(currentSettings, nextSettings) {
 
   if (typeof nextSettings.secretKey === 'string' && nextSettings.secretKey.trim()) {
     patch.secretKey = nextSettings.secretKey
+  }
+
+  if (typeof nextSettings.liveApiKey === 'string' && nextSettings.liveApiKey.trim()) {
+    patch.liveApiKey = nextSettings.liveApiKey
+  }
+
+  if (typeof nextSettings.liveSecretKey === 'string' && nextSettings.liveSecretKey.trim()) {
+    patch.liveSecretKey = nextSettings.liveSecretKey
   }
 
   const strategyPatch = {}
@@ -989,6 +999,7 @@ export function SettingsPage({
       </Panel>
       )} />
       <Route path="credentials" element={(
+      <>
       <Panel title="API Credentials">
         <div className="grid gap-4">
           <div className="grid gap-4 md:grid-cols-2">
@@ -1053,6 +1064,74 @@ export function SettingsPage({
           </label>
         </div>
       </Panel>
+      <Panel title="Real Money — Binance Futures Live API">
+        <div className="grid gap-4">
+          <div className="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-4 text-sm text-red-100">
+            These are LIVE Binance Futures keys tied to real funds — separate from the testnet pair above. Saving them here
+            only stores the keys and lets Wallets → Real Money verify the account balance. Nothing in the auto-trading
+            system routes an order through these keys yet; that requires a separate, deliberate go-live step. See
+            GO_LIVE_READINESS.md for the checklist.
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {[
+              {
+                key: 'liveApiKey',
+                label: 'Live API Key',
+              },
+              {
+                key: 'liveSecretKey',
+                label: 'Live Secret Key',
+              },
+            ].map((item) => {
+              const credential = getCredentialState(settings, item.key)
+
+              return (
+                <div
+                  key={item.key}
+                  className={`rounded-2xl border px-4 py-4 text-sm ${
+                    credential.present
+                      ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                      : 'border-amber-400/20 bg-amber-400/10 text-amber-100'
+                  }`}
+                >
+                  <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">{item.label} Status</div>
+                  <div className="mt-2 text-sm font-semibold">
+                    {credential.present ? 'Stored on server' : 'Missing'}
+                  </div>
+                  <div className="mt-2 text-xs leading-relaxed opacity-80">
+                    {credential.present
+                      ? `Protected server-side only. Fingerprint ${credential.fingerprint || 'n/a'} • ${credential.length} characters.`
+                      : 'This credential is not configured yet.'}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <label className="block">
+            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Replace Binance Futures Live API Key</span>
+            <input
+              value={form.liveApiKey}
+              onChange={(event) => setForm((current) => ({ ...current, liveApiKey: event.target.value }))}
+              type="password"
+              autoComplete="new-password"
+              placeholder={getCredentialState(settings, 'liveApiKey').present ? 'Leave blank to keep the current live API key' : 'Paste live API key'}
+              className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Replace Binance Futures Live Secret Key</span>
+            <input
+              value={form.liveSecretKey}
+              onChange={(event) => setForm((current) => ({ ...current, liveSecretKey: event.target.value }))}
+              type="password"
+              autoComplete="new-password"
+              placeholder={getCredentialState(settings, 'liveSecretKey').present ? 'Leave blank to keep the current live secret key' : 'Paste live secret key'}
+              className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
+            />
+          </label>
+        </div>
+      </Panel>
+      </>
       )} />
       <Route path="*" element={<Navigate to="/settings/automation" replace />} />
       </Routes>

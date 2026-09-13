@@ -8,6 +8,7 @@ import {
   getMainWallet,
   buildPhase3ChampionAllocation,
   getMainWalletAllocatedBalance,
+  getRealMoneyWallet,
   getTradingWallets,
   getWalletAllocationFundingBalance,
   getWalletAllocationBalance,
@@ -15,6 +16,8 @@ import {
   getWalletFundingBalance,
   isExchangeSyncWallet,
   normalizeWallets,
+  REAL_MONEY_WALLET_ENVIRONMENT,
+  TESTNET_WALLET_ENVIRONMENT,
 } from '../lib/wallets'
 import { Panel } from './Panel'
 
@@ -69,6 +72,14 @@ function getWalletTone(colorKey) {
       frame: 'border-white/10 bg-white/[0.03]',
       badge: 'border-white/10 bg-white/[0.05] text-slate-100',
       accent: 'text-slate-100',
+    }
+  }
+
+  if (colorKey === 'crimson') {
+    return {
+      frame: 'border-red-400/20 bg-red-400/[0.06]',
+      badge: 'border-red-400/20 bg-red-400/10 text-red-100',
+      accent: 'text-red-300',
     }
   }
 
@@ -315,6 +326,170 @@ function MainWalletCard({
   )
 }
 
+function buildRealMoneyWalletGuardrail(wallet, hasLiveExchangeCredentials) {
+  if (!wallet) {
+    return {
+      status: 'blocked',
+      headline: 'Real money wallet is not set up yet.',
+      reason: 'Save Wallets once to let the backend synthesize the Real Money wallet from its default blueprint.',
+      detail: '',
+    }
+  }
+
+  if (!hasLiveExchangeCredentials || wallet.production.syncStatus === 'MISSING_CREDENTIALS') {
+    return {
+      status: 'blocked',
+      headline: 'Real money wallet is waiting for live Binance Futures keys.',
+      reason: 'Add the live Binance Futures API key and secret in Settings → API Credentials before this workspace can pull the real funding balance.',
+      detail: 'These are separate from the testnet keys above — adding them does not enable any live order placement by itself.',
+    }
+  }
+
+  if (wallet.production.syncStatus === 'ERROR') {
+    return {
+      status: 'blocked',
+      headline: 'Real money wallet sync needs attention.',
+      reason: wallet.production.lastError || 'The last live Binance Futures sync attempt failed.',
+      detail: 'Fix the credential or exchange error, then sync again.',
+    }
+  }
+
+  if (wallet.production.syncStatus !== 'CONNECTED') {
+    return {
+      status: 'blocked',
+      headline: 'Real money wallet has not synced yet.',
+      reason: 'Live keys are saved, but there is no confirmed account snapshot yet.',
+      detail: 'Run Sync Now to pull the real balance from Binance Futures — this is a read-only balance check, not a trade.',
+    }
+  }
+
+  return {
+    status: 'ready',
+    headline: 'Real money wallet is connected to Binance Futures (live).',
+    reason: 'The live funding balance is confirmed. No bot places real orders yet — that requires a separate, deliberate go-live step.',
+    detail: 'See GO_LIVE_READINESS.md for the checklist that has to pass before any bot trades this wallet.',
+  }
+}
+
+function RealMoneyWalletCard({
+  wallet,
+  hasLiveExchangeCredentials,
+  onUpdateWallet,
+  onSyncWallet,
+  syncing,
+}) {
+  const tone = getWalletTone(wallet?.colorKey || 'crimson')
+  const guardrail = buildRealMoneyWalletGuardrail(wallet, hasLiveExchangeCredentials)
+  const readinessTone = guardrail.status === 'ready'
+    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+    : 'border-amber-400/20 bg-amber-400/10 text-amber-100'
+  const fundingBalance = wallet ? getWalletFundingBalance(wallet) : 0
+
+  return (
+    <div className="grid gap-6">
+      <div className="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-4 text-sm text-red-100">
+        This wallet is real money, not a simulation. It is prepared so the system is ready the moment live API keys are
+        added — no bot currently places orders against it. Enabling live trading is a separate, deliberate step covered
+        in GO_LIVE_READINESS.md, and is not turned on by anything on this page.
+      </div>
+
+      {wallet ? (
+        <div className={`rounded-[28px] border p-5 shadow-[0_18px_50px_rgba(15,23,42,0.22)] ${tone.frame}`}>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Funding Wallet</div>
+              <input
+                value={wallet.name}
+                onChange={(event) => onUpdateWallet(wallet.id, { name: event.target.value })}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-base font-semibold text-white outline-none"
+              />
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${tone.badge}`}>
+                  Binance Futures — Live
+                </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-300">
+                  Real Money Wallet
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => onSyncWallet(wallet.id)}
+              className="rounded-2xl bg-red-400 px-4 py-3 text-sm font-semibold text-slate-950 transition disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            >
+              {syncing ? 'Syncing...' : 'Sync Now'}
+            </button>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <WalletStatCard
+              label="Funding Balance"
+              value={formatUsdt(wallet.production.lastSyncedBalance ?? fundingBalance)}
+              tone="text-slate-100"
+              Icon={WalletCards}
+            />
+            <WalletStatCard
+              label="Available Balance"
+              value={formatUsdt(wallet.production.lastSyncedAvailableBalance ?? fundingBalance)}
+              tone="text-slate-100"
+              Icon={Activity}
+            />
+            <WalletStatCard
+              label="Live Keys"
+              value={hasLiveExchangeCredentials ? 'Configured' : 'Missing'}
+              tone={hasLiveExchangeCredentials ? 'text-emerald-300' : 'text-amber-300'}
+              Icon={ShieldAlert}
+            />
+          </div>
+
+          <div className={`mt-5 rounded-2xl border px-4 py-4 ${readinessTone}`}>
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-950/60 text-current">
+                {guardrail.status === 'ready' ? <Bot className="h-4 w-4" /> : <CircleAlert className="h-4 w-4" />}
+              </span>
+              <div className="min-w-0">
+                <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">Real Money Wallet Guardrail</div>
+                <div className="mt-1 text-sm font-semibold">{guardrail.headline}</div>
+                <div className="mt-2 text-xs leading-relaxed">{guardrail.reason}</div>
+                {guardrail.detail ? <div className="mt-2 text-xs leading-relaxed opacity-80">{guardrail.detail}</div> : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-slate-500">
+              <RefreshCcw className="h-4 w-4" />
+              Binance Futures Live Sync
+            </div>
+            <div className="mt-4 grid gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Sync Provider</div>
+                  <div className={`mt-1 text-sm font-semibold ${tone.accent}`}>{wallet.production.syncProvider}</div>
+                </div>
+                <span className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.16em] ${getSyncStatusTone(wallet.production.syncStatus)}`}>
+                  {wallet.production.syncStatus}
+                </span>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Last Synced</div>
+                <div className="mt-1 text-sm font-semibold text-slate-100">{formatSyncTime(wallet.production.lastSyncedAt)}</div>
+              </div>
+            </div>
+            {wallet.production.lastError ? (
+              <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+                {wallet.production.lastError}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function BotWalletCard({ wallet, view, onUpdateWallet }) {
   const tone = getWalletTone(wallet.colorKey)
   const model = getSignalModel(wallet.assignedSignalModelId)
@@ -491,12 +666,21 @@ export function WalletsPage({
     () => normalizeWallets(walletForm),
     [walletForm],
   )
+  const [activeEnvironment, setActiveEnvironment] = useState(TESTNET_WALLET_ENVIRONMENT)
   const hasExchangeCredentials = Boolean(
     settings.credentials?.apiKey?.present
     && settings.credentials?.secretKey?.present,
   ) || Boolean(settings.apiKey && settings.secretKey)
+  const hasLiveExchangeCredentials = Boolean(
+    settings.credentials?.liveApiKey?.present
+    && settings.credentials?.liveSecretKey?.present,
+  ) || Boolean(settings.liveApiKey && settings.liveSecretKey)
   const mainWallet = useMemo(
     () => getMainWallet(normalizedWalletForm),
+    [normalizedWalletForm],
+  )
+  const realMoneyWallet = useMemo(
+    () => getRealMoneyWallet(normalizedWalletForm),
     [normalizedWalletForm],
   )
 
@@ -599,7 +783,42 @@ export function WalletsPage({
         </div>
       ) : null}
 
+      <div className="flex flex-wrap gap-2 rounded-2xl border border-white/10 bg-slate-950/60 p-1.5">
+        <button
+          type="button"
+          onClick={() => setActiveEnvironment(TESTNET_WALLET_ENVIRONMENT)}
+          className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
+            activeEnvironment === TESTNET_WALLET_ENVIRONMENT
+              ? 'bg-sky-400 text-slate-950'
+              : 'text-slate-300 hover:bg-white/[0.05]'
+          }`}
+        >
+          Testnet Wallets
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveEnvironment(REAL_MONEY_WALLET_ENVIRONMENT)}
+          className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
+            activeEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
+              ? 'bg-red-400 text-slate-950'
+              : 'text-slate-300 hover:bg-white/[0.05]'
+          }`}
+        >
+          Real Money Wallet
+        </button>
+      </div>
+
       <fieldset disabled={controlsDisabled} className="contents">
+      {activeEnvironment === REAL_MONEY_WALLET_ENVIRONMENT ? (
+        <RealMoneyWalletCard
+          wallet={realMoneyWallet}
+          hasLiveExchangeCredentials={hasLiveExchangeCredentials}
+          onUpdateWallet={updateWallet}
+          onSyncWallet={onSyncWallet}
+          syncing={Boolean(realMoneyWallet) && syncingWalletId === realMoneyWallet.id}
+        />
+      ) : (
+      <>
       <Panel title="Wallet Lab">
         <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
           The workspace now uses one Binance Futures Testnet main wallet as the funding source, and {SIGNAL_MODELS.length} bot wallets that each receive an allocation from it for auto trading.
@@ -692,6 +911,8 @@ export function WalletsPage({
           ? `Main wallet still has ${formatUsdt(comparison.availableAllocation)} unallocated after funding the active bot sleeves.`
           : `Configured bot sleeve allocations exceed the main wallet funding balance by ${formatUsdt(Math.abs(comparison.availableAllocation))}. Reduce allocations or sync more real funding first.`}
       </div>
+      </>
+      )}
 
       <div>
         <button
