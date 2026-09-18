@@ -36,6 +36,7 @@ import { PageHeader } from './ui/PageHeader'
 const SETTINGS_TABS = [
   { to: '/settings/automation', label: 'Automation' },
   { to: '/settings/strategy', label: 'Bot Strategy' },
+  { to: '/settings/symbol-risk', label: 'Symbol Risk Profiles' },
   { to: '/settings/credentials', label: 'API Credentials' },
 ]
 
@@ -471,6 +472,7 @@ function StrategyCard({
   const positionNotional = getStrategyPositionNotional(effectiveStrategy)
   const displayStopLossAmount = getStrategyDerivedMaxLossPerTrade(strategyForDisplay)
   const displayTakeProfitAmount = getStrategyDerivedTakeProfitPerTrade(strategyForDisplay)
+  const usesSymbolRiskProfile = (editableStrategy || effectiveStrategy)?.useSymbolRiskProfile !== false
   const stopLossHelper = isEditable
     ? `At ${strategyForDisplay.leverage}x leverage with ${formatUsdt(strategyForDisplay.marginPerTrade)} margin, this stop equals ${formatUsdt(getStrategyDerivedMaxLossPerTrade(strategyForDisplay))} max loss per trade.`
     : `Live max loss per trade is currently ${formatUsdt(derivedMaxLossPerTrade)}.`
@@ -502,6 +504,20 @@ function StrategyCard({
       </div>
 
       <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+          <div>
+            <div className="text-sm font-semibold text-white">Symbol Risk Profile</div>
+            <div className="mt-1 text-xs leading-relaxed text-slate-400">When enabled, a matching symbol profile overrides this bot&apos;s leverage, stop loss, and take profit.</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onUpdateStrategy?.(model.id, 'useSymbolRiskProfile', !usesSymbolRiskProfile)}
+            className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] ${usesSymbolRiskProfile ? 'border-sky-300/30 bg-sky-400/15 text-sky-100' : 'border-white/10 bg-white/[0.03] text-slate-400'}`}
+          >
+            {usesSymbolRiskProfile ? 'Profile First' : 'Bot Only'}
+          </button>
+        </div>
+        <div className="pt-4">
         {isEditable ? (
           <div>
             <div className="text-sm leading-relaxed text-slate-200">
@@ -527,6 +543,7 @@ function StrategyCard({
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {isEditable || isBot3 ? (
@@ -669,6 +686,7 @@ export function SettingsPage({
   const [comparisonModelId, setComparisonModelId] = useState(
     () => getSignalModel(settings?.strategy?.activeSignalModelId).id,
   )
+  const [profileSymbol, setProfileSymbol] = useState('')
   const controlsDisabled = saving || !ready || Boolean(aiTrainingStatus?.running)
 
   useEffect(() => {
@@ -822,6 +840,46 @@ export function SettingsPage({
     }))
   }
 
+  function updateSymbolRiskProfile(symbol, key, value) {
+    setForm((current) => ({
+      ...current,
+      strategy: {
+        ...current.strategy,
+        symbolRiskProfiles: {
+          ...(current.strategy.symbolRiskProfiles || {}),
+          [symbol]: {
+            ...(current.strategy.symbolRiskProfiles?.[symbol] || {}),
+            [key]: Number(value),
+          },
+        },
+      },
+    }))
+  }
+
+  function addSymbolRiskProfile() {
+    const symbol = String(profileSymbol || '').trim().toUpperCase()
+    if (!symbol) return
+    setForm((current) => ({
+      ...current,
+      strategy: {
+        ...current.strategy,
+        symbolRiskProfiles: {
+          ...(current.strategy.symbolRiskProfiles || {}),
+          [symbol]: current.strategy.symbolRiskProfiles?.[symbol] || { leverage: 5, stopLossPercent: 10, takeProfitPercent: 20 },
+        },
+      },
+    }))
+    setProfileSymbol('')
+  }
+
+  function removeSymbolRiskProfile(symbol) {
+    setForm((current) => {
+      const profiles = { ...(current.strategy.symbolRiskProfiles || {}) }
+      delete profiles[symbol]
+      return { ...current, strategy: { ...current.strategy, symbolRiskProfiles: profiles } }
+    })
+  }
+
   async function handleSubmit(event) {
     event.preventDefault()
     if (controlsDisabled) {
@@ -943,7 +1001,7 @@ export function SettingsPage({
       <Route path="strategy" element={(
       <Panel title="Bot Strategy Comparison">
         <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
-          Pick a bot from the dropdown below to view or edit its strategy. Bot 1 and Bot 2 are editable; Bot 3 and Bot 4 are automatic and read-only, showing the live resolved settings from their assigned wallet.
+          Pick a bot from the dropdown below to view or edit its strategy. Every bot can choose Profile First or Bot Only. Bot 1 and Bot 2 also expose their own editable risk values; Bot 3 and Bot 4 retain their dedicated strategy rules when Bot Only is selected.
         </div>
 
         <div className="mt-5 max-w-md">
@@ -986,6 +1044,32 @@ export function SettingsPage({
             />
           </div>
         ) : null}
+      </Panel>
+      )} />
+      <Route path="symbol-risk" element={(
+      <Panel title="Symbol Risk Profiles">
+        <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm leading-relaxed text-sky-100">
+          Profiles take priority over a bot&apos;s leverage, stop loss, and take profit only when that bot is set to <span className="font-semibold">Profile First</span>. A bot set to Bot Only continues to use its own settings.
+        </div>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <select value={profileSymbol} onChange={(event) => setProfileSymbol(event.target.value)} className="min-w-56 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none">
+            <option value="">Choose a tracked symbol</option>
+            {(form.strategy.preferredSymbols || []).filter((symbol) => !form.strategy.symbolRiskProfiles?.[symbol]).map((symbol) => <option key={symbol} value={symbol}>{symbol}</option>)}
+          </select>
+          <button type="button" onClick={addSymbolRiskProfile} disabled={!profileSymbol} className="rounded-2xl border border-sky-300/30 bg-sky-400/15 px-4 py-3 text-sm font-semibold text-sky-100 disabled:opacity-40">Add Profile</button>
+        </div>
+        <div className="mt-5 grid gap-3">
+          {Object.entries(form.strategy.symbolRiskProfiles || {}).sort(([left], [right]) => left.localeCompare(right)).map(([symbol, profile]) => (
+            <div key={symbol} className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/60 p-4 md:grid-cols-[minmax(120px,1fr)_repeat(3,minmax(130px,1fr))_auto] md:items-end">
+              <div className="text-base font-semibold text-white">{symbol}</div>
+              {[['leverage', 'Leverage', '1'], ['stopLossPercent', 'Stop Loss %', '0.01'], ['takeProfitPercent', 'Take Profit %', '0.01']].map(([key, label, step]) => (
+                <label key={key} className="block"><span className="mb-2 block text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</span><input type="number" min="0" step={step} value={profile[key] ?? ''} onChange={(event) => updateSymbolRiskProfile(symbol, key, event.target.value)} className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none" /></label>
+              ))}
+              <button type="button" onClick={() => removeSymbolRiskProfile(symbol)} className="rounded-xl border border-rose-400/20 px-3 py-2 text-xs font-semibold text-rose-200">Remove</button>
+            </div>
+          ))}
+          {Object.keys(form.strategy.symbolRiskProfiles || {}).length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-slate-400">No profiles yet. Add a tracked symbol to make its leverage, stop loss, and take profit profile-first.</div> : null}
+        </div>
       </Panel>
       )} />
       <Route path="credentials" element={(

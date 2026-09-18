@@ -12,170 +12,13 @@
 // Every emitted snapshot carries strategyFamily + setupFamily so each resulting
 // trade preserves which bot and hypothesis produced it.
 
-import { calculateSignalModelPositionSizing } from '../../src/lib/signalModels.js'
 import { _internals } from '../backtest/feature-lib.js'
-import { classifyRegime } from '../backtest/regime.js'
+import { buildBotClaudeSignalSnapshot } from './bot-claude.js'
+import { finiteSeries, indicatorBundle, lastOf, notReady, num, sizeAndShape } from './shared-signals.js'
 
-const { emaSeries, rsiSeries, atrSeries, bollinger, vwapSeries, adx, mean, stdev } = _internals
+const { emaSeries, rsiSeries, atrSeries, mean } = _internals
 
-const num = (v, d = 0) => {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : d
-}
-const lastOf = (a) => (a.length ? a[a.length - 1] : undefined)
-const finiteSeries = (s) => s.filter((v) => v != null)
-
-// ---- shared indicator bundle over a closed 5m window + 1h window --------
-
-function indicatorBundle(entry, bias, regime4h) {
-  const closes = entry.map((c) => c.close)
-  const vols = entry.map((c) => c.volume)
-  const price = num(lastOf(closes))
-  const cur = lastOf(entry)
-  const prev = entry[entry.length - 2]
-
-  const rsiArr = finiteSeries(rsiSeries(closes, 14))
-  const rsi = num(lastOf(rsiArr), 50)
-  const rsiSlope = rsiArr.length > 4 ? (rsi - rsiArr[rsiArr.length - 5]) / 4 : 0
-
-  const atrArr = finiteSeries(atrSeries(entry, 14))
-  const atr = num(lastOf(atrArr), price * 0.003)
-
-  const sma20 = mean(closes.slice(-20))
-  const sd20 = stdev(closes.slice(-20))
-  const zscore = sd20 > 0 ? (price - sma20) / sd20 : 0
-  const atrStretch = atr > 0 ? (price - sma20) / atr : 0
-
-  const bb = bollinger(closes, 20, 2)
-  const bbWidthHist = []
-  for (let i = 25; i < closes.length; i += 3) bbWidthHist.push(bollinger(closes.slice(0, i), 20, 2).width)
-  const bbWidthSorted = bbWidthHist.slice().sort((a, b) => a - b)
-  const bbWidthP30 = bbWidthSorted.length ? bbWidthSorted[Math.floor(bbWidthSorted.length * 0.3)] : bb.width
-  const squeeze = bb.width <= bbWidthP30 ? 1 : 0
-
-  const atrPrev = num(atrArr[Math.max(0, atrArr.length - 21)], atr)
-  const atrExpanding = atr > atrPrev * 1.15
-  const atrCompressed = atr < atrPrev * 0.85
-
-  const vwap = num(lastOf(vwapSeries(entry)), price)
-  const vwapDist = price > 0 ? (price - vwap) / price : 0
-
-  const e20a = finiteSeries(emaSeries(closes, 20))
-  const e50a = finiteSeries(emaSeries(closes, 50))
-  const e20 = num(lastOf(e20a), price)
-  const e50 = num(lastOf(e50a), e20)
-  const emaDist = price > 0 ? (price - e20) / price : 0
-
-  const relVol = mean(vols.slice(-20)) > 0 ? num(lastOf(vols)) / mean(vols.slice(-20)) : 1
-  const relVolPrev = mean(vols.slice(-21, -1)) > 0 ? num(vols[vols.length - 2]) / mean(vols.slice(-21, -1)) : 1
-
-  const win40 = entry.slice(-40)
-  const recentHigh = Math.max(...win40.map((c) => c.high))
-  const recentLow = Math.min(...win40.map((c) => c.low))
-  const rangeBandPct = price > 0 ? (recentHigh - recentLow) / price : 0
-  const rangePos = recentHigh > recentLow ? (price - recentLow) / (recentHigh - recentLow) : 0.5
-
-  const rng = Math.max(cur.high - cur.low, 1e-12)
-  const bodyRange = Math.abs(cur.close - cur.open) / rng
-  const lowerWick = (Math.min(cur.open, cur.close) - cur.low) / rng
-  const upperWick = (cur.high - Math.max(cur.open, cur.close)) / rng
-  const bullReclaim = cur.close > cur.open && prev && cur.close > prev.close
-  const bearReject = cur.close < cur.open && prev && cur.close < prev.close
-
-  const adx1h = adx(bias, 14)
-  const biasCloses = bias.map((c) => c.close)
-  const be20 = num(lastOf(finiteSeries(emaSeries(biasCloses, 20))), num(lastOf(biasCloses)))
-  const be50 = num(lastOf(finiteSeries(emaSeries(biasCloses, 50))), be20)
-  const biasTrendGap = num(lastOf(biasCloses)) > 0 ? (be20 - be50) / num(lastOf(biasCloses)) : 0
-
-  const reg = classifyRegime({ biasCandles: bias, entryCandles: entry, regimeCandles: regime4h })
-
-  return {
-    price, cur, prev, atr, rsi, rsiSlope, sma20, zscore, atrStretch,
-    bb, squeeze, atrExpanding, atrCompressed, vwap, vwapDist, e20, e50, emaDist,
-    relVol, relVolPrev, recentHigh, recentLow, rangeBandPct, rangePos,
-    bodyRange, lowerWick, upperWick, bullReclaim, bearReject,
-    adx1h, biasTrendGap, regime: reg.regime, trendScore: reg.trendScore,
-  }
-}
-
-function sizeAndShape({
-  symbol, signalModel, effectiveStrategy, direction, entryPrice, stopLoss, takeProfit,
-  score, maxScore, summary, strategyFamily, setupFamily, aiFeatures,
-}) {
-  const side = direction === 'LONG' ? 'BUY' : 'SELL'
-  const ps = calculateSignalModelPositionSizing({
-    strategy: effectiveStrategy,
-    signalModelId: signalModel.id,
-    entryPrice,
-    stopLoss,
-    runningBalance: effectiveStrategy.runningBalance,
-  })
-  return {
-    symbol,
-    side,
-    direction,
-    checklistSide: direction,
-    signalModelId: signalModel.id,
-    signalModelName: signalModel.name,
-    strategyFamily,
-    setupFamily,
-    status: 'ready',
-    ready: true,
-    score,
-    maxScore,
-    professionalSignalScore: 0,
-    professionalRequiredCount: 0,
-    allSignalsPassed: score >= maxScore,
-    entryPrice: Number(entryPrice.toFixed(8)),
-    stopLoss: Number(stopLoss.toFixed(8)),
-    takeProfit: Number(takeProfit.toFixed(8)),
-    confidence: Math.min(0.9, 0.35 + 0.1 * (score - Math.floor(maxScore / 2))),
-    positionNotional: ps.positionNotional,
-    margin: ps.margin,
-    configuredStopLossPercent: ps.configuredStopLossPercent,
-    maxLossPerTrade: ps.maxLossPerTrade,
-    summary,
-    support: direction === 'LONG' ? stopLoss : takeProfit,
-    resistance: direction === 'LONG' ? takeProfit : stopLoss,
-    checklist: [],
-    setupType: strategyFamily,
-    patternLabel: signalModel.tag,
-    aiFeatures,
-  }
-}
-
-function notReady(symbol, signalModel, effectiveStrategy, price, summary) {
-  return {
-    symbol,
-    side: null,
-    direction: 'WAIT',
-    checklistSide: 'WAIT',
-    signalModelId: signalModel.id,
-    signalModelName: signalModel.name,
-    status: 'watching',
-    ready: false,
-    score: 0,
-    maxScore: 0,
-    professionalSignalScore: 0,
-    professionalRequiredCount: 0,
-    allSignalsPassed: false,
-    entryPrice: price ?? null,
-    stopLoss: null,
-    takeProfit: null,
-    confidence: 0,
-    positionNotional: num(effectiveStrategy.marginPerTrade) * num(effectiveStrategy.leverage),
-    margin: num(effectiveStrategy.marginPerTrade),
-    configuredStopLossPercent: num(effectiveStrategy.stopLossPercent),
-    maxLossPerTrade: num(effectiveStrategy.maxLossPerTrade),
-    summary: summary || `${signalModel.name} has no qualifying setup.`,
-    support: null,
-    resistance: null,
-    checklist: [],
-    setupType: null,
-    patternLabel: null,
-  }
-}
+export { indicatorBundle, notReady, sizeAndShape }
 
 const MIN_ENTRY_BARS = 90
 
@@ -384,7 +227,9 @@ export function buildBot8SignalSnapshot({ symbol, signalModel, effectiveStrategy
   const fundingVeryNeg = funding <= -0.0003 || (fundingPct != null && fundingPct <= 0.1)
   const fundingVeryPos = funding >= 0.0003 || (fundingPct != null && fundingPct >= 0.9)
 
-  // Funding alone NEVER triggers — price/action confirmation is mandatory.
+  // Bot 8's high-frequency test profile still requires genuine extreme funding,
+  // but accepts any two available price/action confirmations. This deliberately
+  // broadens coverage without turning an ordinary price move into a funding trade.
   const longConds = [
     fundingVeryNeg,
     b.zscore <= -1.3,
@@ -403,7 +248,7 @@ export function buildBot8SignalSnapshot({ symbol, signalModel, effectiveStrategy
   ]
   const longScore = longConds.filter(Boolean).length
   const shortScore = shortConds.filter(Boolean).length
-  const NEED = 5 // must include the funding condition + 4 price/action
+  const NEED = 3 // funding condition + any two price/action confirmations
 
   let direction = null
   let score = 0
@@ -427,9 +272,47 @@ export function buildBot8SignalSnapshot({ symbol, signalModel, effectiveStrategy
   })
 }
 
+// ---- Bot 9 — EXPERIMENTAL HIGH-PRECISION TREND PULLBACK -----------------
+// This mirrors the fixed hp_r2_10_v100_t10_s20 study specification. It is
+// explicitly testnet-only because that study failed validation despite a
+// favourable holdout slice.
+export function buildBot9SignalSnapshot({ symbol, signalModel, effectiveStrategy, closedBiasTimeframe, regime4hTimeframe = null }) {
+  const bias=closedBiasTimeframe, four=Array.isArray(regime4hTimeframe)?regime4hTimeframe:[]
+  if(bias.length<50||four.length<200)return notReady(symbol,signalModel,effectiveStrategy,lastOf(bias)?.close??null,'Bot 9 waiting for completed 1H / 4H history.')
+  const price=num(lastOf(bias)?.close), prev=bias[bias.length-2], closes=bias.map(x=>x.close), fourCloses=four.map(x=>x.close)
+  const e50=num(lastOf(finiteSeries(emaSeries(fourCloses,50)))),e200=num(lastOf(finiteSeries(emaSeries(fourCloses,200))))
+  const r2=num(lastOf(finiteSeries(rsiSeries(closes,2))),50), a=num(lastOf(finiteSeries(atrSeries(bias,14))),price*.003)
+  const cur=lastOf(bias), avgVol=mean(bias.slice(-21,-1).map(x=>x.volume)), buyRatio=cur.volume>0?num(cur.takerBuyBaseVolume)/num(cur.volume):.5
+  const long=[e50>e200,r2<=10,cur.volume>=avgVol,buyRatio>=.5,cur.close>cur.open&&cur.close>prev?.close]
+  const short=[e50<e200,100-r2<=10,cur.volume>=avgVol,buyRatio<=.5,cur.close<cur.open&&cur.close<prev?.close]
+  const ls=long.filter(Boolean).length,ss=short.filter(Boolean).length
+  const direction=ls===5?'LONG':ss===5?'SHORT':null
+  if(!direction)return notReady(symbol,signalModel,effectiveStrategy,price,`Bot 9 experimental watch: L${ls}/5 S${ss}/5; requires completed 4H trend, RSI(2), volume, flow, and reclaim.`)
+  const stopDist=Math.max(2*a,price*.002),targetDist=Math.max(a,price*.001)
+  const stopLoss=direction==='LONG'?price-stopDist:price+stopDist,takeProfit=direction==='LONG'?price+targetDist:price-targetDist
+  return sizeAndShape({symbol,signalModel,effectiveStrategy,direction,entryPrice:price,stopLoss,takeProfit,score:5,maxScore:5,
+    summary:`Bot 9 experimental ${direction.toLowerCase()}: 4H EMA trend, 1H RSI(2) ${r2.toFixed(1)}, relVol ${(cur.volume/Math.max(avgVol,1)).toFixed(2)}, taker ${(buyRatio*100).toFixed(1)}%. Validation-rejected research; testnet observation only.`,strategyFamily:'trend-pullback-reversion',setupFamily:direction==='LONG'?'Bull trend exhaustion reclaim':'Bear trend exhaustion reclaim',aiFeatures:{rsi2:r2,relVolume:cur.volume/Math.max(avgVol,1),takerBuyRatio:buyRatio,ema4hGap:(e50-e200)/price}})
+}
+
+// Bot 10 is intentionally executed by consolidated-bot.js, which ranks all
+// Bot 1–8 candidates globally and owns separate exchange protections. This
+// placeholder lets Wallet 10 appear with the other bots without creating a
+// second, conflicting execution path in the regular wallet scanner.
+export function buildBot10SignalSnapshot({ symbol, signalModel, effectiveStrategy, closedEntryTimeframe }) {
+  return notReady(symbol,signalModel,effectiveStrategy,lastOf(closedEntryTimeframe)?.close??null,'Bot 10 ranks Bots 1–8 through its dedicated consolidated selector and separate testnet controls. Open Bot 10 from Signal Models to inspect or manage it.')
+}
+
 export const BOT5TO8_BUILDERS = {
   'model-5': buildBot5SignalSnapshot,
   'model-6': buildBot6SignalSnapshot,
   'model-7': buildBot7SignalSnapshot,
   'model-8': buildBot8SignalSnapshot,
+  'model-9': buildBot9SignalSnapshot,
+  'model-10': buildBot10SignalSnapshot,
+  // Bot 11 "Bot Claude" — the entry decision comes from a live Anthropic
+  // Claude API call (see server/strategy/bot-claude.js), not a technical
+  // rule set. This builder stays synchronous like every other one here: it
+  // only reads the latest cached decision, which mock-trading-server.js
+  // refreshes asynchronously (once per closed candle) before this dispatch runs.
+  'model-11': buildBotClaudeSignalSnapshot,
 }

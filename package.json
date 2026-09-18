@@ -9,12 +9,17 @@
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",
+    "consolidated:train": "node --max-old-space-size=6144 server/backtest/train-consolidated.js",
+    "backtest:statistical-review": "node --max-old-space-size=6144 server/backtest/statistical-review.js",
+    "backtest:trend-benchmark": "node --max-old-space-size=6144 server/backtest/trend-benchmark.js",
+    "backtest:high-precision": "node --max-old-space-size=6144 server/backtest/high-precision-study.js",
     "test": "node --test --test-force-exit \"test/**/*.test.js\"",
     "test:py": "server/learning-bot/.venv/Scripts/python.exe -m pytest server/learning-bot/tests -q",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.1",
     "@openai/codex-sdk": "^0.151.0",
     "concurrently": "^9.2.1",
     "dotenv": "^16.6.1",

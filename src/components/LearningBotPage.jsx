@@ -53,6 +53,9 @@ const BOT_LABELS = {
   'model-6': 'Bot 6',
   'model-7': 'Bot 7',
   'model-8': 'Bot 8',
+  'model-9': 'Bot 9 — Experimental',
+  'model-10': 'Bot 10 — Consolidated Knowledge',
+  'model-11': 'Bot Claude — Claude AI Trader',
 }
 
 const DEFAULT_FORM = {
@@ -91,6 +94,9 @@ const DEFAULT_FORM = {
     'model-6': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-7': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-8': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-9': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-10': { enabled: false, paperOnly: true, thresholdScore: 55 },
+    'model-11': { enabled: false, paperOnly: true, thresholdScore: 55 },
   },
 }
 

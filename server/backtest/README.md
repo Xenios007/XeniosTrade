@@ -28,6 +28,27 @@ months for live paper trades.
 npm run backtest:dataset -- --months 6 --bots model-1,model-2,model-3,model-4
 ```
 
+## Statistical volume, AI-score, and exit study
+
+For a reproducible five-year, 20-symbol research run that records actual
+Binance candle volume, taker-buy flow, and multiple candle-only exit policies:
+
+```sh
+npm run backtest:dataset -- --months 60 --symbols universe --bots model-1,model-2,model-3,model-4,model-5,model-6,model-7,model-8 --stride 2 --concurrency 3 --cap-per-symbol-bot 400 --run-id statistical-5yr-20sym-v1 --no-train
+npm run backtest:statistical-review -- --run-id statistical-5yr-20sym-v1
+```
+
+The review fits its AI-style expected-R tree only on the chronological train
+split, uses a fixed 0.10 R gate, compares actual-volume filters, and ranks
+exit policies by validation data before displaying the holdout. It writes JSON
+to `server/data/backtest-research/` and a readable report under
+`server/backtest/runs/`. It does not update the deployed bot, turn on training,
+or establish a profitable edge.
+
+Exit variants are source brackets, 1R / 1.5R targets, breakeven after 1R, and
+12h / 24h time stops. They use 5m OHLC only; stop wins same-bar ties, and no
+historical order-book depth is invented.
+
 ### Flags
 
 | flag | default | meaning |

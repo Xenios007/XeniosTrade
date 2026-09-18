@@ -77,6 +77,7 @@ export const NAV_GROUPS = [
         children: [
           { to: '/settings/automation', label: 'Automation' },
           { to: '/settings/strategy', label: 'Bot Strategy' },
+          { to: '/settings/symbol-risk', label: 'Symbol Risk Profiles' },
           { to: '/settings/credentials', label: 'API Credentials' },
         ],
       },

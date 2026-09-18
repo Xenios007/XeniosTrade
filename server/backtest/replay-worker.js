@@ -19,12 +19,13 @@ import { computeSplitBoundaries, assignSplit, SPLIT_EMBARGO_MS } from './splits.
 import { buildMarketContext } from './btc-context.js'
 import { SIGNAL_MODELS, getSignalModelName, getSignalModel, getEffectiveSignalModelStrategy } from '../../src/lib/signalModels.js'
 import { isExtendedBacktestSymbol } from '../../src/lib/tradingConfig.js'
+import { simulateExitPolicy } from './exit-policy.js'
 
 const { analyzeSymbolStrategy, toCandleData, getSettings } = await import('../mock-trading-server.js')
 
 const {
   RUN_DIR, MONTHS, STRIDE, FEE_BPS, SLIPPAGE_BPS, MAX_HOLD_MS,
-  CAP_PER_SYMBOL_BOT, STRICT_CONTEXT, ETH_CONTEXT, NO_FEATURES, RUN_ID, activeBots,
+  CAP_PER_SYMBOL_BOT, STRICT_CONTEXT, ETH_CONTEXT, NO_FEATURES, EXIT_POLICIES, RUN_ID, activeBots,
 } = workerData
 
 const BIAS_TF = '1h'
@@ -64,33 +65,6 @@ function takerImbalanceProxy(entryCandles) {
 function tradePnl({ side, entryPrice, exitPrice, notional }) {
   const r = side === 'BUY' ? (exitPrice - entryPrice) / entryPrice : (entryPrice - exitPrice) / entryPrice
   return r * notional
-}
-function simulateExit({ side, entryPrice, stopLoss, takeProfit, notional, isBot4, entryBarIndex, entryTfRaw }) {
-  const entryTime = Number(entryTfRaw[entryBarIndex][0])
-  const moneyStopUsd = isBot4 ? 1 : 0
-  const moneyStopPrice = moneyStopUsd > 0 && notional > 0
-    ? (side === 'BUY' ? entryPrice * (1 - moneyStopUsd / notional) : entryPrice * (1 + moneyStopUsd / notional))
-    : null
-  for (let i = entryBarIndex + 1; i < entryTfRaw.length; i += 1) {
-    const row = entryTfRaw[i]
-    const high = Number(row[2])
-    const low = Number(row[3])
-    const close = Number(row[4])
-    const closeTime = Number(row[6])
-    const hitTP = side === 'BUY' ? high >= takeProfit : low <= takeProfit
-    const hitSL = side === 'BUY' ? low <= stopLoss : high >= stopLoss
-    const hitMoneyStop = moneyStopPrice != null && (side === 'BUY' ? low <= moneyStopPrice : high >= moneyStopPrice)
-    if (hitSL || hitMoneyStop) {
-      const stopFill = hitSL && (!hitMoneyStop || (side === 'BUY' ? stopLoss >= moneyStopPrice : stopLoss <= moneyStopPrice))
-      return { price: stopFill ? stopLoss : moneyStopPrice, time: closeTime, status: 'CLOSED_SL', bars: i - entryBarIndex }
-    }
-    if (hitTP) return { price: takeProfit, time: closeTime, status: 'CLOSED_TP', bars: i - entryBarIndex }
-    if (closeTime - entryTime >= MAX_HOLD_MS) {
-      const pnl = tradePnl({ side, entryPrice, exitPrice: close, notional })
-      return { price: close, time: closeTime, status: pnl >= 0 ? 'CLOSED_TP' : 'CLOSED_SL', timedOut: true, bars: i - entryBarIndex }
-    }
-  }
-  return null
 }
 const rewardFromLabel = (label) => Number(Math.tanh(Number(label.netR || 0) / 2).toFixed(6))
 
@@ -283,7 +257,7 @@ async function processSymbol(symbol) {
       const takeProfit = Number(analysis.takeProfit)
       const configuredStopLossPercent = Number(analysis.configuredStopLossPercent || 0)
 
-      const exit = simulateExit({ side, entryPrice, stopLoss, takeProfit, notional, isBot4: botId === 'model-4', entryBarIndex: i, entryTfRaw })
+      const exit = simulateExitPolicy({ side, entryPrice, stopLoss, takeProfit, notional, isBot4: botId === 'model-4', entryBarIndex: i, entryTfRaw, maxHoldHours: MAX_HOLD_MS / 3_600_000 })
       if (!exit) continue
 
       if (!NO_FEATURES && !featuresCache) {
@@ -311,6 +285,15 @@ async function processSymbol(symbol) {
         holdBars: exit.bars,
         holdHours: Number(((exit.time - nowMs) / 3_600_000).toFixed(2)),
         timedOut: Boolean(exit.timedOut),
+      }
+      const exitVariants = {}
+      for (const policyId of EXIT_POLICIES || ['source']) {
+        const candidate = policyId === 'source' ? exit : simulateExitPolicy({ side, entryPrice, stopLoss, takeProfit, notional, isBot4: botId === 'model-4', entryBarIndex: i, entryTfRaw, maxHoldHours: MAX_HOLD_MS / 3_600_000, policyId })
+        if (!candidate) continue
+        const gross = tradePnl({ side, entryPrice, exitPrice: candidate.price, notional })
+        const net = round2(gross - friction)
+        exitVariants[policyId] = { status:candidate.status, closedAt:candidate.time, exitPrice:round2(candidate.price), pnl:net,
+          netR:Number((net / riskUsd).toFixed(4)), holdBars:candidate.bars, holdHours:Number(((candidate.time-nowMs)/3_600_000).toFixed(2)), timedOut:Boolean(candidate.timedOut) }
       }
       const model = getSignalModel(botId)
       const rec = {
@@ -343,6 +326,7 @@ async function processSymbol(symbol) {
         signalScore: Number(analysis.score || 0),
         signalSummary: String(analysis.summary || ''),
         label,
+        exitVariants,
         reward: rewardFromLabel(label),
         status: exit.status,
         result: exit.status === 'CLOSED_TP' ? 'TP' : 'SL',

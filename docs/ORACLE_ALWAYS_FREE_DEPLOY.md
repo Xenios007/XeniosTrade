@@ -135,6 +135,31 @@ npm run build
 sudo systemctl restart xeniostrade
 ```
 
+### Mandatory UI publish rule
+
+Every frontend/UI edit must be built and published to **both** production
+locations. Building only `/home/xenios/app/dist` is not sufficient because the
+public site can also be served from `/var/www/xeniostrade`.
+
+```bash
+cd /home/xenios/app
+npm run build
+cp -r /home/xenios/app/dist/. /var/www/xeniostrade/
+pm2 restart xeniostrade-api
+```
+
+Before considering an UI deployment complete, verify that both `index.html`
+files reference the same compiled asset hash:
+
+```bash
+printf 'APP: '; grep -o 'index-[A-Za-z0-9_-]*\.js' /home/xenios/app/dist/index.html | head -1
+printf 'WEB: '; grep -o 'index-[A-Za-z0-9_-]*\.js' /var/www/xeniostrade/index.html | head -1
+```
+
+The `APP` and `WEB` values must match. This is required for every UI change;
+otherwise the server API can be updated while users continue seeing an older
+frontend.
+
 ## 10. Optional next step
 
 For a cleaner public URL, put Nginx or Caddy in front and reverse-proxy to `127.0.0.1:3001`.

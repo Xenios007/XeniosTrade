@@ -12,13 +12,22 @@ dist/
 # keep the template
 !.env.example
 
-# Runtime state & logs (mutable data, may contain credentials)
+# Runtime state & logs (mutable data, may contain credentials).
+# Blanket rule first — server/data/ has grown many generated subdirectories
+# (consolidated/, bot-claude/, backtest-research/, *.tmp-*/*.bak scratch files)
+# that the older file-specific rules below don't reach recursively.
+server/data/
 server/data/*.json
 server/data/*.log
 launcher-logs/
 *.log
 *.err.log
 *.out.log
+
+# Prior AI-agent session scratch directories (baseline snapshots, tarballs,
+# session logs from earlier deployment sessions) — working state, not source.
+.deploy-consolidated/
+.deploy-usdc/
 
 # Editor / OS
 .DS_Store

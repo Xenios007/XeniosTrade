@@ -31,6 +31,7 @@ import {
   getSignalModelName,
   getSignalModelTrackedSymbols,
   normalizeSignalModelStrategies,
+  normalizeSymbolRiskProfiles,
   resolveBot3RiskPresetId,
   SIGNAL_MODELS,
 } from '../src/lib/signalModels.js'
@@ -54,6 +55,8 @@ import {
 } from '../src/lib/tradingSessions.js'
 import { getCodexConsoleStatus, runCodexConsoleTurn } from './codex-console.js'
 import { BOT5TO8_BUILDERS } from './strategy/bots5to8.js'
+import { refreshBotClaudeDecisions } from './strategy/bot-claude.js'
+import { registerConsolidatedBot } from './consolidated-bot.js'
 
 dotenv.config()
 
@@ -86,6 +89,9 @@ const appLoginPassword = (
 const appLoginPasswordSource = process.env.APP_LOGIN_PASSWORD || process.env.XENIOS_LOGIN_PASSWORD
   ? 'environment'
   : 'generated'
+// Local-only escape hatch: when XENIOS_DISABLE_AUTH=true the workspace login gate
+// is bypassed entirely. Intended for the backtest / dev box; never set on the live server.
+const authDisabled = String(process.env.XENIOS_DISABLE_AUTH || '').toLowerCase() === 'true'
 const AUTH_SESSION_COOKIE_NAME = 'xeniostrade_session'
 const AUTH_SESSION_TTL_MS = 1000 * 60 * 60 * 12
 const authSessions = new Map()
@@ -259,6 +265,14 @@ let lastSettingsRegressionWarningSignature = ''
 // Bot 4 (model-4) cuts any open position the instant its unrealized PnL reaches this loss, in USDT.
 const MODEL4_HARD_MONEY_STOP_USDT = 1
 
+// Local-paper auto trades are flattened after this many hours if neither the take-profit
+// nor the stop-loss has been hit. Matches the 48h time stop already enforced by the
+// backtest engine (server/backtest/exit-policy.js MAX_HOLD_MS) and the consolidated bot's
+// live testnet loop (server/consolidated-testnet.js TESTNET_LIMITS.maxHoldHours), so a
+// paper trade can no longer sit open indefinitely (e.g. a stalled USDCUSDT position that
+// never reaches its bracket) and live paper trading matches what was actually backtested.
+const PAPER_TRADE_MAX_HOLD_HOURS = 48
+
 const defaultStrategySettingsBase = {
   autoTradingEnabled: false,
   preferredSymbols: DEFAULT_PREFERRED_SYMBOLS,
@@ -278,6 +292,7 @@ const defaultStrategySettingsBase = {
   maxLossPerDay: 20,
   dailyProfitTarget: 50,
   timezone: 'Asia/Manila',
+  symbolRiskProfiles: {},
 }
 const defaultStrategySettings = {
   ...defaultStrategySettingsBase,
@@ -331,6 +346,12 @@ const defaultLearningBotSettings = {
     'model-6': { enabled: true, paperOnly: false, thresholdScore: 45 },
     'model-7': { enabled: true, paperOnly: false, thresholdScore: 45 },
     'model-8': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    // Bot 9 is a user-authorized, validation-rejected experiment. It remains
+    // testnet-scoped through the server's exchange credentials and small risk profile.
+    'model-9': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-10': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    // Bot 11 "Bot Claude" is a live LLM-driven experiment, same posture as Bot 9/10.
+    'model-11': { enabled: true, paperOnly: false, thresholdScore: 45 },
   },
 }
 
@@ -697,6 +718,8 @@ function getTradeOutcomeTitle(status = '') {
       return 'Trade Closed - Stop Loss'
     case 'CLOSED_MANUAL':
       return 'Trade Closed - Manual Exit'
+    case 'CLOSED_TIMEOUT':
+      return 'Trade Closed - Time Stop'
     default:
       return 'Trade Closed'
   }
@@ -847,6 +870,7 @@ function normalizeSettings(rawSettings = {}) {
   strategy.scheduledSessions = normalizeAutoTradeSessions(strategy.scheduledSessions)
   strategy.marginMode = normalizeMarginMode(strategy.marginMode)
   strategy.signalModelStrategies = normalizeSignalModelStrategies(strategy.signalModelStrategies, strategy)
+  strategy.symbolRiskProfiles = normalizeSymbolRiskProfiles(strategy.symbolRiskProfiles)
   strategy.maxLossPerTrade = getStrategyDerivedMaxLossPerTrade(strategy)
 
   return {
@@ -1265,10 +1289,16 @@ function normalizeVolatileMarketTicker(ticker) {
   }
 }
 
+// Stablecoin-vs-USDT pairs (USDC, FDUSD, TUSD, DAI, ...) pass the liquidity x volatility
+// scan on raw quote volume alone even though the price barely moves, which lets a
+// mean-reversion bot open a position whose bracket distance it can structurally never
+// reach (see Bot 5/Bot 6 getting slot-locked on USDCUSDT for days). Excluded outright.
+const STABLECOIN_BASE_ASSETS = new Set(['USDC', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'GUSD', 'EURI', 'PYUSD'])
+
 function getTradableUsdtSymbols(exchangeInfo) {
   return new Set(
     (exchangeInfo?.symbols || [])
-      .filter((item) => item.status === 'TRADING' && item.quoteAsset === 'USDT')
+      .filter((item) => item.status === 'TRADING' && item.quoteAsset === 'USDT' && !STABLECOIN_BASE_ASSETS.has(item.baseAsset))
       .map((item) => item.symbol),
   )
 }
@@ -1290,6 +1320,38 @@ function rankVolatileMarkets(tickers, tradableSymbols, limit = VOLATILE_SYMBOL_L
       || right.absoluteChangePercent - left.absoluteChangePercent
     ))
     .slice(0, limit)
+}
+
+// A candidate must have actually moved at least as far as its own stop-loss distance over
+// the last 24h before it is accepted. Without this, a low-volatility symbol (a stablecoin
+// pair slipping past the liquidity filter, a quiet alt, ...) can score high enough on
+// pattern/indicator checks to open a position whose bracket it can never reach, locking
+// the wallet's open-position slot indefinitely (see Bot 5/Bot 6 on USDCUSDT).
+const CANDIDATE_RANGE_LOOKBACK_HOURS = 24
+const MIN_RANGE_TO_STOP_RATIO = 1
+
+function evaluateCandidateRangeViability(candidate, marketInputs) {
+  const biasCandles = Array.isArray(marketInputs?.bias) ? marketInputs.bias : []
+  const recentCandles = biasCandles.slice(-CANDIDATE_RANGE_LOOKBACK_HOURS)
+  const entryPrice = Number(candidate?.entryPrice || 0)
+  const stopLoss = Number(candidate?.stopLoss || 0)
+
+  if (recentCandles.length === 0 || !Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(stopLoss) || stopLoss <= 0) {
+    // Not enough data to evaluate; never block a trade on missing/unavailable market data.
+    return { viable: true, rangePercent: null, slDistancePercent: null, rangeHours: recentCandles.length }
+  }
+
+  const highestHigh = Math.max(...recentCandles.map((candle) => Number(candle.high)))
+  const lowestLow = Math.min(...recentCandles.map((candle) => Number(candle.low)))
+  const rangePercent = ((highestHigh - lowestLow) / entryPrice) * 100
+  const slDistancePercent = (Math.abs(entryPrice - stopLoss) / entryPrice) * 100
+
+  return {
+    viable: rangePercent >= slDistancePercent * MIN_RANGE_TO_STOP_RATIO,
+    rangePercent,
+    slDistancePercent,
+    rangeHours: recentCandles.length,
+  }
 }
 
 function normalizeTradeRisk(trade, strategy) {
@@ -1461,6 +1523,11 @@ function clearAuthSessionCookie(response) {
 }
 
 function requireAuthenticatedSession(request, response, next) {
+  if (authDisabled) {
+    next()
+    return
+  }
+
   const session = getAuthSessionFromRequest(request)
 
   if (!session) {
@@ -1524,6 +1591,13 @@ app.get('/healthz', (_request, response) => {
 })
 
 app.get('/api/auth/session', (request, response) => {
+  if (authDisabled) {
+    response.json({
+      authenticated: true,
+    })
+    return
+  }
+
   const session = getAuthSessionFromRequest(request)
 
   if (!session) {
@@ -5297,6 +5371,17 @@ function buildSignalCandidate({
   waitingSummary,
   patternLabel = null,
 }) {
+  const profile = effectiveStrategy.symbolRiskProfile
+  const profileStopLoss = profile
+    ? direction === 'LONG'
+      ? entryPrice * (1 - effectiveStrategy.stopLossPercent / 100)
+      : entryPrice * (1 + effectiveStrategy.stopLossPercent / 100)
+    : stopLoss
+  const profileTakeProfit = profile
+    ? direction === 'LONG'
+      ? entryPrice * (1 + effectiveStrategy.takeProfitPercent / 100)
+      : entryPrice * (1 - effectiveStrategy.takeProfitPercent / 100)
+    : takeProfit
   const professionalRequiredCount = signalModel.id === 'model-2' ? 2 : 0
   const combinedChecks = signalModel.id === 'model-2'
     ? [...baseChecks, ...professionalChecks]
@@ -5312,7 +5397,7 @@ function buildSignalCandidate({
     strategy: effectiveStrategy,
     signalModelId: signalModel.id,
     entryPrice,
-    stopLoss,
+    stopLoss: profileStopLoss,
     runningBalance: effectiveStrategy.runningBalance,
   })
 
@@ -5327,16 +5412,17 @@ function buildSignalCandidate({
     allSignalsPassed: score === combinedChecks.length,
     ready,
     entryPrice,
-    stopLoss,
-    takeProfit,
+    stopLoss: profileStopLoss,
+    takeProfit: profileTakeProfit,
     confidence: combinedChecks.length > 0 ? score / combinedChecks.length : 0,
     positionNotional: positionSizing.positionNotional,
     margin: positionSizing.margin,
+    leverage: positionSizing.strategy.leverage,
     configuredStopLossPercent: positionSizing.configuredStopLossPercent,
     maxLossPerTrade: positionSizing.maxLossPerTrade,
     summary: ready ? readySummary : waitingSummary,
-    support,
-    resistance,
+    support: profile ? (direction === 'LONG' ? profileStopLoss : profileTakeProfit) : support,
+    resistance: profile ? (direction === 'LONG' ? profileTakeProfit : profileStopLoss) : resistance,
     checklist: enrichSignalChecks(signalModel, combinedChecks),
     patternLabel,
   }
@@ -6073,13 +6159,19 @@ function buildSignalAnalysisSnapshotLegacy(
     const selectedScore = selectedDirection === 'LONG' ? longScore : shortScore
     const selectedThresholdPassed = selectedScore >= signalModel.minimumScore
     const selectedSide = selectedDirection === 'LONG' ? 'BUY' : 'SELL'
-    const selectedStopLoss = selectedDirection === 'LONG' ? longStopLoss : shortStopLoss
-    const selectedTakeProfit = selectedDirection === 'LONG' ? longTakeProfit : shortTakeProfit
+    const structuralStopLoss = selectedDirection === 'LONG' ? longStopLoss : shortStopLoss
+    const structuralTakeProfit = selectedDirection === 'LONG' ? longTakeProfit : shortTakeProfit
+    const profileStopLoss = effectiveStrategy.symbolRiskProfile
+      ? selectedDirection === 'LONG' ? latestEntry.close * (1 - effectiveStrategy.stopLossPercent / 100) : latestEntry.close * (1 + effectiveStrategy.stopLossPercent / 100)
+      : structuralStopLoss
+    const profileTakeProfit = effectiveStrategy.symbolRiskProfile
+      ? selectedDirection === 'LONG' ? latestEntry.close * (1 + effectiveStrategy.takeProfitPercent / 100) : latestEntry.close * (1 - effectiveStrategy.takeProfitPercent / 100)
+      : structuralTakeProfit
     const positionSizing = calculateSignalModelPositionSizing({
       strategy: effectiveStrategy,
       signalModelId,
       entryPrice: latestEntry.close,
-      stopLoss: selectedStopLoss,
+      stopLoss: profileStopLoss,
       runningBalance: effectiveStrategy.runningBalance,
     })
     const selectedSupport = structureSupport
@@ -6107,11 +6199,12 @@ function buildSignalAnalysisSnapshotLegacy(
       professionalRequiredCount: 0,
       allSignalsPassed: selectedScore === selectedChecks.length,
       entryPrice: latestEntry.close,
-      stopLoss: selectedStopLoss,
-      takeProfit: selectedTakeProfit,
+      stopLoss: profileStopLoss,
+      takeProfit: profileTakeProfit,
       confidence: selectedChecks.length > 0 ? selectedScore / selectedChecks.length : 0,
       positionNotional: positionSizing.positionNotional,
       margin: positionSizing.margin,
+      leverage: positionSizing.strategy.leverage,
       configuredStopLossPercent: positionSizing.configuredStopLossPercent,
       maxLossPerTrade: positionSizing.maxLossPerTrade,
       summary: ready
@@ -6354,6 +6447,7 @@ function buildBot4SignalSnapshot({
     confidence: ready ? 0.5 : 0,
     positionNotional: positionSizing.positionNotional,
     margin: positionSizing.margin,
+    leverage: positionSizing.strategy.leverage,
     configuredStopLossPercent: positionSizing.configuredStopLossPercent,
     maxLossPerTrade: positionSizing.maxLossPerTrade,
     summary: ready ? readySummary : waitingSummary,
@@ -6384,6 +6478,7 @@ export function buildSignalAnalysisSnapshot(
   const signalModel = getSignalModel(signalModelId)
   const effectiveStrategy = getEffectiveSignalModelStrategy(strategy, signalModelId, {
     runningBalance: strategy?.runningBalance,
+    symbol,
   })
   const closedBiasTimeframe = getClosedCandleSeries(biasTimeframe, 60 * 60_000)
   const closedSetupTimeframe = getClosedCandleSeries(setupTimeframe, 15 * 60_000)
@@ -7473,6 +7568,64 @@ async function cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey }) {
   ])
 }
 
+// Create the replacement first, then cancel the existing TP. This order keeps
+// the exchange position protected if Binance rejects the replacement request.
+async function extendExchangeTakeProfitForBot8(trade, nextTakeProfit, { apiKey, secretKey }) {
+  const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), trade.symbol)
+  if (!symbolInfo) throw new Error(`No futures symbol rules found for ${trade.symbol}.`)
+
+  const quantity = getTrackedTradeQuantity(trade)
+  const triggerPrice = normalizeFuturesPrice(
+    symbolInfo,
+    nextTakeProfit,
+    getProtectiveTriggerRoundMode(trade.side, 'TAKE_PROFIT_MARKET'),
+  )
+  const replacement = await placeBinanceAlgoOrder({
+    apiKey,
+    secretKey,
+    algoType: 'CONDITIONAL',
+    symbol: trade.symbol,
+    side: getOppositeTradeSide(trade.side),
+    type: 'TAKE_PROFIT_MARKET',
+    triggerPrice: formatFuturesPrice(symbolInfo, triggerPrice, getProtectiveTriggerRoundMode(trade.side, 'TAKE_PROFIT_MARKET')),
+    quantity: formatFuturesQuantity(symbolInfo, quantity),
+    reduceOnly: 'true',
+    workingType: 'CONTRACT_PRICE',
+    priceProtect: 'TRUE',
+    clientAlgoId: `xenios${Date.now()}ai_tp`,
+  })
+
+  try {
+    await cancelProtectiveOrder({
+      symbol: trade.symbol,
+      orderId: trade.exchangeTakeProfitOrderId,
+      algoId: trade.exchangeTakeProfitAlgoId,
+      clientAlgoId: trade.exchangeTakeProfitAlgoClientId || trade.exchangeTakeProfitClientOrderId,
+      apiKey,
+      secretKey,
+    })
+  } catch (error) {
+    await cancelProtectiveOrder({
+      symbol: trade.symbol,
+      orderId: replacement?.orderId,
+      algoId: replacement?.algoId,
+      clientAlgoId: replacement?.clientAlgoId,
+      apiKey,
+      secretKey,
+    }).catch(() => null)
+    throw error
+  }
+
+  return {
+    ...trade,
+    takeProfit: triggerPrice,
+    exchangeTakeProfitOrderId: replacement.orderId || null,
+    exchangeTakeProfitClientOrderId: replacement.clientOrderId || null,
+    exchangeTakeProfitAlgoId: replacement.algoId || null,
+    exchangeTakeProfitAlgoClientId: replacement.clientAlgoId || null,
+  }
+}
+
 async function createExchangeTradeExecution(payload, settings, { forceBinance = false } = {}) {
   const { apiKey, secretKey } = getEffectiveCredentials(settings)
   const marginMode = normalizeMarginMode(payload.marginMode ?? settings.strategy.marginMode)
@@ -7945,7 +8098,11 @@ function closeTradeRecord({
 }
 
 function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = null, learningBotSettings = defaultLearningBotSettings) {
-  if (trade.status !== 'OPEN' || isBinanceTestnetTrade(trade)) {
+  const signalModelId = ensureSignalModelId(trade.signalModelId)
+  const isBot8Trade = signalModelId === 'model-8'
+  // Bot 8 is intentionally managed on Testnet too. Other exchange trades keep
+  // their existing exchange-side brackets unchanged by this local policy layer.
+  if (trade.status !== 'OPEN' || (isBinanceTestnetTrade(trade) && !isBot8Trade)) {
     return trade
   }
 
@@ -7959,9 +8116,8 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
   }
 
   const config = normalizeLearningBotSettings(learningBotSettings)
-  const signalModelId = ensureSignalModelId(trade.signalModelId)
   const perBotOverride = config.perBotOverrides?.[signalModelId] || null
-  const aiEnabled = Boolean(perBotOverride?.enabled || config.aiEntryFilter.enabled)
+  const aiEnabled = isBot8Trade || Boolean(perBotOverride?.enabled || config.aiEntryFilter.enabled)
 
   if (!aiEnabled || !trainStatus?.metrics) {
     return trade
@@ -7990,7 +8146,15 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
   let managementAction = null
   let managementReason = ''
 
-  if (decision.accept) {
+  // At 50x, the structural stop is deliberately well inside the theoretical
+  // liquidation distance. A policy rejection plus an early adverse move is an
+  // emergency exit signal; it is not presented as a prediction of liquidation.
+  if (isBot8Trade && !decision.accept && progressToTarget <= -0.2) {
+    managementAction = 'emergency-exit'
+    managementReason = `Bot 8 AI rejected ${decision.setupFamily} at ${decision.finalScore}/${decision.thresholdScore} after an adverse move; closing well before the liquidation zone.`
+  }
+
+  if (!managementAction && decision.accept) {
     if (progressToTarget >= 0.45) {
       nextStopLoss = direction === 1
         ? Math.max(stopLoss, entryPrice)
@@ -7999,14 +8163,14 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
       managementReason = `AI accepted ${decision.setupFamily} and moved stop toward breakeven at score ${decision.finalScore}/${decision.thresholdScore}.`
     }
 
-    if (progressToTarget >= 0.75 && Number(decision.setupStats?.avgReward || 0) > 0) {
+    if (progressToTarget >= (isBot8Trade ? 0.7 : 0.75) && Number(decision.setupStats?.avgReward || 0) > 0) {
       nextTakeProfit = direction === 1
-        ? Math.max(nextTakeProfit, entryPrice + (initialReward * 1.12))
-        : Math.min(nextTakeProfit, entryPrice - (initialReward * 1.12))
+        ? Math.max(nextTakeProfit, entryPrice + (initialReward * (isBot8Trade ? 1.2 : 1.12)))
+        : Math.min(nextTakeProfit, entryPrice - (initialReward * (isBot8Trade ? 1.2 : 1.12)))
       managementAction = 'extend-target'
       managementReason = `AI accepted ${decision.setupFamily} and extended take profit using profitable policy data.`
     }
-  } else if (inProfit && progressToTarget >= 0.2) {
+  } else if (!managementAction && inProfit && progressToTarget >= 0.2) {
     nextStopLoss = direction === 1
       ? Math.max(stopLoss, entryPrice - (initialRisk * 0.35))
       : Math.min(stopLoss, entryPrice + (initialRisk * 0.35))
@@ -8090,12 +8254,42 @@ async function updateOpenTrades() {
     }
 
     if (isBinanceTestnetTrade(normalizedTrade) && exchangeAccountSnapshot && exchangeCredentials.apiKey && exchangeCredentials.secretKey) {
-      const reconciledTrade = await reconcileExchangeTradeState(
+      let reconciledTrade = await reconcileExchangeTradeState(
         normalizedTrade,
         exchangeAccountSnapshot,
         exchangeCredentials,
         latestPrices,
       )
+
+      if (reconciledTrade.status === 'OPEN' && ensureSignalModelId(reconciledTrade.signalModelId) === 'model-8') {
+        const ticker = await fetchTickerPrice(reconciledTrade.symbol).catch(() => null)
+        const livePrice = Number(ticker?.price || 0)
+        const managedTrade = applyAiOpenTradeManagement(reconciledTrade, livePrice, learningBotTrainStatus, settings.learningBot)
+        const managementAction = managedTrade.aiManagement?.action
+
+        if (managementAction === 'emergency-exit') {
+          await cancelProtectiveOrdersForTrade(reconciledTrade, exchangeCredentials)
+          const closeResult = await closeExchangePositionImmediately({
+            symbol: reconciledTrade.symbol,
+            side: reconciledTrade.side,
+            quantity: getTrackedTradeQuantity(reconciledTrade),
+            apiKey: exchangeCredentials.apiKey,
+            secretKey: exchangeCredentials.secretKey,
+          })
+          reconciledTrade = closeTradeRecord({
+            trade: managedTrade,
+            exitPrice: Number(closeResult.exitPrice || livePrice),
+            status: 'CLOSED_AI_RISK',
+            result: 'AI_RISK',
+            closedAt: closeResult.closedAt,
+          })
+        } else if (managementAction === 'extend-target' && Number(managedTrade.takeProfit) !== Number(reconciledTrade.takeProfit)) {
+          reconciledTrade = await extendExchangeTakeProfitForBot8(reconciledTrade, managedTrade.takeProfit, exchangeCredentials)
+          reconciledTrade = { ...reconciledTrade, aiManagement: managedTrade.aiManagement }
+        } else if (JSON.stringify(managedTrade) !== JSON.stringify(reconciledTrade)) {
+          reconciledTrade = managedTrade
+        }
+      }
 
       if (JSON.stringify(reconciledTrade) !== JSON.stringify(normalizedTrade)) {
         changed = true
@@ -8140,6 +8334,33 @@ async function updateOpenTrades() {
       const action = managedTrade.aiManagement?.action || 'adjusted'
       const reason = managedTrade.aiManagement?.reason || 'AI adjusted the open-trade management levels.'
       logTerminalLine('AI', `${managedTrade.symbol} open trade ${action}: ${reason}`, 'accent')
+    }
+
+    if (managedTrade.aiManagement?.action === 'emergency-exit') {
+      changed = true
+      const closedTrade = closeTradeRecord({
+        trade: managedTrade,
+        exitPrice: currentPrice,
+        status: 'CLOSED_AI_RISK',
+        result: 'AI_RISK',
+      })
+      logTradeClosedToTerminal(normalizedTrade, closedTrade)
+      updated.push(closedTrade)
+      continue
+    }
+
+    const tradeAgeHours = (Date.now() - Number(managedTrade.transactTime || 0)) / 3_600_000
+    if (tradeAgeHours >= PAPER_TRADE_MAX_HOLD_HOURS) {
+      changed = true
+      const closedTrade = closeTradeRecord({
+        trade: managedTrade,
+        exitPrice: currentPrice,
+        status: 'CLOSED_TIMEOUT',
+        result: 'TIMEOUT',
+      })
+      logTradeClosedToTerminal(normalizedTrade, closedTrade)
+      updated.push(closedTrade)
+      continue
     }
 
     const canUseObservedRange = Number(managedTrade.transactTime || 0) < Number(priceSnapshot.latestCandleOpenTime || 0)
@@ -8546,6 +8767,15 @@ async function runAutoTrader(trigger = 'MANUAL') {
         continue
       }
 
+      if (walletSignalModelId === 'model-11') {
+        // Bot Claude's per-symbol builder is synchronous and only reads a
+        // cache; this is the one place that actually calls the live
+        // Anthropic API, once per closed 5M candle per symbol.
+        await refreshBotClaudeDecisions({ symbols: walletScanSymbols, getSymbolInputs }).catch((error) => {
+          pushWalletStep(`Claude API refresh failed: ${error instanceof Error ? error.message : error}`, 'blocked')
+        })
+      }
+
       if (walletSignalModelId === 'model-4') {
         const consecutiveLossStreak = getConsecutiveAutoLossStreak(walletHistory)
 
@@ -8724,6 +8954,22 @@ async function runAutoTrader(trigger = 'MANUAL') {
         continue
       }
 
+      const candidateMarketInputs = await getSymbolInputs(candidate.symbol).catch(() => null)
+      const candidateRangeCheck = evaluateCandidateRangeViability(candidate, candidateMarketInputs)
+      if (!candidateRangeCheck.viable) {
+        pushWalletStep(
+          `Blocked ${candidate.symbol} because its ${candidateRangeCheck.rangeHours}h price range (${candidateRangeCheck.rangePercent.toFixed(3)}%) is smaller than its stop-loss distance (${candidateRangeCheck.slDistancePercent.toFixed(3)}%). This setup cannot realistically reach its brackets.`,
+          'blocked',
+          { symbol: candidate.symbol, rangePercent: candidateRangeCheck.rangePercent, slDistancePercent: candidateRangeCheck.slDistancePercent },
+        )
+        await finishWallet({
+          executed: false,
+          reason: `${candidate.symbol} recent price range is too small for its configured stop distance.`,
+          order: null,
+        })
+        continue
+      }
+
       const symbolInfo = findSymbolRules(exchangeInfo, candidate.symbol)
       if (!symbolInfo) {
         pushWalletStep(`Missing futures symbol rules for ${candidate.symbol}.`, 'blocked')
@@ -8884,7 +9130,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
           notional: candidate.positionNotional,
           margin: candidate.margin ?? walletStrategy.marginPerTrade,
           marginMode: walletStrategy.marginMode,
-          leverage: walletStrategy.leverage,
+          leverage: candidate.leverage ?? walletStrategy.leverage,
           configuredStopLossPercent: candidate.configuredStopLossPercent ?? walletStrategy.stopLossPercent,
           source: 'AUTO',
           signalSummary: candidate.summary,
@@ -9917,6 +10163,11 @@ app.post('/api/auto-trade/stop', async (_request, response) => {
   })
 })
 
+registerConsolidatedBot(app, {
+  dataDir, fetchKlines, toCandleData, buildSignalAnalysisSnapshot, getSettings,
+  autostart: IS_MAIN_MODULE,
+})
+
 if (shouldServeBuiltFrontend) {
   app.use(express.static(distDir))
 
@@ -9996,9 +10247,11 @@ app.listen(port, host, async () => {
     [
       `API    : http://${host}:${port}`,
       `Health : http://${host}:${port}/api/health`,
-      appLoginPasswordSource === 'environment'
-        ? 'Access : private login password loaded from APP_LOGIN_PASSWORD'
-        : `Access : using a generated login password for this run only -> ${appLoginPassword}`,
+      authDisabled
+        ? 'Access : login gate DISABLED (XENIOS_DISABLE_AUTH=true) - local use only'
+        : appLoginPasswordSource === 'environment'
+          ? 'Access : private login password loaded from APP_LOGIN_PASSWORD'
+          : `Access : using a generated login password for this run only -> ${appLoginPassword}`,
       `Auto   : ${formatTerminalEnabledState(Boolean(startupSettings?.strategy?.autoTradingEnabled))} | Runtime ${formatTerminalRuntimeState(autoTradeRuntime.running)}`,
       formatLearningBotStatusLine(learningBotTrainStatus),
       'Loops  : terminal monitor every 10s | open-trade update every 10s | auto-trader scan every 5m',

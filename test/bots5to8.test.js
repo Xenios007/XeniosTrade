@@ -4,8 +4,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildBot5SignalSnapshot, buildBot6SignalSnapshot,
-  buildBot7SignalSnapshot, buildBot8SignalSnapshot, BOT5TO8_BUILDERS,
+  buildBot7SignalSnapshot, buildBot8SignalSnapshot, buildBot9SignalSnapshot, buildBot10SignalSnapshot, BOT5TO8_BUILDERS,
 } from '../server/strategy/bots5to8.js'
+import { buildBotClaudeSignalSnapshot } from '../server/strategy/bot-claude.js'
 import {
   getSignalModel, getEffectiveSignalModelStrategy, buildDefaultSignalModelStrategies, SIGNAL_MODELS,
 } from '../src/lib/signalModels.js'
@@ -21,16 +22,19 @@ const BUILDERS = {
   'model-6': buildBot6SignalSnapshot,
   'model-7': buildBot7SignalSnapshot,
   'model-8': buildBot8SignalSnapshot,
+  'model-9': buildBot9SignalSnapshot,
+  'model-10': buildBot10SignalSnapshot,
+  'model-11': buildBotClaudeSignalSnapshot,
 }
 
-test('all 8 signal models registered, 5-8 carry a strategyFamily', () => {
-  assert.equal(SIGNAL_MODELS.length, 8)
-  for (const id of ['model-5', 'model-6', 'model-7', 'model-8']) {
+test('all 11 signal models registered, 5-11 carry a strategyFamily', () => {
+  assert.equal(SIGNAL_MODELS.length, 11)
+  for (const id of ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']) {
     const m = getSignalModel(id)
     assert.ok(m.strategyFamily, `${id} missing strategyFamily`)
   }
-  const fams = ['model-5', 'model-6', 'model-7', 'model-8'].map((id) => getSignalModel(id).strategyFamily)
-  assert.equal(new Set(fams).size, 4, 'families must be distinct')
+  const fams = ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11'].map((id) => getSignalModel(id).strategyFamily)
+  assert.equal(new Set(fams).size, 7, 'families must be distinct')
 })
 
 test('insufficient history -> not-ready snapshot, never throws', () => {
@@ -116,14 +120,14 @@ test('a ready snapshot is well-formed (SL/TP ordering, positive sizing, family t
   }
 })
 
-test('dispatch: analyzeSymbolStrategy runs models 5-8 without throwing', async () => {
+test('dispatch: analyzeSymbolStrategy runs models 5-11 without throwing', async () => {
   process.env.XENIOS_SERVER_AUTOSTART = 'off'
   const srv = await import('../server/mock-trading-server.js')
   const b1h = synthRawKlines(200, { step: 3_600_000 })
   const s15 = synthRawKlines(400, { step: 900_000 })
   const e5 = synthRawKlines(1200, { step: 300_000 })
   const strategy = { runningBalance: 1000, marginMode: 'ISOLATED' }
-  for (const id of ['model-5', 'model-6', 'model-7', 'model-8']) {
+  for (const id of ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']) {
     const mc = id === 'model-8'
       ? { fundingRate: 0.0006, fundingPercentile: 0.95, fundingAvailable: true }
       : {}
@@ -131,6 +135,28 @@ test('dispatch: analyzeSymbolStrategy runs models 5-8 without throwing', async (
   }
 })
 
-test('BOT5TO8_BUILDERS maps exactly model-5..8', () => {
-  assert.deepEqual(Object.keys(BOT5TO8_BUILDERS).sort(), ['model-5', 'model-6', 'model-7', 'model-8'])
+test('BOT5TO8_BUILDERS maps model-5..11', () => {
+  assert.deepEqual(
+    Object.keys(BOT5TO8_BUILDERS).sort(),
+    ['model-10', 'model-11', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9'],
+  )
+})
+
+test('Bot Claude (model-11) is a no-op watch state without ANTHROPIC_API_KEY', () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY
+  delete process.env.ANTHROPIC_API_KEY
+  try {
+    const snap = buildBotClaudeSignalSnapshot({
+      symbol: 'BTCUSDT',
+      signalModel: getSignalModel('model-11'),
+      effectiveStrategy: strat('model-11'),
+      closedEntryTimeframe: synthCandles(200, { step: 300_000 }),
+    })
+    assert.equal(snap.ready, false)
+    assert.equal(snap.signalModelId, 'model-11')
+    assert.match(snap.summary, /ANTHROPIC_API_KEY/)
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = previousKey
+  }
 })

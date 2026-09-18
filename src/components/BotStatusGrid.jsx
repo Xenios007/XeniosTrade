@@ -190,8 +190,8 @@ function getModelStatusLine(model, analysis) {
 }
 
 /**
- * Bot 1-4 live status cards. Extracted from the candlestick chart so the
- * dashboard Overview tab can show the same rich readout without the chart.
+ * All registered bot status cards. Extracted from the candlestick chart so
+ * the dashboard Overview tab includes Wallet 10 / consolidated visibility.
  */
 export function BotStatusGrid({
   modelAnalyses = {},
@@ -200,7 +200,7 @@ export function BotStatusGrid({
   activeModelAnalysis = null,
 }) {
   return (
-    <Panel title="Bot 1-4 Status">
+    <Panel title="Bot Status">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {SIGNAL_MODELS.map((model) => {
           const analysis = modelAnalyses[model.id] || null

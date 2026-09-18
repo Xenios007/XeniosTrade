@@ -8,6 +8,13 @@ const BOT_LABELS = {
   'model-2': 'Bot 2',
   'model-3': 'Bot 3',
   'model-4': 'Bot 4',
+  'model-5': 'Bot 5',
+  'model-6': 'Bot 6',
+  'model-7': 'Bot 7',
+  'model-8': 'Bot 8',
+  'model-9': 'Bot 9 — Experimental',
+  'model-10': 'Bot 10 — Consolidated Knowledge',
+  'model-11': 'Bot Claude — Claude AI Trader',
 }
 
 const VERDICT_STYLES = {

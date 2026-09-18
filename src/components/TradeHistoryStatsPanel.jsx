@@ -1,7 +1,7 @@
-import { BarChart3, Clock3, ShieldAlert, Target, WalletCards } from 'lucide-react'
+import { BarChart3, Clock3, RefreshCcw, ShieldAlert, Target, WalletCards } from 'lucide-react'
 import { formatPercent, formatPrice } from '../lib/formatters'
 import { summarizeAccount } from '../lib/accountMetrics'
-import { getTotalWalletStartingBalance } from '../lib/wallets'
+import { getMainWallet, getTotalWalletStartingBalance } from '../lib/wallets'
 import { CoinAvatar } from './CoinAvatar'
 import { Panel } from './Panel'
 import { PriceDirectionPill, getPriceDirectionMeta } from './PriceDirectionPill'
@@ -16,6 +16,21 @@ function formatBalance(value) {
   return `${Number(value || 0).toFixed(2)} USDT`
 }
 
+function formatSyncTime(timestamp) {
+  if (!timestamp) {
+    return 'never'
+  }
+
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(timestamp)
+  } catch {
+    return 'never'
+  }
+}
+
 export function TradeHistoryStatsPanel({
   trades,
   livePrices,
@@ -23,12 +38,22 @@ export function TradeHistoryStatsPanel({
   trackedSymbols = [],
   wallets = [],
   title = 'Trade Performance',
+  onSyncMainWallet,
+  syncingWalletId = null,
 }) {
   const accountSnapshot = summarizeAccount({
     trades,
     livePrices,
     startingBalance: getTotalWalletStartingBalance(wallets),
   })
+  const mainWallet = getMainWallet(wallets)
+  const realWalletBalance = mainWallet?.production?.lastSyncedBalance
+  const hasRealWalletBalance = realWalletBalance != null
+  const displayedRunningBalance = hasRealWalletBalance ? realWalletBalance : accountSnapshot.runningBalance
+  const runningBalanceBaseline = hasRealWalletBalance
+    ? (mainWallet?.manualBalance ?? accountSnapshot.startingBalance)
+    : accountSnapshot.startingBalance
+  const isSyncingMainWallet = Boolean(mainWallet?.id) && syncingWalletId === mainWallet.id
   const winRate = accountSnapshot.closedTradeCount > 0 ? (accountSnapshot.wins / accountSnapshot.closedTradeCount) * 100 : 0
   const symbolsToShow = trackedSymbols.length > 0
     ? trackedSymbols
@@ -38,10 +63,13 @@ export function TradeHistoryStatsPanel({
 
   const stats = [
     {
-      label: 'Running Balance',
-      value: formatBalance(accountSnapshot.runningBalance),
-      tone: accountSnapshot.runningBalance > accountSnapshot.startingBalance ? 'text-emerald-300' : accountSnapshot.runningBalance < accountSnapshot.startingBalance ? 'text-rose-300' : 'text-slate-100',
+      label: hasRealWalletBalance ? 'Running Balance (Real Wallet)' : 'Running Balance',
+      value: formatBalance(displayedRunningBalance),
+      tone: displayedRunningBalance > runningBalanceBaseline ? 'text-emerald-300' : displayedRunningBalance < runningBalanceBaseline ? 'text-rose-300' : 'text-slate-100',
       Icon: WalletCards,
+      detail: hasRealWalletBalance
+        ? `Synced from ${mainWallet.name} • last synced ${formatSyncTime(mainWallet.production.lastSyncedAt)}`
+        : 'Main wallet not synced yet — showing simulated bot-ledger balance.',
     },
     {
       label: 'Realized PnL',
@@ -94,10 +122,32 @@ export function TradeHistoryStatsPanel({
                 <Icon className="h-4 w-4 text-sky-300" />
               </div>
               <div className={`break-words text-xl font-semibold ${stat.tone}`}>{stat.value}</div>
+              {stat.detail ? (
+                <div className="mt-2 break-words text-[11px] leading-relaxed text-slate-500">{stat.detail}</div>
+              ) : null}
             </div>
           )
         })}
       </div>
+
+      {mainWallet && onSyncMainWallet ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+          <div>
+            {hasRealWalletBalance
+              ? `Real wallet balance synced ${formatSyncTime(mainWallet.production.lastSyncedAt)} from ${mainWallet.name}.`
+              : `${mainWallet.name} has not synced a real balance from Binance yet.`}
+          </div>
+          <button
+            type="button"
+            onClick={() => onSyncMainWallet(mainWallet.id)}
+            disabled={isSyncingMainWallet}
+            className="flex items-center gap-2 rounded-full border border-sky-300/25 bg-sky-400/10 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-sky-400/15 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.04] disabled:text-slate-400"
+          >
+            <RefreshCcw className={`h-3.5 w-3.5 ${isSyncingMainWallet ? 'animate-spin' : ''}`} />
+            {isSyncingMainWallet ? 'Syncing...' : 'Sync Real Balance'}
+          </button>
+        </div>
+      ) : null}
 
       {symbolsToShow.length > 0 ? (
         <div className="trade-performance-ticker mt-4">

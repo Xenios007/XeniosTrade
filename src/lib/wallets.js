@@ -11,8 +11,8 @@ export const DEFAULT_WALLET_SYNC_PROVIDER = 'BINANCE_FUTURES'
 export const MAIN_WALLET_KIND = 'MAIN'
 export const BOT_WALLET_KIND = 'BOT'
 export const MAIN_WALLET_ID = 'wallet-main'
-// 6000 USDT Binance Futures Testnet demo funds split evenly across 8 bot wallets.
-export const DEFAULT_BOT_WALLET_COUNT = 8
+// 6000+ USDT Binance Futures Testnet demo funds split across the bot wallets.
+export const DEFAULT_BOT_WALLET_COUNT = 11
 export const DEFAULT_BOT_ALLOCATION_USDT = 750
 
 const DEFAULT_WALLET_BLUEPRINTS = [
@@ -87,6 +87,34 @@ const DEFAULT_WALLET_BLUEPRINTS = [
     assignedSignalModelId: 'model-8',
     colorKey: 'lime',
     allocationBalance: DEFAULT_BOT_ALLOCATION_USDT,
+  },
+  {
+    id: 'wallet-model-9',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 9 — Experimental',
+    assignedSignalModelId: 'model-9',
+    colorKey: 'orange',
+    // A deliberately small forward-test allocation. This is a testnet ledger
+    // allocation; exchange execution still uses the account's testnet balance.
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-10',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 10 — Consolidated',
+    assignedSignalModelId: 'model-10',
+    colorKey: 'blue',
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-11',
+    kind: BOT_WALLET_KIND,
+    name: 'Wallet 11 — Bot Claude',
+    assignedSignalModelId: 'model-11',
+    colorKey: 'teal',
+    // Small forward-test allocation, same reasoning as Wallet 9: this is a
+    // testnet ledger allocation, and every decision is a metered live LLM call.
+    allocationBalance: 100,
   },
 ]
 

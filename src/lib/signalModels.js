@@ -3,7 +3,7 @@ import { DEFAULT_MARGIN_MODE, normalizeMarginMode } from './marginModes.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID, resolveTradeStylePresetId } from './strategyPresets.js'
 
 export const DEFAULT_SIGNAL_MODEL_ID = 'model-1'
-export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4', 'model-5', 'model-6', 'model-7', 'model-8']
+export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']
 export const SIGNAL_MODEL_STRATEGY_OVERRIDE_KEYS = [
   'tradeStylePresetId',
   'marginMode',
@@ -16,6 +16,7 @@ export const SIGNAL_MODEL_STRATEGY_OVERRIDE_KEYS = [
   'maxLossesPerDay',
   'maxLossPerDay',
   'dailyProfitTarget',
+  'useSymbolRiskProfile',
 ]
 
 const model1Signals = [
@@ -177,6 +178,30 @@ const model8Signals = [
   { key: 'fc-structure-hold', label: 'Support / resistance evidence', detail: 'Price is holding above a recent swing low (longs) or below a recent swing high (shorts).' },
 ]
 
+const model9Signals = [
+  { key: 'hp-4h-trend', label: 'Completed 4H EMA50 / EMA200 trend', detail: 'Longs require the completed 4H EMA50 above EMA200; shorts require the reverse.' },
+  { key: 'hp-rsi2-exhaustion', label: '1H RSI(2) exhaustion', detail: 'The 1H pullback must reach RSI(2) <= 10 in the prevailing 4H trend direction.' },
+  { key: 'hp-volume-confirmation', label: '1H volume at least its prior 20-bar mean', detail: 'The reversal occurs with real participation, not a thin-candle fluctuation.' },
+  { key: 'hp-taker-flow', label: 'Direction-aligned taker flow', detail: 'Taker-buy share is at least 50% for longs and at most 50% for shorts.' },
+  { key: 'hp-reclaim', label: 'Closed 1H reclaim candle', detail: 'The qualifying 1H candle closes in the trade direction and beyond the preceding close.' },
+  { key: 'hp-fixed-exit', label: 'Fixed experimental exit', detail: 'A 2 ATR stop and 1 ATR target are fixed from the preregistered study; no intraday retuning.' },
+]
+
+const model10Signals = [
+  { key: 'c-source-ready', label: 'A Bot 1–8 source setup is ready', detail: 'Bot 10 never invents a trade. A source engine must first emit a closed-candle setup.' },
+  { key: 'c-frozen-selector', label: 'Frozen expected-R selector accepts it', detail: 'Entry-time features, source identity and stop distance must pass the stored selector.' },
+  { key: 'c-ranked-candidate', label: 'Best eligible source candidate is ranked first', detail: 'Bot 10 selects one eligible candidate deterministically rather than combining positions.' },
+  { key: 'c-testnet-guardrails', label: 'Separate testnet risk guardrails pass', detail: 'Exchange position, protective-order, daily-loss, size and freshness checks must all pass.' },
+]
+
+const model11Signals = [
+  { key: 'llm-context-snapshot', label: 'Multi-timeframe feature snapshot built', detail: 'A closed-candle 1H/15M/5M indicator snapshot (trend, RSI, ATR, Bollinger, VWAP, volume, funding) is assembled for the live model call.' },
+  { key: 'llm-live-call', label: 'Live Claude API call for this symbol/candle', detail: 'The Anthropic Claude API is called fresh for this symbol once its 5M candle has closed — never a cached or hand-coded rule.' },
+  { key: 'llm-direction-decision', label: 'Claude returns LONG, SHORT, or WAIT', detail: 'The model reads the snapshot and decides a direction or explicitly waits; it never defaults to a trade.' },
+  { key: 'llm-confidence-gate', label: 'Confidence at or above the trade floor', detail: 'Claude also returns a 0–100 confidence score. Only decisions at or above the configured floor are taken.' },
+  { key: 'llm-risk-plan', label: 'Claude sets its own stop/target distance', detail: 'Stop-loss and take-profit are Claude-chosen percentages off the current close, applied to a small fixed testnet risk budget.' },
+]
+
 
 export const DEFAULT_BOT3_RISK_PRESET_ID = 'bot3-20'
 // Risk profiles tightened 2026-08-31 to cap the loss side: lower leverage,
@@ -286,6 +311,54 @@ export const DEFAULT_BOT8_FUNDING_CONTRARIAN_SETTINGS = {
   dailyProfitTarget: 45,
 }
 
+// Experimental only: based on a validation-rejected high-hit-rate study.
+// Small testnet sizing is intentional; it must earn a forward sample before
+// it can be considered for any promotion.
+export const DEFAULT_BOT9_HIGH_PRECISION_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 10,
+  leverage: 5,
+  maxOpenPositions: 1,
+  stopLossPercent: 1.5,
+  takeProfitPercent: 0.75,
+  maxTradesPerDay: 2,
+  maxLossesPerDay: 2,
+  maxLossPerDay: 5,
+  dailyProfitTarget: 10,
+}
+
+export const DEFAULT_BOT10_CONSOLIDATED_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 10,
+  leverage: 1,
+  maxOpenPositions: 1,
+  stopLossPercent: 1,
+  takeProfitPercent: 1,
+  maxTradesPerDay: 3,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 3,
+  dailyProfitTarget: 10,
+}
+
+// Bot Claude: a live Anthropic Claude API call decides direction + risk, so it
+// keeps the same small, testnet-scoped footprint as the other experimental
+// bots (9/10) until it has earned a forward sample.
+export const DEFAULT_BOT11_CLAUDE_SETTINGS = {
+  tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
+  marginMode: DEFAULT_MARGIN_MODE,
+  marginPerTrade: 10,
+  leverage: 5,
+  maxOpenPositions: 1,
+  stopLossPercent: 1,
+  takeProfitPercent: 1.5,
+  maxTradesPerDay: 4,
+  maxLossesPerDay: 3,
+  maxLossPerDay: 8,
+  dailyProfitTarget: 15,
+}
+
 const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-1': DEFAULT_BOT1_SETTINGS,
   'model-2': DEFAULT_BOT2_SETTINGS,
@@ -294,6 +367,9 @@ const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-6': DEFAULT_BOT6_VOLATILITY_BREAKOUT_SETTINGS,
   'model-7': DEFAULT_BOT7_RANGE_FADE_SETTINGS,
   'model-8': DEFAULT_BOT8_FUNDING_CONTRARIAN_SETTINGS,
+  'model-9': DEFAULT_BOT9_HIGH_PRECISION_SETTINGS,
+  'model-10': DEFAULT_BOT10_CONSOLIDATED_SETTINGS,
+  'model-11': DEFAULT_BOT11_CLAUDE_SETTINGS,
 }
 
 export const BOT3_RISK_PRESETS = [
@@ -367,9 +443,28 @@ function normalizeSignalModelStrategyOverride(modelId, override, strategy = {}) 
   }, {})
 
   normalized.marginMode = normalizeMarginMode(normalized.marginMode || DEFAULT_MARGIN_MODE)
+  normalized.useSymbolRiskProfile = normalized.useSymbolRiskProfile !== false
   normalized.tradeStylePresetId = resolveTradeStylePresetId(normalized, source.tradeStylePresetId)
   normalized.maxLossPerTrade = getStrategyDerivedMaxLossPerTrade(normalized)
   return normalized
+}
+
+export function normalizeSymbolRiskProfiles(profiles = {}) {
+  if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return {}
+
+  return Object.fromEntries(
+    Object.entries(profiles)
+      .map(([rawSymbol, rawProfile]) => {
+        const symbol = String(rawSymbol || '').trim().toUpperCase()
+        if (!symbol || !rawProfile || typeof rawProfile !== 'object' || Array.isArray(rawProfile)) return null
+        const leverage = toFiniteNumber(rawProfile.leverage)
+        const stopLossPercent = toFiniteNumber(rawProfile.stopLossPercent)
+        const takeProfitPercent = toFiniteNumber(rawProfile.takeProfitPercent)
+        if (leverage <= 0 || stopLossPercent <= 0 || takeProfitPercent <= 0) return null
+        return [symbol, { leverage, stopLossPercent, takeProfitPercent }]
+      })
+      .filter(Boolean),
+  )
 }
 
 function calculateMarginFromNotional(notional, leverage) {
@@ -483,12 +578,55 @@ export const SIGNAL_MODELS = [
     tag: 'Funding Contrarian',
     status: 'ready',
     strategyFamily: 'funding-contrarian',
-    description: 'Trades crowded futures positioning when funding and price extension both indicate a contrarian opportunity. Funding alone never triggers a trade — price/action confirmation is mandatory. If funding history is missing for a period, the setup is skipped, never assumed.',
-    executionRule: 'Needs the funding-extreme condition plus 4 of 5 price/action confirmations: z-score / VWAP extension, decelerating momentum, a reversal candle, and swing-structure hold. Stop with ATR room; target back to VWAP / mean.',
-    minimumScore: 5,
+    description: 'High-frequency testnet funding-contrarian profile. It scans every current volatile USDT market and evaluates all six available funding/price signals. Genuine extreme funding remains mandatory; the remaining confirmations are intentionally permissive to collect more test observations.',
+    executionRule: 'Requires genuine extreme funding plus any 2 of 5 available price/action confirmations: z-score / VWAP extension, decelerating momentum, a reversal candle, and swing-structure hold. Ten entries per Manila day are allowed regardless of prior wins or losses, subject to exchange, balance, and safety protections. AI monitors open trades: it can emergency-exit a deteriorating position or extend a near-target winner only when its learned policy supports that action.',
+    minimumScore: 3,
     totalSignals: model8Signals.length,
     professionalSignalCount: 0,
     signals: model8Signals,
+  },
+  {
+    id: 'model-9',
+    name: 'Bot 9',
+    tag: 'Experimental High Precision',
+    status: 'experimental',
+    strategyFamily: 'trend-pullback-reversion',
+    description: 'Experimental testnet-only trend pullback with 4H trend, 1H RSI(2) exhaustion, real volume, taker-flow, and reclaim confirmation. Its research validation failed; forward testnet observation is the only purpose.',
+    executionRule: 'Completed 4H trend plus a closed 1H exhaustion-and-reclaim sequence. Fixed 2 ATR stop / 1 ATR target. Maximum two testnet entries daily; never use as a validated production signal.',
+    minimumScore: 6,
+    totalSignals: model9Signals.length,
+    professionalSignalCount: 0,
+    signals: model9Signals,
+  },
+  {
+    id: 'model-10',
+    name: 'Bot 10',
+    tag: 'Consolidated Knowledge',
+    status: 'experimental',
+    strategyFamily: 'consolidated-selector',
+    description: 'The separate Bot 10 selector ranks eligible source setups from Bots 1–8 using its frozen entry-time model. It has its own wallet card and testnet ledger, but never duplicates ordinary wallet execution.',
+    executionRule: 'A source Bot 1–8 setup must be ready, accepted by the frozen selector, ranked first, current on the latest bar, and pass Bot 10’s separate Binance Futures Testnet safety checks.',
+    minimumScore: 4,
+    totalSignals: model10Signals.length,
+    professionalSignalCount: 0,
+    signals: model10Signals,
+  },
+  {
+    id: 'model-11',
+    name: 'Bot Claude',
+    tag: 'Claude AI Trader',
+    status: 'experimental',
+    strategyFamily: 'llm-claude',
+    description: 'The first of a family of LLM-driven bots (Bot Claude, then Bot GPT / Bot Gemini / Bot Grok) meant to compare how different frontier models trade the same market. Every scan cycle it sends a fresh multi-timeframe feature snapshot to the Anthropic Claude API and lets the model decide direction, confidence, and its own stop/target — there is no hand-coded technical rule engine behind this bot.',
+    executionRule: 'Once a symbol’s 5M candle closes, Claude is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when Claude returns LONG or SHORT with confidence at or above the configured floor; Claude also sets the stop-loss/take-profit percentages. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    minimumScore: 60,
+    totalSignals: model11Signals.length,
+    professionalSignalCount: 0,
+    signals: model11Signals,
+    // Kept small and fixed so the live Claude API is only ever called for a
+    // handful of symbols per scan — this is a real, metered API call, not a
+    // free technical-indicator computation.
+    fixedUniverseSymbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'],
   },
 ]
 
@@ -552,7 +690,7 @@ export function getSignalModelTrackedSymbols(modelId, strategySymbols = []) {
     : []
 }
 
-export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runningBalance = null } = {}) {
+export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runningBalance = null, symbol = null } = {}) {
   const signalModel = getSignalModel(modelId || strategy?.activeSignalModelId)
   const resolvedBot3RiskPresetId = signalModel.id === 'model-3'
     ? resolveBot3RiskPresetId(strategy?.bot3RiskPresetId)
@@ -560,11 +698,20 @@ export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runnin
   const riskProfile = getResolvedSignalModelRiskProfile(signalModel, strategy)
   const signalModelStrategies = normalizeSignalModelStrategies(strategy?.signalModelStrategies, strategy)
   const strategyOverride = signalModelStrategies[signalModel.id] || null
+  const resolvedSymbol = String(symbol || '').trim().toUpperCase()
+  const symbolRiskProfiles = normalizeSymbolRiskProfiles(strategy?.symbolRiskProfiles)
+  const symbolRiskProfile = strategyOverride?.useSymbolRiskProfile !== false && resolvedSymbol
+    ? symbolRiskProfiles[resolvedSymbol] || null
+    : null
   const baseStrategy = {
     ...strategy,
     ...(resolvedBot3RiskPresetId ? { bot3RiskPresetId: resolvedBot3RiskPresetId } : {}),
     ...(strategyOverride ? strategyOverride : {}),
+    ...(symbolRiskProfile || {}),
     signalModelStrategies,
+    symbolRiskProfiles,
+    symbolRiskProfileSymbol: resolvedSymbol || null,
+    symbolRiskProfile: symbolRiskProfile || null,
   }
   const baseMaxLossPerTrade = getStrategyDerivedMaxLossPerTrade(baseStrategy)
   const resolvedBaseStrategy = {
@@ -588,7 +735,10 @@ export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runnin
   const riskPerTradePercent = Math.max(toFiniteNumber(riskProfile.riskPerTradePercent), 0)
   const dailyMaxLossPercent = Math.max(toFiniteNumber(riskProfile.dailyMaxLossPercent), 0)
   const estimatedStopLossPercent = Math.max(
-    toFiniteNumber(riskProfile.estimatedStopLossPercent, resolvedBaseStrategy.stopLossPercent),
+    toFiniteNumber(
+      symbolRiskProfile?.stopLossPercent ?? riskProfile.estimatedStopLossPercent,
+      resolvedBaseStrategy.stopLossPercent,
+    ),
     0,
   )
   const configuredRiskAmount = resolvedRunningBalance > 0
@@ -626,9 +776,11 @@ export function calculateSignalModelPositionSizing({
   entryPrice,
   stopLoss,
   runningBalance = null,
+  symbol = null,
 } = {}) {
   const effectiveStrategy = getEffectiveSignalModelStrategy(strategy, signalModelId, {
     runningBalance,
+    symbol: symbol || strategy?.symbolRiskProfileSymbol,
   })
   const resolvedEntryPrice = toFiniteNumber(entryPrice)
   const resolvedStopLoss = toFiniteNumber(stopLoss)

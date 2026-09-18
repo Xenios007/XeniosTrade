@@ -32,6 +32,7 @@ import { Worker } from 'node:worker_threads'
 import { SIGNAL_MODELS, getSignalModelName, getSignalModel, getEffectiveSignalModelStrategy } from '../../src/lib/signalModels.js'
 import { DEFAULT_PREFERRED_SYMBOLS, BACKTEST_UNIVERSE } from '../../src/lib/tradingConfig.js'
 import { FEATURE_VERSION } from './feature-lib.js'
+import { parseExitPolicies } from './exit-policy.js'
 import { SPLIT_EMBARGO_MS } from './splits.js'
 import { concatNdjson, iterateRowsNdjson } from './ndjson.js'
 import {
@@ -70,6 +71,7 @@ const ETH_CONTEXT = args['no-eth-context'] === undefined
 // (still tags marketRegime). For validation/cost-stress runs that never train —
 // halves per-symbol time and shrinks the output ~10x.
 const NO_FEATURES = Boolean(args['no-features'])
+const EXIT_POLICIES = parseExitPolicies(args['exit-policies'])
 const SKIP_TRAIN = Boolean(args['no-train'])
 const RESUME = Boolean(args.resume)
 const RUN_LABEL = args.label ? String(args.label) : ''
@@ -172,13 +174,14 @@ async function main() {
   console.log(`symbols    : ${symbols.length} total, ${todo.length} to do${RESUME ? ` (resume: ${manifest.symbolsDone.length} done)` : ''}`)
   console.log(`stride ${STRIDE}   workers ${CONCURRENCY} / ${os.cpus().length} cores   friction ${FEE_BPS + SLIPPAGE_BPS} bps/side x2   cap ${CAP_PER_SYMBOL_BOT}/(sym,bot)`)
   console.log(`feature v  : ${FEATURE_VERSION}   ETH context: ${ETH_CONTEXT ? 'on' : 'off'}   context: ${STRICT_CONTEXT ? 'strict/zero' : 'proxied'}`)
+  console.log(`exit tests : ${EXIT_POLICIES.join(', ')}`)
   console.log(`out dir    : ${RUN_DIR}\n`)
 
   const runConfig = {
     schemaVersion: 2, months: MONTHS, step: '5m', stride: STRIDE, concurrency: CONCURRENCY,
     bots: activeBots, symbolCount: symbols.length, capPerSymbolBot: CAP_PER_SYMBOL_BOT,
     feeBps: FEE_BPS, slippageBps: SLIPPAGE_BPS, maxHoldHours: MAX_HOLD_MS / 3_600_000,
-    strictContext: STRICT_CONTEXT, ethContext: ETH_CONTEXT, noFeatures: NO_FEATURES, featureVersion: FEATURE_VERSION, gitSha: sha,
+    strictContext: STRICT_CONTEXT, ethContext: ETH_CONTEXT, noFeatures: NO_FEATURES, exitPolicies: EXIT_POLICIES, featureVersion: FEATURE_VERSION, gitSha: sha,
     rangeStart: isoDay(startMs), rangeEnd: isoDay(endMs), embargoMs: SPLIT_EMBARGO_MS,
     splitFractions: [0.6, 0.2, 0.2], randomSeed: 7, device: 'cpu-replay-workers',
     node: process.version, platform: process.platform, cpus: os.cpus().length,
@@ -200,7 +203,7 @@ async function main() {
 
   const workerData = {
     RUN_DIR, MONTHS, STRIDE, FEE_BPS, SLIPPAGE_BPS, MAX_HOLD_MS, CAP_PER_SYMBOL_BOT,
-    STRICT_CONTEXT, ETH_CONTEXT, NO_FEATURES, RUN_ID, activeBots,
+    STRICT_CONTEXT, ETH_CONTEXT, NO_FEATURES, EXIT_POLICIES, RUN_ID, activeBots,
   }
 
   let doneCount = manifest.symbolsDone.length

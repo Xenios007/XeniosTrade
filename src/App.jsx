@@ -15,6 +15,7 @@ import { BotStatusGrid } from './components/BotStatusGrid'
 import { ProExitStrategy } from './components/ProExitStrategy'
 import { JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
+import { ConsolidatedBotPage } from './components/ConsolidatedBotPage'
 import { MockTradingPage } from './components/MockTradingPage'
 import { SettingsPage } from './components/SettingsPage'
 import { StatsBar } from './components/StatsBar'
@@ -71,6 +72,7 @@ const DEFAULT_STRATEGY_SETTINGS_BASE = {
   maxLossPerDay: 20,
   dailyProfitTarget: 50,
   timezone: 'Asia/Manila',
+  symbolRiskProfiles: {},
 }
 const DEFAULT_STRATEGY_SETTINGS = {
   ...DEFAULT_STRATEGY_SETTINGS_BASE,
@@ -1538,6 +1540,8 @@ export default function App() {
           liveDirections={liveTradeDirections}
           trackedSymbols={settings.strategy.preferredSymbols}
           wallets={settings.wallets}
+          onSyncMainWallet={handleSyncWallet}
+          syncingWalletId={syncingWalletId}
         />
         <TradeHistoryTable
           trades={tradeHistory}
@@ -1728,6 +1732,8 @@ export default function App() {
         <Route path="/dashboard/*" element={renderDashboard()} />
         <Route path="/mock-trading/*" element={renderMockTrading()} />
         <Route path="/ai-training/*" element={renderLearningBot()} />
+        <Route path="/bot-10" element={<ConsolidatedBotPage />} />
+        <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
         <Route path="/wallets" element={renderWallets()} />
         <Route path="/journal/*" element={renderJournal()} />
         <Route path="/trade-history" element={renderTradeHistory()} />
