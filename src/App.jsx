@@ -9,6 +9,7 @@ import { PageHeader } from './components/ui/PageHeader'
 import { SubNavTabs } from './components/ui/SubNavTabs'
 import { useToast } from './components/ui/Toast'
 import { DEFAULT_PATH, resolveInitialPath } from './components/shell/navItems'
+import { AiModelsPage } from './components/AiModelsPage'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
 import { BotStatusGrid } from './components/BotStatusGrid'
@@ -1667,6 +1668,17 @@ export default function App() {
     )
   }
 
+  function renderAiModels() {
+    return (
+      <AiModelsPage
+        settings={settings}
+        onSave={handleSaveSettings}
+        saving={savingSettings}
+        ready={hasLoadedSettingsRef.current}
+      />
+    )
+  }
+
   function renderSettings() {
     return (
       <SettingsPage
@@ -1808,6 +1820,7 @@ export default function App() {
         <Route path="/bot-10" element={<ConsolidatedBotPage />} />
         <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
         <Route path="/wallets" element={renderWallets()} />
+        <Route path="/ai-models/*" element={renderAiModels()} />
         <Route path="/journal/*" element={renderJournal()} />
         <Route path="/trade-history/*" element={renderTradeHistory()} />
         <Route path="/settings/*" element={renderSettings()} />

@@ -3,6 +3,7 @@ import {
   Bot,
   CalendarDays,
   History,
+  KeyRound,
   LayoutDashboard,
   Settings,
   Wallet,
@@ -79,6 +80,15 @@ export const NAV_GROUPS = [
     label: 'Config',
     items: [
       { to: '/wallets', label: 'Wallets', Icon: Wallet },
+      {
+        to: '/ai-models',
+        label: 'AI Models',
+        Icon: KeyRound,
+        children: [
+          { to: '/ai-models', label: 'Providers & Keys' },
+          { to: '/ai-models/bots', label: 'Bot Assignments' },
+        ],
+      },
       {
         to: '/settings',
         label: 'Settings',

@@ -5,20 +5,22 @@
 
 import { requestOpenAiCompatibleTradeDecision } from './openai-compatible-client.js'
 import { buildLlmTradeSystemPrompt, createLlmTradingBot } from './llm-trading-engine.js'
+import { getAiProviderCredential } from './ai-provider-credentials-store.js'
 
 const BOT_LABEL = 'Bot Gemini'
+const PROVIDER_ID = 'google'
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai'
 
 function getApiKey() {
-  return String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim()
 }
 
 function getBaseUrl() {
-  return String(process.env.GEMINI_BOT_BASE_URL || DEFAULT_BASE_URL).trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.baseUrl || process.env.GEMINI_BOT_BASE_URL || DEFAULT_BASE_URL).trim()
 }
 
 function getModelId() {
-  return String(process.env.GEMINI_BOT_MODEL || 'gemini-2.0-flash').trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.model || process.env.GEMINI_BOT_MODEL || 'gemini-2.0-flash').trim()
 }
 
 async function requestDecision({ prompt }) {

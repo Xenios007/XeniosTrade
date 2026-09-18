@@ -9,20 +9,22 @@
 
 import { requestOpenAiCompatibleTradeDecision } from './openai-compatible-client.js'
 import { buildLlmTradeSystemPrompt, createLlmTradingBot } from './llm-trading-engine.js'
+import { getAiProviderCredential } from './ai-provider-credentials-store.js'
 
 const BOT_LABEL = 'Bot OpenRouter'
+const PROVIDER_ID = 'openrouter'
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
 
 function getApiKey() {
-  return String(process.env.OPENROUTER_API_KEY || '').trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.apiKey || process.env.OPENROUTER_API_KEY || '').trim()
 }
 
 function getBaseUrl() {
-  return String(process.env.OPENROUTER_BOT_BASE_URL || DEFAULT_BASE_URL).trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.baseUrl || process.env.OPENROUTER_BOT_BASE_URL || DEFAULT_BASE_URL).trim()
 }
 
 function getModelId() {
-  return String(process.env.OPENROUTER_BOT_MODEL || 'meta-llama/llama-3.3-70b-instruct').trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.model || process.env.OPENROUTER_BOT_MODEL || 'meta-llama/llama-3.3-70b-instruct').trim()
 }
 
 async function requestDecision({ prompt }) {

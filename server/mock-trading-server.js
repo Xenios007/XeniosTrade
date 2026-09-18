@@ -67,6 +67,8 @@ import { refreshBotGeminiDecisions } from './strategy/bot-gemini.js'
 import { refreshBotGrokDecisions } from './strategy/bot-grok.js'
 import { refreshBotOpenrouterDecisions } from './strategy/bot-openrouter.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
+import { mergeAiProviderCredentialsUpdate, normalizeAiProviderCredentials } from '../src/lib/aiProviders.js'
+import { setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
 
 // One entry per LLM-driven bot (model-11..15). Refreshing a decision is the
 // only async step in an otherwise-synchronous scan/dispatch pipeline - see
@@ -422,6 +424,17 @@ const defaultSettings = {
   // only the Real Money wallet's manual "Sync Now" balance check.
   liveApiKey: process.env.BINANCE_LIVE_API_KEY || '',
   liveSecretKey: process.env.BINANCE_LIVE_SECRET_KEY || '',
+  // AI Models page (src/lib/aiProviders.js) — per-provider { apiKey, baseUrl,
+  // model }, masked the same way as the Binance credentials above. Seeded
+  // once from whatever's already in .env so an existing deployment doesn't
+  // need to re-enter keys through the UI.
+  aiProviderCredentials: normalizeAiProviderCredentials({
+    anthropic: { apiKey: process.env.ANTHROPIC_API_KEY || '', model: process.env.ANTHROPIC_BOT_CLAUDE_MODEL || '' },
+    openai: { apiKey: process.env.OPENAI_API_KEY || '', model: process.env.OPENAI_BOT_GPT_MODEL || '' },
+    google: { apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '', model: process.env.GEMINI_BOT_MODEL || '' },
+    xai: { apiKey: process.env.XAI_API_KEY || '', model: process.env.XAI_BOT_MODEL || '' },
+    openrouter: { apiKey: process.env.OPENROUTER_API_KEY || '', model: process.env.OPENROUTER_BOT_MODEL || '' },
+  }),
   strategy: {
     ...defaultStrategySettings,
     maxLossPerTrade: getStrategyDerivedMaxLossPerTrade(defaultStrategySettings),
@@ -948,6 +961,9 @@ function normalizeSettings(rawSettings = {}) {
     secretKey: typeof rawSettings.secretKey === 'string' ? rawSettings.secretKey : defaultSettings.secretKey,
     liveApiKey: typeof rawSettings.liveApiKey === 'string' ? rawSettings.liveApiKey : defaultSettings.liveApiKey,
     liveSecretKey: typeof rawSettings.liveSecretKey === 'string' ? rawSettings.liveSecretKey : defaultSettings.liveSecretKey,
+    aiProviderCredentials: 'aiProviderCredentials' in rawSettings
+      ? normalizeAiProviderCredentials(rawSettings.aiProviderCredentials)
+      : defaultSettings.aiProviderCredentials,
     strategy,
     learningBot: normalizeLearningBotSettings(rawSettings.learningBot),
     wallets: normalizeWallets(rawSettings.wallets),
@@ -1293,6 +1309,9 @@ function mergeSettingsUpdate(currentSettings = defaultSettings, updates = {}) {
     secretKey: resolveCredentialUpdate(normalizedCurrentSettings.secretKey, requestedRootUpdates.secretKey),
     liveApiKey: resolveCredentialUpdate(normalizedCurrentSettings.liveApiKey, requestedRootUpdates.liveApiKey),
     liveSecretKey: resolveCredentialUpdate(normalizedCurrentSettings.liveSecretKey, requestedRootUpdates.liveSecretKey),
+    aiProviderCredentials: 'aiProviderCredentials' in requestedRootUpdates
+      ? mergeAiProviderCredentialsUpdate(normalizedCurrentSettings.aiProviderCredentials, requestedRootUpdates.aiProviderCredentials)
+      : normalizedCurrentSettings.aiProviderCredentials,
     strategy: mergedStrategy,
     wallets: 'wallets' in requestedRootUpdates ? requestedRootUpdates.wallets : normalizedCurrentSettings.wallets,
   }
@@ -1874,12 +1893,24 @@ function sanitizeSettingsForClient(settings = defaultSettings) {
     secretKey: '',
     liveApiKey: '',
     liveSecretKey: '',
+    aiProviderCredentials: Object.fromEntries(
+      Object.entries(normalizedSettings.aiProviderCredentials).map(([providerId, entry]) => [
+        providerId,
+        { baseUrl: entry.baseUrl, model: entry.model, apiKey: '' },
+      ]),
+    ),
     credentials: {
       apiKey: summarizeSettingsCredential(normalizedSettings.apiKey),
       secretKey: summarizeSettingsCredential(normalizedSettings.secretKey),
       liveApiKey: summarizeSettingsCredential(normalizedSettings.liveApiKey),
       liveSecretKey: summarizeSettingsCredential(normalizedSettings.liveSecretKey),
     },
+    aiProviderCredentialStatus: Object.fromEntries(
+      Object.entries(normalizedSettings.aiProviderCredentials).map(([providerId, entry]) => [
+        providerId,
+        summarizeSettingsCredential(entry.apiKey),
+      ]),
+    ),
   }
 }
 
@@ -1897,6 +1928,9 @@ function summarizeSettingsSaveRequestBody(body = {}) {
     includesSecretKey: typeof body?.secretKey === 'string',
     includesLiveApiKey: typeof body?.liveApiKey === 'string',
     includesLiveSecretKey: typeof body?.liveSecretKey === 'string',
+    aiProviderCredentialKeys: body?.aiProviderCredentials && typeof body.aiProviderCredentials === 'object'
+      ? Object.keys(body.aiProviderCredentials).sort()
+      : [],
     strategyKeys: Object.keys(strategy).filter((key) => key !== 'signalModelStrategies').sort(),
     signalModelStrategyKeys: Object.fromEntries(
       Object.entries(signalModelStrategies).map(([modelId, value]) => [
@@ -1958,11 +1992,12 @@ export async function getSettings() {
     note: 'Validated loaded settings against the armed recovery snapshot.',
   })
 
-  if (integrityResult.healed) {
-    return integrityResult.settings
-  }
-
-  return normalized
+  const resolved = integrityResult.healed ? integrityResult.settings : normalized
+  // Single choke point: every LLM bot reads its provider credential from this
+  // in-memory mirror rather than awaiting settings on every scan (see
+  // server/strategy/ai-provider-credentials-store.js).
+  setAiProviderCredentialsStore(resolved.aiProviderCredentials)
+  return resolved
 }
 
 async function saveSettings(nextSettings, {
@@ -1982,6 +2017,7 @@ async function saveSettings(nextSettings, {
     settingsRevision: resolvedSettingsRevision,
   })
   await writeJson(settingsFilePath, normalized)
+  setAiProviderCredentialsStore(normalized.aiProviderCredentials)
   syncObservedSettingsAuditState(normalized)
   await appendSettingsAuditLog({
     trigger: audit?.trigger || 'SETTINGS_WRITE',

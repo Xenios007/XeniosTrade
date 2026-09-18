@@ -14,7 +14,12 @@ All five run inside the normal wallet/bot roster (small 100 USDT allocation each
 
 ## Requirements
 
-Each bot stays in a "watching" state and never calls its API or trades until its key is set in `.env` (see `.env.example` for the full list — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`). Every model id / base URL is independently overridable.
+Each bot stays in a "watching" state and never calls its API or trades until its provider key is configured. Two ways to configure it, checked in this order:
+
+1. **AI Models page** (`/ai-models` in the app, Config → AI Models) — paste a key, optional base URL, optional model id per provider through the UI. Stored server-side in `settings.json` (masked the same way as the Binance credentials — never sent back to the browser), and covers all 23 providers in `src/lib/aiProviders.js`, not just the five wired to a bot, so a key can be saved ready for a bot added later. This is the normal way to set these up.
+2. **`.env`** (see `.env.example` — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`, plus per-bot model/base-URL overrides) — a fallback for whichever field the AI Models page doesn't have a value for. Useful for a fresh deploy before anyone has opened the page.
+
+`server/strategy/ai-provider-credentials-store.js` is the in-memory mirror every bot reads from; `mock-trading-server.js` refreshes it every time `getSettings()` runs.
 
 ## How they decide — identical across all five, on purpose
 
@@ -39,7 +44,11 @@ The only thing that differs between bots is *how* the API is called:
 - `server/strategy/openai-compatible-client.js`: the shared fetch-based client for any OpenAI-compatible provider (GPT, Gemini, Grok, OpenRouter).
 - `server/strategy/bot-claude.js` / `bot-gpt.js` / `bot-gemini.js` / `bot-grok.js` / `bot-openrouter.js`: each is a thin wrapper — only "how to call this provider" — around the shared engine.
 - `src/lib/signalModels.js` / `src/lib/wallets.js`: `model-11..15` / `wallet-model-11..15` registry entries — the rest of the UI (BotStatusGrid, SettingsPage, WalletsPage) is registry-driven and needed no bot-specific changes; `SignalInsightsPanel.jsx` and `LearningBotPage.jsx` have small hardcoded bot-label maps that were updated to include them.
+- `src/lib/aiProviders.js`: the 23-provider catalog + credential normalize/merge logic behind the AI Models page, shared by client and server.
+- `server/strategy/ai-provider-credentials-store.js`: the in-memory credential mirror every bot reads (`getAiProviderCredential(providerId)`).
+- `src/components/AiModelsPage.jsx` (`/ai-models`): the page itself — a provider grid + connect modal (Providers & Keys) and a status summary for the five wired bots (Bot Assignments).
 - `test/llm-trading-engine.test.js`: covers the shared engine and OpenAI-compatible client against a fake provider (no real network calls).
+- `test/aiProviders.test.js`: covers the credential normalize/merge logic, including that a blank field never wipes a stored key and an update to one provider never touches another's.
 
 ## Adding another provider
 

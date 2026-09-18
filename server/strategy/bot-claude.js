@@ -11,8 +11,10 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import { buildLlmTradeSystemPrompt, createLlmTradingBot, LLM_TRADE_DECISION_JSON_SCHEMA, parseTradeDecision } from './llm-trading-engine.js'
+import { getAiProviderCredential } from './ai-provider-credentials-store.js'
 
 const BOT_LABEL = 'Bot Claude'
+const PROVIDER_ID = 'anthropic'
 
 const TRADE_DECISION_OUTPUT_FORMAT = {
   type: 'json_schema',
@@ -20,27 +22,34 @@ const TRADE_DECISION_OUTPUT_FORMAT = {
   parse: parseTradeDecision,
 }
 
+function getApiKey() {
+  return String(getAiProviderCredential(PROVIDER_ID)?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim()
+}
+
 let anthropicClient = null
+let cachedApiKey = null
 let missingApiKeyWarned = false
 
 function getClient() {
-  const apiKey = String(process.env.ANTHROPIC_API_KEY || '').trim()
+  const apiKey = getApiKey()
   if (!apiKey) {
     if (!missingApiKeyWarned) {
       missingApiKeyWarned = true
-      console.warn('[bot-claude] ANTHROPIC_API_KEY is not set — Bot Claude will stay in "watching" state.')
+      console.warn('[bot-claude] No Anthropic API key configured (AI Models page or ANTHROPIC_API_KEY) — Bot Claude will stay in "watching" state.')
     }
     return null
   }
-  if (!anthropicClient) {
+  // Re-create the client if the key changed (e.g. rotated via the AI Models page).
+  if (!anthropicClient || cachedApiKey !== apiKey) {
     anthropicClient = new Anthropic({ apiKey })
+    cachedApiKey = apiKey
   }
   return anthropicClient
 }
 
 function getModelId() {
   return String(
-    process.env.ANTHROPIC_BOT_CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-5',
+    getAiProviderCredential(PROVIDER_ID)?.model || process.env.ANTHROPIC_BOT_CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-5',
   ).trim()
 }
 
@@ -67,7 +76,7 @@ const engine = createLlmTradingBot({
   id: 'bot-claude',
   label: BOT_LABEL,
   strategyFamily: 'llm-claude',
-  isConfigured: () => Boolean(String(process.env.ANTHROPIC_API_KEY || '').trim()),
+  isConfigured: () => Boolean(getApiKey()),
   resolveModelLabel: getModelId,
   requestDecision,
 })

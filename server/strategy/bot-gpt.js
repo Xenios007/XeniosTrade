@@ -4,16 +4,18 @@
 
 import { requestOpenAiCompatibleTradeDecision } from './openai-compatible-client.js'
 import { buildLlmTradeSystemPrompt, createLlmTradingBot } from './llm-trading-engine.js'
+import { getAiProviderCredential } from './ai-provider-credentials-store.js'
 
 const BOT_LABEL = 'Bot GPT'
+const PROVIDER_ID = 'openai'
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 
 function getApiKey() {
-  return String(process.env.OPENAI_API_KEY || '').trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.apiKey || process.env.OPENAI_API_KEY || '').trim()
 }
 
 function getBaseUrl() {
-  return String(process.env.OPENAI_BOT_GPT_BASE_URL || DEFAULT_BASE_URL).trim()
+  return String(getAiProviderCredential(PROVIDER_ID)?.baseUrl || process.env.OPENAI_BOT_GPT_BASE_URL || DEFAULT_BASE_URL).trim()
 }
 
 function getModelId() {
@@ -21,7 +23,7 @@ function getModelId() {
   // "Manual Trade With ChatGPT" review already uses, so one configured key
   // sensibly drives both features unless a bot-specific model is set.
   return String(
-    process.env.OPENAI_BOT_GPT_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+    getAiProviderCredential(PROVIDER_ID)?.model || process.env.OPENAI_BOT_GPT_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
   ).trim()
 }
 
