@@ -1,7 +1,8 @@
-import { ArrowUpDown } from 'lucide-react'
+import { ArrowUpDown, Bot, ListFilter } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { formatDateTime, formatPercent, formatPrice } from '../lib/formatters'
 import { getMarginModeLabel } from '../lib/marginModes'
+import { SIGNAL_MODELS } from '../lib/signalModels'
 import {
   formatTradeSource,
   getTradePnlAmount,
@@ -34,6 +35,19 @@ const TRADE_STATUS_SORT_ORDER = {
   CLOSED_MANUAL: 2,
   CLOSED_SL: 3,
 }
+
+const TRADE_BOT_FILTER_OPTIONS = [
+  { id: 'all', label: 'All Bots' },
+  ...SIGNAL_MODELS.map((model) => ({ id: model.id, label: model.name })),
+]
+
+const TRADE_STATUS_FILTER_OPTIONS = [
+  { id: 'all', label: 'All Statuses' },
+  { id: 'OPEN', label: 'Open' },
+  { id: 'CLOSED_TP', label: 'Closed · TP' },
+  { id: 'CLOSED_SL', label: 'Closed · SL' },
+  { id: 'CLOSED_MANUAL', label: 'Closed · Manual' },
+]
 
 function formatSignedPrice(value) {
   const number = Number(value || 0)
@@ -218,10 +232,16 @@ export function TradeHistoryTable({
   onManualClose,
 }) {
   const [arrangeBy, setArrangeBy] = useState('latest')
+  const [botFilter, setBotFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [currentPage, setCurrentPage] = useState(1)
-  const openTrades = trades.filter((trade) => isTradeOpen(trade)).length
+  const filteredTrades = useMemo(() => trades.filter((trade) => (
+    (botFilter === 'all' || trade.signalModelId === botFilter)
+    && (statusFilter === 'all' || trade.status === statusFilter)
+  )), [trades, botFilter, statusFilter])
+  const openTrades = filteredTrades.filter((trade) => isTradeOpen(trade)).length
   const arrangedTrades = useMemo(() => {
-    const nextTrades = [...trades]
+    const nextTrades = [...filteredTrades]
 
     nextTrades.sort((left, right) => {
       const newestFirst = getTradeSortTime(right) - getTradeSortTime(left)
@@ -266,7 +286,7 @@ export function TradeHistoryTable({
     })
 
     return nextTrades
-  }, [arrangeBy, livePrices, trades])
+  }, [arrangeBy, livePrices, filteredTrades])
   const totalPages = Math.max(1, Math.ceil(arrangedTrades.length / TRADE_HISTORY_PAGE_SIZE))
   const pageStartIndex = (currentPage - 1) * TRADE_HISTORY_PAGE_SIZE
   const pageEndIndex = Math.min(pageStartIndex + TRADE_HISTORY_PAGE_SIZE, arrangedTrades.length)
@@ -274,7 +294,7 @@ export function TradeHistoryTable({
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [arrangeBy, trades.length])
+  }, [arrangeBy, botFilter, statusFilter, trades.length])
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(page, totalPages))
@@ -313,28 +333,64 @@ export function TradeHistoryTable({
     <Panel
       title={title}
       action={(
-        <div className="flex items-center gap-2 rounded-full border border-sky-300/20 bg-slate-950/35 px-3 py-2 text-sky-100">
-          <ArrowUpDown className="h-3.5 w-3.5 shrink-0 text-sky-200" />
-          <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-sky-100/70 sm:inline">
-            Arrange By
-          </span>
-          <select
-            value={arrangeBy}
-            onChange={(event) => setArrangeBy(event.target.value)}
-            className="min-w-[8.75rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 outline-none"
-          >
-            {TRADE_HISTORY_ARRANGE_OPTIONS.map((option) => (
-              <option key={option.id} value={option.id} className="bg-slate-950 text-white">
-                {option.label}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 rounded-full border border-emerald-300/20 bg-slate-950/35 px-3 py-2 text-emerald-100">
+            <Bot className="h-3.5 w-3.5 shrink-0 text-emerald-200" />
+            <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-100/70 sm:inline">
+              Bot
+            </span>
+            <select
+              value={botFilter}
+              onChange={(event) => setBotFilter(event.target.value)}
+              className="min-w-[7rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-emerald-100 outline-none"
+            >
+              {TRADE_BOT_FILTER_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id} className="bg-slate-950 text-white">
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-amber-300/20 bg-slate-950/35 px-3 py-2 text-amber-100">
+            <ListFilter className="h-3.5 w-3.5 shrink-0 text-amber-200" />
+            <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-amber-100/70 sm:inline">
+              Status
+            </span>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="min-w-[7.5rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-amber-100 outline-none"
+            >
+              {TRADE_STATUS_FILTER_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id} className="bg-slate-950 text-white">
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-sky-300/20 bg-slate-950/35 px-3 py-2 text-sky-100">
+            <ArrowUpDown className="h-3.5 w-3.5 shrink-0 text-sky-200" />
+            <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-sky-100/70 sm:inline">
+              Arrange By
+            </span>
+            <select
+              value={arrangeBy}
+              onChange={(event) => setArrangeBy(event.target.value)}
+              className="min-w-[8.75rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 outline-none"
+            >
+              {TRADE_HISTORY_ARRANGE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id} className="bg-slate-950 text-white">
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       )}
     >
-      {trades.length === 0 ? (
+      {arrangedTrades.length === 0 ? (
         <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
-          No trades recorded yet.
+          {trades.length === 0 ? 'No trades recorded yet.' : 'No trades match the selected bot/status filters.'}
         </div>
       ) : (
         <div className="min-w-0 space-y-3">

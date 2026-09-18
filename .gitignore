@@ -52,3 +52,10 @@ server/learning-bot/**/*.ckpt
 server/learning-bot/**/__pycache__/
 server/backtest/reports/
 *.parquet
+
+# Blanket rule (defense in depth) — server/data/ has grown many generated
+# subdirectories and *.bak/*.tmp-* scratch files the specific rules above
+# don't reach. Never let runtime data/credentials near git.
+server/data/
+*.bak
+*.tmp-*

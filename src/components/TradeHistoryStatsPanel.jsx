@@ -40,11 +40,12 @@ export function TradeHistoryStatsPanel({
   title = 'Trade Performance',
   onSyncMainWallet,
   syncingWalletId = null,
+  startingBalance = null,
 }) {
   const accountSnapshot = summarizeAccount({
     trades,
     livePrices,
-    startingBalance: getTotalWalletStartingBalance(wallets),
+    startingBalance: startingBalance != null ? startingBalance : getTotalWalletStartingBalance(wallets),
   })
   const mainWallet = getMainWallet(wallets)
   const realWalletBalance = mainWallet?.production?.lastSyncedBalance

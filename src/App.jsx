@@ -13,6 +13,8 @@ import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
 import { BotStatusGrid } from './components/BotStatusGrid'
 import { ProExitStrategy } from './components/ProExitStrategy'
+import { ForecastPanel } from './components/ForecastPanel'
+import { RealMoneyTradingPage, getRealMoneyTrades } from './components/RealMoneyTradingPage'
 import { JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
 import { ConsolidatedBotPage } from './components/ConsolidatedBotPage'
@@ -42,7 +44,12 @@ import { MANUAL_TRADE_STYLE_PRESET_ID } from './lib/strategyPresets'
 import { DEFAULT_PREFERRED_SYMBOLS } from './lib/tradingConfig'
 import { DEFAULT_AUTO_TRADE_SESSIONS } from './lib/tradingSessions'
 import { isAutoTradeSource } from './lib/trades'
-import { buildDefaultWallets, getTotalWalletStartingBalance } from './lib/wallets'
+import {
+  buildDefaultWallets,
+  getRealMoneyWallet,
+  getTotalWalletStartingBalance,
+  getWalletEffectiveStartingBalance,
+} from './lib/wallets'
 import { analyzeTradeSignal } from './lib/tradeSignal'
 
 const CandlestickChart = lazy(() => import('./components/CandlestickChart').then((module) => ({
@@ -158,10 +165,15 @@ const JOURNAL_TABS = [
   { to: '/journal/head-to-head', label: 'Head to Head' },
   { to: '/journal/wallet', label: 'Wallet Journal' },
 ]
+const TRADE_HISTORY_TABS = [
+  { to: '/trade-history', label: 'Testnet Trades', end: true },
+  { to: '/trade-history/real-money', label: 'Real Money Trades' },
+]
 const DASHBOARD_TABS = [
   { to: '/dashboard', label: 'Overview', end: true },
   { to: '/dashboard/market', label: 'Market' },
   { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
+  { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
   { to: '/dashboard/workflow', label: 'Workflow Notifications' },
   { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
   { to: '/dashboard/codex', label: 'Codex Console' },
@@ -1451,6 +1463,12 @@ export default function App() {
               />
             </Suspense>
 
+            <ForecastPanel
+              modelAnalyses={signalModelAnalyses}
+              symbol={selectedSymbol}
+              interval={interval}
+            />
+
             <ProExitStrategy analysis={sidebarModelAnalysis || signalAnalysis} />
           </section>
 
@@ -1485,6 +1503,20 @@ export default function App() {
                 autoTradePhase={autoTradePhase}
                 trackedSymbols={settings.strategy.preferredSymbols}
                 latestAutoOrder={latestAutoOrder}
+              />
+            )}
+          />
+          <Route
+            path="real-money-trading"
+            element={(
+              <RealMoneyTradingPage
+                settings={settings}
+                trades={tradeHistory}
+                livePrices={liveTradePrices}
+                aiTrainingStatus={aiTrainingStatus}
+                onSave={handleSaveSettings}
+                saving={savingSettings}
+                ready={hasLoadedSettingsRef.current}
               />
             )}
           />
@@ -1532,24 +1564,65 @@ export default function App() {
   }
 
   function renderTradeHistory() {
+    const realMoneyTrades = getRealMoneyTrades(tradeHistory, settings.wallets)
+    const realMoneyTradeIds = new Set(realMoneyTrades.map((trade) => trade.id))
+    const testnetTrades = tradeHistory.filter((trade) => !realMoneyTradeIds.has(trade.id))
+
     return (
       <div className="grid gap-6">
-        <TradeHistoryStatsPanel
-          trades={tradeHistory}
-          livePrices={liveTradePrices}
-          liveDirections={liveTradeDirections}
-          trackedSymbols={settings.strategy.preferredSymbols}
-          wallets={settings.wallets}
-          onSyncMainWallet={handleSyncWallet}
-          syncingWalletId={syncingWalletId}
+        <PageHeader
+          title="Trade History"
+          description="Testnet/paper trades and real-money trades are tracked separately."
         />
-        <TradeHistoryTable
-          trades={tradeHistory}
-          livePrices={liveTradePrices}
-          liveDirections={liveTradeDirections}
-          closingTradeIds={closingTradeIds}
-          onManualClose={handleManualCloseTrade}
-        />
+        <SubNavTabs tabs={TRADE_HISTORY_TABS} />
+        <Routes>
+          <Route
+            index
+            element={(
+              <div className="grid gap-6">
+                <TradeHistoryStatsPanel
+                  trades={testnetTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  trackedSymbols={settings.strategy.preferredSymbols}
+                  wallets={settings.wallets}
+                />
+                <TradeHistoryTable
+                  title="Testnet Trade History"
+                  trades={testnetTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  closingTradeIds={closingTradeIds}
+                  onManualClose={handleManualCloseTrade}
+                />
+              </div>
+            )}
+          />
+          <Route
+            path="real-money"
+            element={(
+              <div className="grid gap-6">
+                <TradeHistoryStatsPanel
+                  trades={realMoneyTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  trackedSymbols={settings.strategy.preferredSymbols}
+                  wallets={settings.wallets}
+                  startingBalance={getWalletEffectiveStartingBalance(getRealMoneyWallet(settings.wallets) || {})}
+                />
+                <TradeHistoryTable
+                  title="Real Money Trade History"
+                  trades={realMoneyTrades}
+                  livePrices={liveTradePrices}
+                  liveDirections={liveTradeDirections}
+                  closingTradeIds={closingTradeIds}
+                  onManualClose={handleManualCloseTrade}
+                />
+              </div>
+            )}
+          />
+          <Route path="*" element={<Navigate to="/trade-history" replace />} />
+        </Routes>
       </div>
     )
   }
@@ -1736,7 +1809,7 @@ export default function App() {
         <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
         <Route path="/wallets" element={renderWallets()} />
         <Route path="/journal/*" element={renderJournal()} />
-        <Route path="/trade-history" element={renderTradeHistory()} />
+        <Route path="/trade-history/*" element={renderTradeHistory()} />
         <Route path="/settings/*" element={renderSettings()} />
         <Route path="*" element={<Navigate to={initialPath} replace />} />
       </Routes>

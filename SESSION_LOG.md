@@ -10,7 +10,633 @@ every session. Times are UTC. Server logs are UTC+8 (Asia/Manila).
 
 ---
 
-## WHERE WE LEFT OFF  — as of 2026-08-31 17:30 UTC
+## WHERE WE LEFT OFF  — as of 2026-09-16 (latest)
+
+### Real Money Wallet balance sync was silently reading the testnet account — bug from the previous session's own safety fix — 2026-09-16
+
+**Owner report:** Wallets page "Real Money Wallet" showed 855.77 USDT, but the
+actual live Binance account only has 10.25 USDT (owner had drawn it down for
+real-trade testing). Owner correctly suspected the *previous* session's fix
+(the "only bot 5 can trade real money" change below, 2026-09-15) caused this,
+since the balance was correct before that session.
+
+**Root cause:** that fix's `resolveAuthorizedWalletEnvironment()` guard
+included a "master kill switch" — any wallet is forced down to `TESTNET`
+unless `settings.strategy.realMoneyExecutionArmed` is `true` (it's `false` by
+design; live execution is still off). This gate was meant to stop *order
+placement*, but it was also applied to `syncExchangeWalletBalance()` — the
+read-only balance sync. So every "Sync Now" on `wallet-real-money` got routed
+to the **testnet** API/credentials instead of the live ones. Proof:
+`wallet-main` (testnet) and `wallet-real-money` (live) had identical synced
+balance (855.77), available balance (601.57), and open-position count (6) —
+both were reading the same testnet account.
+
+**Fix** (`server/mock-trading-server.js`): `resolveAuthorizedWalletEnvironment`
+now takes an optional `{ readOnly }` flag. The wallet-id/assigned-bot
+authorization check still applies either way (still can't sync/trade an
+unauthorized wallet as real money), but the `realMoneyExecutionArmed`
+kill-switch is only enforced when `readOnly` is false. `syncExchangeWalletBalance`
+now calls it with `{ readOnly: true }`, since it never places orders — it only
+reads `fetchBinanceAccountSnapshot`. The three execution call sites
+(`recordTrade`, `updateOpenTrades`'s `getWalletExchangeContext`, manual-close)
+are untouched and still fully gated by the arm switch, since those can place
+or close real orders.
+
+**Verified:** `node --check` clean; `npm test` 66/68 (same 2 pre-existing
+unrelated failures as before); `pm2 restart xeniostrade-api` clean, no crash
+loop; logged in via `/api/auth/login` and called
+`POST /api/wallets/wallet-real-money/sync` directly — response now shows
+`lastSyncedBalance: 10.25`, `lastSyncedAvailableBalance: 10.25`,
+`syncProvider: BINANCE_FUTURES_LIVE`, `syncStatus: CONNECTED` — correctly
+reading the live account now. Backend-only change, no frontend rebuild
+needed; the Wallets page will show the correct balance on its next sync/poll.
+
+**Not touched:** `realMoneyExecutionArmed` itself is still `false` — no bot
+places live orders, matching `GO_LIVE_READINESS.md` (still NO).
+
+### CRITICAL FIX: bot wallets were mistakenly wired to live Binance for every bot, not just the assigned real-money bot — 2026-09-15
+
+**Owner report:** "on real money trade page, it should only trade under the
+chosen bot which is bot 5 right now, it should not trade using the other bot
+but only on the assign bot."
+
+**What was actually found (worse than the report suggested):** an uncommitted,
+in-progress change (part of the still-unfinished Bots 9/10 / "Consolidated
+Bot" work — see the many untracked `consolidated-*`/`ConsolidatedBot*` files)
+had added a blanket override at the end of `normalizeWallets()` in
+`src/lib/wallets.js`:
+```js
+// Bot wallets always trade live on the real-money environment now — forced
+// here ... so it applies even to wallets already persisted with the old
+// MANUAL/TESTNET values.
+return { ...wallet, balanceMode: EXCHANGE_SYNC, environment: REAL_MONEY, ... }
+```
+This force-applied `environment: REAL_MONEY` + `balanceMode: EXCHANGE_SYNC`
+to **all 10 per-bot wallets** (`wallet-model-1..10`), not just the one
+assigned via Settings -> "Assign Real Money Bot" (`realMoneySignalModelId`,
+= model-5). Combined with `autoTradingEnabled: true` and live Binance keys
+already saved in settings, the next auto-trade cycle would have opened real
+orders on the live account under **any** of the 9 non-assigned bots the
+moment one found a qualifying setup — not just bot 5. Wallet balance syncing
+was *already* actively hitting the live account for all 9 bots every cycle
+(confirmed: `lastSyncedBalance: 71.42`, the real live balance, on wallets 1-4
+and 6-10, all synced within ~11s of each other). No live *order* had fired
+yet by the time this was caught (all 656 REAL_MONEY-tagged trades in history
+were still `local-paper`/`SIMULATED`), but the system was fully armed to do
+so on the next qualifying signal.
+
+**Fix (defense in depth, both layers):**
+1. **Root cause** — removed the blanket force-override in
+   `normalizeWallets()`; wallet environment/balanceMode now come from
+   persisted settings / blueprint as before. Also reverted the
+   `wallet-model-1..8` blueprint entries in the same file back to
+   `environment: TESTNET` (no `balanceMode` override), undoing the other half
+   of the same uncommitted regression.
+2. **Standing enforcement (the actual "only bot 5" rule)** — added
+   `resolveAuthorizedWalletEnvironment(wallet, settings)` in
+   `server/mock-trading-server.js`: a wallet can only be treated as
+   `REAL_MONEY` if `wallet.assignedSignalModelId === settings.strategy.realMoneySignalModelId`.
+   Any other wallet — even one mistagged `REAL_MONEY` again in the future —
+   is forced down to `TESTNET` before its credentials/base-URL are resolved.
+   Wired into all four places that route to Binance based on wallet
+   environment: `recordTrade` (opening a trade), `syncExchangeWalletBalance`
+   (balance sync), `updateOpenTrades`'s `getWalletExchangeContext`
+   (reconciling/closing open trades, incl. Bot 8's AI risk-close path), and
+   the manual-close endpoint. This is the single choke point now — safe even
+   if wallet tagging gets corrupted again by future WIP work.
+3. **Data cleanup** — `server/data/settings.json` + `settings-recovery.json`:
+   reverted all 10 bot wallets (`wallet-model-1..10`, including bot 5's own
+   wallet) back to `TESTNET`/`MANUAL` and cleared their stale live-synced
+   `production` block. `wallet-real-money` (the one legitimate dedicated
+   live-funds wallet, `kind: MAIN`, always excluded from the auto-trade loop,
+   still disabled) was left untouched. `settingsRevision` 88 -> 90 (bumped in
+   both files per the usual safe-edit procedure: pm2 stop, edit both, pm2
+   start, pm2 save, verify).
+
+**Net effect:** right now, exactly as before this regression, **no bot**
+auto-executes real Binance orders (matches `GO_LIVE_READINESS.md` = not
+ready, and the Real Money Trading page's own "Execution path: disabled"
+copy) — all 10 bots are back to pure testnet/local-paper. The new
+`resolveAuthorizedWalletEnvironment` guard means that whenever real-money
+execution *is* deliberately wired up in the future, it can only ever route
+through the one bot assigned on the Real Money Trading page, never any other.
+
+**Verified:** `npm run build` clean, `dist/` deployed; `pm2 restart` clean
+(no new crash-loop, restart count unchanged); settings hold across a second
+restart; terminal monitor confirms `Mix: 0 Binance Demo | N Local Paper` for
+all open trades post-fix. `node --test`: 67/69 pass — the 2 failures
+(`test/bots5to8.test.js`, expects `SIGNAL_MODELS.length === 8`) are
+pre-existing and unrelated, from the separate in-progress Bots 9/10 work,
+not touched this session.
+
+**Not investigated / still open:** the rest of that uncommitted Bots 9/10 /
+Consolidated Bot feature (many untracked files, pm2 had 32+ restarts before
+this session started — possible crash-loop history worth a look) was left
+alone since it was out of scope for this fix.
+
+### Wallets page real-money balance check + Trade History split into Testnet/Real Money — 2026-09-15
+
+**Wallet balance investigation (no bug found):** owner reported the 71.42
+USDT Binance balance wasn't showing on the Wallets page. Checked
+`settings.json`'s real-money wallet directly: `syncStatus: "CONNECTED"`,
+`lastSyncedBalance: 71.42` - the sync is genuinely working, the data is
+there. `WalletsPage.jsx` has a "Testnet Wallets" / "Real Money Wallet"
+toggle (`activeEnvironment` state) that **defaults to Testnet** on every
+page load - almost certainly just not-yet-clicked, not a data/sync bug.
+Didn't change anything here; flagged for the owner to check by clicking the
+"Real Money Wallet" tab.
+
+**Trade History restructured** (owner: "create separate pages for testnet
+trade and real money trading, add beside arrange by bot dropdown, also
+status page to be separate dropdown"):
+
+`TradeHistoryTable.jsx` - the single "Arrange By" sort dropdown (which had
+`bot`/`status` mixed in as two of eight sort options) now sits beside two
+new dedicated *filter* dropdowns: **Bot** (`TRADE_BOT_FILTER_OPTIONS`, built
+from `SIGNAL_MODELS` so it lists all bots regardless of whether they have
+trades yet) and **Status** (`TRADE_STATUS_FILTER_OPTIONS`: Open / Closed TP
+/ Closed SL / Closed Manual). New `filteredTrades` memo applies both before
+the existing sort/paginate pipeline; the "N trades still open" banner and
+the empty-state message (now distinguishes "no trades yet" from "no trades
+match these filters") both follow the filtered set instead of the raw prop.
+Sort-by-bot/status options were left in "Arrange By" too - filtering and
+sorting are different operations, both still make sense together.
+
+`App.jsx` `renderTradeHistory()` - rebuilt on the same
+`PageHeader`+`SubNavTabs`+nested-`<Routes>` pattern as Journal/Dashboard:
+`index` = Testnet Trades, `real-money` = Real Money Trades, each with its
+own `TradeHistoryStatsPanel`+`TradeHistoryTable` fed a pre-split trade list
+(`getRealMoneyTrades` from `RealMoneyTradingPage.jsx`, restored last entry,
+for the real-money side; everything else falls into testnet). Route mount
+changed from `path="/trade-history"` to `path="/trade-history/*"` so the
+nested routes resolve. `navItems.js` - Trade History gained the matching
+`children` (was a flat link before).
+
+`npm run build` clean, `dist/` deployed. Frontend-only, no pm2 restart
+needed.
+
+### Real Money Trading dashboard page had gone missing — restored — 2026-09-15
+
+Owner: "the real money trading on the dashboard disappeared, return it."
+Root cause: **not caused by anything this session** - `src/App.jsx` (3552
+lines changed) and `src/components/shell/navItems.js` (242 lines changed)
+are both uncommitted, heavily-refactored versus `HEAD` (`c0b9064`) from the
+2026-09-13 Consolidated Bot integration session, and that refactor dropped
+every route/import/nav-link for the Real Money Trading dashboard page along
+the way - apparently by accident, since `git status --porcelain` on
+`src/components/RealMoneyTradingPage.jsx`, `src/lib/wallets.js`, and
+`src/components/JournalSummaryPage.jsx` all came back **empty** (byte-for-byte
+identical to `HEAD`). The actual page component, `getRealMoneyWallet`, and
+`JournalRealMoneyPage` were never touched or deleted - only the wiring that
+reaches them from `App.jsx`/`navItems.js` was lost.
+
+Restored the Dashboard entry point specifically (scoped to what was asked):
+`App.jsx` - re-added the `RealMoneyTradingPage` import, its
+`Route path="real-money-trading"` inside `renderDashboard()` (identical
+props to the `HEAD` version: `settings`, `trades`, `livePrices`,
+`aiTrainingStatus`, `onSave`, `saving`, `ready` - all already present in the
+current file, nothing else needed), and a `DASHBOARD_TABS` entry.
+`navItems.js` - added the matching sidebar sub-link under Dashboard.
+
+**Deliberately NOT restored (same refactor also dropped these, scope
+question for the owner):** the Trade History page's "Real Money Trades" tab
+and `getRealMoneyTrades` filter, and the Journal's "Real Money Journal" tab
+(`JournalRealMoneyPage`) - `renderTradeHistory()` currently has no sub-tabs
+at all (flat page, restructured), so restoring that one is a slightly bigger
+change than the Dashboard fix. Ask before doing those too, in case the
+Trade History restructure was intentional.
+
+`npm run build` clean (1700 modules, +1 for the restored page), `dist/`
+deployed. Frontend-only, no pm2 restart needed.
+
+**Bigger picture flag:** this is exactly the risk the "~26 uncommitted
+files... housekeeping owed" note has been carrying since 2026-08-31 -
+`App.jsx` and `navItems.js` have no commit to diff against or recover from
+cleanly, so a large uncommitted refactor silently dropping a whole feature
+can sit unnoticed until a user reports it missing. Worth committing the
+current working tree (or at least `App.jsx`/`navItems.js`) once this session
+settles, so the next accidental-drop is a visible diff instead of a silent
+gap.
+
+### Prediction history capped — 2026-09-15
+
+Owner: "cap it now" (the uncapped-growth note from the entry just below).
+`CandlestickChart.jsx`: new `FORECAST_MAX_VISIBLE_PREDICTIONS =
+FORECAST_COLOR_PALETTE.length` (8) - past that, the oldest prediction's
+series is evicted (`chart.removeSeries`) as each new one is added, oldest
+first. P-numbers still count up forever and are never reused/renumbered even
+once a line is evicted, so "P14" always means the 14th prediction made this
+symbol/interval session, whether or not it's still on screen. Cap
+intentionally equals the color palette length so every prediction visible at
+once always has a distinct color. Frontend-only, `npm run build` clean,
+`dist/` deployed.
+
+### Forecast becomes a persistent P1/P2/P3... prediction history — 2026-09-15
+
+Owner: keep every prediction line on the chart permanently instead of one
+line that keeps getting replaced - label each "P1 +2.34%", "P2 -1.10%", etc,
+a different color per prediction, and a new one only when the graph "needs
+to" (implicitly: when the consensus actually changes).
+
+`CandlestickChart.jsx` restructured from one fixed `forecast` series
+(created once in `seriesRef` at chart boot) to a dynamic list:
+- New `predictionsRef` (array of `{series, direction, percent, time}`,
+  oldest first) + `predictionCounterRef` (the P-number counter).
+- New `FORECAST_COLOR_PALETTE` (8 colors, cycling) - color is purely to tell
+  P1 from P2 apart, no other meaning.
+- The forecast effect now only *adds* a series (never mutates or removes an
+  earlier one) when `computeSixtyCandleForecast`'s direction flips or its
+  percent has moved >= `FORECAST_REDRAW_PERCENT_THRESHOLD` (0.15) since the
+  *last drawn prediction* (not the last poll) - each new one becomes `P{n}
+  +/-X.XX%` via the series `title`. This replaces the same-turn threshold
+  logic from earlier today, which compared against the last poll and still
+  force-redrew on every new candle; that "new candle" trigger is gone now,
+  since a persisted prediction is a frozen historical snapshot; a candle
+  passing by itself is no longer a reason to draw a new one.
+- Predictions are cleared (all series removed, counter reset to 0) only on
+  an actual symbol/interval change, in the existing `chartViewKey` effect -
+  a prediction drawn in one market/timeframe's time-and-price space doesn't
+  mean anything in another.
+- `ForecastPanel.jsx` copy updated to describe the running P1/P2/... history
+  instead of one line.
+
+Frontend-only change; `npm run build` clean, `dist/` deployed, no pm2
+restart needed.
+
+**Note for later:** no cap on how many predictions accumulate in one
+symbol/interval session - could get visually busy over a long-running chart
+with a volatile symbol. Revisit if the owner finds it cluttered (e.g. cap to
+the last N, or fade/dim older ones).
+
+### Forecast line redraw smoothed — 2026-09-15
+
+Owner asked why the chart forecast line isn't always showing and why it
+keeps redrawing. Answer (not a bug): it only draws when at least one bot has
+a `LONG`/`SHORT` signal for the symbol (most bots sit in `WAIT` most of the
+time by design - confirmed live, most wallet scans return "No A-grade setup
+available"), and it was redrawing on every 15s `signalModelAnalyses` poll
+(`App.jsx`) because each bot's entry/take-profit tracks live price, so
+`forecast.percent` shifts slightly almost every poll.
+
+Owner chose (AskUserQuestion): smooth the redraw (only redraw on a real
+direction flip, a meaningful percent move, or a new candle - not every tiny
+live-price wiggle), and leave the chart blank (no placeholder marker) when
+there's no directional consensus.
+
+`CandlestickChart.jsx`: `forecastSigRef` changed from a signature string to
+`{direction, percent, time, interval}`; new `FORECAST_REDRAW_PERCENT_THRESHOLD
+= 0.15` - a same-candle redraw now only fires once `forecast.percent` has
+moved at least 0.15 percentage points since the last drawn value (a
+direction change or a new candle still always redraws regardless). Frontend
+only change; `npm run build` clean, `dist/` deployed, no pm2 restart needed.
+
+### Bot 10's real backend was never wired into the live server — found + fixed — 2026-09-15
+
+Owner: "make bot 9 and 10 scan trades like the rest and trade according to
+their logic implanted on them, tech analysis of 10 is all tech analysis from
+bot 1-8 thats why its called consolidated." Investigated both rather than
+assume:
+
+**Bot 9 — working as designed, not touched.** `BOT5TO8_BUILDERS['model-9']`
+(`server/strategy/bots5to8.js`) is a real, dedicated signal builder (4H
+completed trend + 1H RSI(2)<=10 exhaustion + volume + taker-flow + reclaim),
+not a placeholder, and live logs confirm Wallet 9 scans every 5-minute
+`runAutoTrader` cycle exactly like bots 1-8 ("No A-grade setup available
+after scanning preferred symbols" = it scanned and found nothing). Checked
+`server/data/trade-history.json`: 655 total rows, zero for `model-9` — but
+that's consistent with its own doc ("research validation failed... never use
+as a validated production signal," max 2 testnet entries/day) describing an
+intentionally rare, strict setup, not a wiring bug like Bot 10 below. Did not
+loosen its criteria — that would be a real strategy change, not a fix; ask
+the owner first if they actually want that.
+
+**Bot 10 — genuinely broken, now fixed.** The full Consolidated Bot backend
+(`server/consolidated-bot.js`, `server/consolidated-testnet.js`,
+`server/strategy/consolidated-model.js` — already built, 68 tests passing,
+documented in `docs/CONSOLIDATED_BOT.md`, and per `docs/CONSOLIDATED_DEPLOYMENT.md`
+apparently verified live on 2026-09-13) was **never actually mounted onto
+the running Express app** — `grep -i consolidated server/mock-trading-server.js`
+returned zero matches before this fix. So `/api/consolidated/*` never
+existed and `registerConsolidatedBot`'s own 15s autostart scan loop never
+ran, despite `server/data/consolidated/testnet-state.json` already showing
+`enabled: true` (a stale, inert flag from the 2026-09-13 session — nothing
+was reading it). This is exactly what "Wallet 10 — Consolidated" always
+showing "No A-grade setup available after scanning preferred symbols" in the
+main scanner was masking: that message comes from `buildBot10SignalSnapshot`
+in `server/strategy/bots5to8.js`, a deliberate `notReady` placeholder
+("Bot 10 ranks Bots 1-8 through its dedicated consolidated selector...") —
+by design, so the regular wallet scanner never double-executes Bot 10. The
+REAL Bot 10 logic (rank all 8 source engines' ready setups through the
+frozen decision tree, take the best) only ever lived in the separate,
+unmounted module.
+
+Fix: added `import { registerConsolidatedBot } from './consolidated-bot.js'`
+and, inside the existing `if (IS_MAIN_MODULE) { ... }` guard (same
+`XENIOS_SERVER_AUTOSTART=off` safety switch as everything else, so a dynamic
+test-import still doesn't spin this up), a new
+`getConsolidatedTestnetCredentials()` (mirrors the existing
+`settings.apiKey`/`secretKey` + env-fallback pattern used elsewhere) and the
+`registerConsolidatedBot(app, { dataDir, fetchKlines, toCandleData,
+buildSignalAnalysisSnapshot, getSettings, getTestnetCredentials, autostart:
+IS_MAIN_MODULE })` call, right before the existing scheduled-task
+`setInterval`s.
+
+**Verified after restart** (not just "no crash"): `server/data/consolidated/paper-state.json`'s
+`lastScanAt` is advancing every ~15s in real time (confirmed two reads 15s
+apart), `signals: 32` (8 source bots x 4 symbols — matches the
+`docs/CONSOLIDATED_DEPLOYMENT.md` figure exactly), `errors: []`. So Bot 10 is
+now genuinely live-scanning. `paper-state.json.enabled` is `false` (paper
+entries correctly restart paused, per its own doc) but testnet `enabled:
+true` persisted through the restart, so **testnet order placement is live**
+right now, capped at 100 USDT notional / 1x leverage / 3 USDT daily loss
+cutoff / 3 trades per day, pausable any time from `/consolidated-bot`. Its
+strategy is still explicitly documented as research-only / negative
+expectancy (holdout profit factor 0.745, avg -0.197 R) — this fix makes it
+actually run, it does not make it a validated profitable strategy.
+
+`npm test` after this change: still 66/68 (same 2 pre-existing
+`test/bots5to8.test.js` failures noted below, unrelated).
+
+### Cross-bot forecast now influences live entry + take-profit — 2026-09-15
+
+Owner asked to take the draft 60-candle forecast (the chart-drawn consensus
+from the session above) and actually feed it into each bot's real entry
+scoring and take-profit — not just draw it. Confirmed design via
+AskUserQuestion before touching `runAutoTrader()` (the real trade-execution
+path): (1) entry = soft nudge to the AI entry score, same bounded/asymmetric
+mechanism as the existing chart-pattern nudge, never a hard gate; (2)
+take-profit = bounded, **extension-only** blend toward the forecast's
+projected price, capped at 1.5x the bot's own planned TP distance, only when
+the forecast agrees with the bot's own direction; (3) applies wherever a
+wallet is scanned through `runAutoTrader` (in practice Bots 1-9 — Bot 10 is
+architecturally separate, see below); (4) **leave-one-out** — a bot reacts to
+the *other* bots' consensus, never partly to its own vote, to avoid a
+feedback loop (the forecast is built from every bot's own entry/TP output).
+
+New in `src/lib/chartForecast.js`: `computeSixtyCandleForecast` takes an
+optional `{ excludeModelId }` (backward compatible — the chart's own call
+site is unaffected).
+
+New in `server/mock-trading-server.js` (mirrors the existing
+`applyPatternAiNudge` right above it):
+- `applyForecastAiNudge(decision, forecastAgreement)` — ±6 confirm / ∓14
+  oppose on the AI entry score (same weights and same "can't flip a
+  bootstrap accept" rule as the pattern nudge).
+- `applyForecastTakeProfitBlend(candidate, forecast)` — only fires when
+  `forecast.direction === candidate.direction` AND the forecast implies MORE
+  room than the candidate's own TP; blends 30% of the way toward the
+  forecast price, capped so the forecast distance is never trusted past 1.5x
+  the bot's own planned distance.
+- `getAllModelSnapshotsForSymbol(symbol)` (inside `runAutoTrader`, alongside
+  the existing `getSymbolInputs` cache) — computes every `SIGNAL_MODELS`
+  entry's full `buildSignalAnalysisSnapshot` for one symbol, reusing the
+  already-cached klines (pure CPU, no extra Binance calls), cached per
+  symbol per run so it only runs once even though multiple wallets may share
+  a symbol.
+- `getLeaveOneOutForecastForCandidate(candidate)` — `computeSixtyCandleForecast`
+  over that map with the candidate's own `signalModelId` excluded.
+- Wired in right after a wallet's `candidate` is chosen (before the AI
+  filter block): TP blend applied first (mutates `candidate.takeProfit`
+  in place, safe — nothing before `recordTrade` reads the old value), then
+  inside `if (aiFilterDecision)`, the forecast nudge runs immediately after
+  the existing pattern nudge, stacking on top of it. Both log a
+  `pushWalletStep` line when they actually move something. The trade record's
+  `aiDecision` now also carries `forecastAgreement` / `forecastScoreDelta` /
+  `forecastDirection` / `forecastPercent` for the journal.
+
+**Bot 10 note:** `SIGNAL_MODELS` includes `model-10`, but it has no
+independent technical-analysis logic of its own —
+`server/strategy/bots5to8.js`'s `buildBot10SignalSnapshot` is a `notReady`
+placeholder ("Bot 10 ranks Bots 1-8 through its dedicated consolidated
+selector"). So it safely contributes an inert `WAIT` vote to every other
+bot's forecast without polluting it, and — since `model-10` never appears as
+a `wallet.assignedSignalModelId` inside `runAutoTrader` (Bot 10 runs through
+its own separate `consolidated-bot.js` / `consolidated-testnet.js`) — this
+change never touches Bot 10's own frozen selector at all, by construction,
+not by an explicit exclusion.
+
+**Verification before restart:** `node --check` clean; dynamic-imported the
+module with `XENIOS_SERVER_AUTOSTART=off` (no import-time errors); ran the
+new pure functions against synthetic candidates (agree/oppose/neutral nudge,
+extend/no-shrink/oppose-blocked/no-consensus-blocked/capped-extension TP
+blend) — all matched the intended bounds; `npm test` → 66/68 pass, the 2
+failures (`test/bots5to8.test.js`, asserting exactly 8 signal models /
+`BOT5TO8_BUILDERS` mapping only 5-8) are **pre-existing** stale expectations
+from before Bot 9/10 existed (confirmed via `git stash` against the last
+commit `c0b9064` — unrelated to this change, already flagged as housekeeping
+debt). `npm run build` clean, `dist/` deployed, `pm2 restart xeniostrade-api`
+— came up online, no crash loop, `xeniostrade-api-error.log` empty after
+restart, one scan cycle completed cleanly (`No enabled wallet found a
+qualifying setup` — didn't yet exercise the new candidate-found path; a
+second wallet-appropriate scan pass is still needed to see the new
+pushWalletStep lines fire for real, since the scan is 5 minutes and this was
+checked right after restart).
+
+**If a wallet reports something unexpected from the AI score or take-profit
+after this**: check that wallet's steps in the terminal monitor / auto-trade
+log for `"Other-bot consensus forecast"` lines — they name the exact
+direction/percent/confidence that drove the nudge or blend, so it's fully
+traceable per-trade via the same `aiDecision.forecastAgreement` /
+`forecastDirection` / `forecastPercent` fields now stored on the trade
+record.
+
+### Draft 60-candle forecast line on the Market chart — 2026-09-15 (earlier)
+
+### Draft 60-candle forecast line on the Market chart — 2026-09-15
+
+Owner asked for a draft directional forecast built from the signal each bot
+already produces for the selected symbol (`signalModelAnalyses` in `App.jsx`,
+one entry per `SIGNAL_MODELS` bot, refreshed every 15s via
+`/api/signal-model-analysis`), drawn as a straight line **inside the
+candlestick chart itself** (first pass put it in a separate side panel —
+corrected same session).
+
+New `src/lib/chartForecast.js` — `computeSixtyCandleForecast(modelAnalyses)`
+— takes a weighted vote across every bot's current `direction`
+(`LONG`/`SHORT`/`WAIT`; weight = 1.4× if `ready` else 0.6×, scaled by
+`score/maxScore`), picks the majority side, and sizes the move as the
+weighted-average `|takeProfit - entryPrice| / entryPrice` among the agreeing
+bots.
+
+`CandlestickChart.jsx` now has a dedicated `forecast` LineSeries (added
+alongside `ema`/`ma`/`rsi` in `seriesRef` at chart creation) that draws a
+line from the latest close out to `FORECAST_HORIZON_CANDLES` (60) candles
+ahead, `title` shows the signed percent, redrawn only when the forecast
+direction/percent or the latest closed-candle bucket changes
+(signature-gated, same pattern as the existing pattern-overlay and
+bot-overlay effects, so it doesn't fight the pan/zoom fix from 2026-08-30).
+`CHART_SCENARIO_RIGHT_OFFSET` (the chart's `timeScale.rightOffset`,
+previously a fixed 14) is now `FORECAST_HORIZON_CANDLES + 4` so the full
+projected line is visible by default without scrolling.
+
+**Restyled same session** after the owner shared a reference screenshot
+(their own Market chart with a hand-drawn-looking orange squiggle sketched
+over the future space): swapped the 2-point straight diagonal for a
+hand-sketch wave — new `buildForecastWavePoints()` in `chartForecast.js`
+rides a damped sine over the straight trend line (amplitude scales with the
+forecast's move size, floored so small percents still wiggle visibly; ~2.25
+oscillations; forced to land exactly on the projected target price at the
+end) — and switched the series to `lineType: LineType.Curved` (2), solid
+`lineStyle: 0`, fixed amber `#f59e0b` (matches the reference regardless of
+LONG/SHORT — direction is read from the `title` label instead), `lineWidth: 3`.
+
+`src/components/ForecastPanel.jsx` (still under the chart, wired into
+`renderDashboardMarket()`) no longer draws its own graph — it's now just the
+reasoning behind the chart's line: direction/percent badge, confidence, and
+the per-bot vote list (which bots agree, which are opposed or waiting).
+
+This is a linear extrapolation of current bot consensus, not a trained or
+backtested prediction — labeled "(Draft)" in the UI on purpose. `npm run
+build` ran clean both passes; `dist/` copied to `/var/www/xeniostrade`
+(frontend-only change, no pm2 restart needed — hard-refresh to see it).
+
+**Possible next step if the owner wants to iterate:** weight each bot's vote
+by its trained win-rate from `SignalInsightsPanel`'s dataset instead of just
+score/maxScore; consider a widening cone (min/max) instead of one straight
+line once there's a real backtest to size it against.
+
+### Previous: All-bot USDCUSDT automated-trading exclusion — 2026-09-13
+
+User requested an all-bot rule preventing USDCUSDT trades. Added the server-side `AUTOMATED_TRADE_SYMBOL_BLOCKLIST` to exclude USDCUSDT when volatility refreshes build the preferred list, when the automated execution universe is resolved, and when each wallet's model-specific scan is formed. This is a defense-in-depth automatic-bot rule: saved or manually reintroduced preferences cannot route USDCUSDT to any bot. Existing trade history and positions were not altered. Server check and restart verification recorded after deployment.
+
+### Previous: Consolidated bot testnet integration — 2026-09-13
+
+User requested deployment of the locally researched eight-source consolidated bot for actual testnet execution. Targeted integration preserves the newer real-money dashboard and all settings/recovery files. Frozen artifacts summarize 949,661 audited stored rows; holdout 298 trades, 34.23% wins, 0.745 profit factor: research-only, not a validated profitable strategy.
+
+New route `/consolidated-bot` and `/api/consolidated/*`; separate paper and testnet ledgers. Testnet-only fixed endpoint, 1x isolated, 100 USDT notional cap, modeled 1 USDT stop risk, three entries/day, 3 USDT realized-loss cutoff. Existing exchange entries share a lock and respect consolidated symbol reservations. Durable order intent, reduce-only protection, reconciliation, and emergency-close handling are included. Testnet enabled state persists on restart; paper restarts paused. No live-money execution enabled. See `docs/CONSOLIDATED_BOT.md` for controls and caveats. Backups/staging: `/home/xenios/app-backups/consolidated-20260913/`.
+
+Deployment verification and activation status are recorded in `docs/CONSOLIDATED_DEPLOYMENT.md`. Do not infer executed trades from an enabled state; inspect the separate testnet ledger. Never overwrite runtime state or run a second server against production data.
+
+### Previous: Real-money dashboard control page follow-up (frontend rebuilt and deployed)
+
+Dashboard -> Real Money Trading now has a clearer live-money control surface:
+status cards for live-trade lock/sync/readiness, a summary row for assigned bot,
+funding balance, available balance, realized P/L, and win rate, plus a bot
+assignment selector wired to `strategy.realMoneySignalModelId`. It also receives
+`aiTrainingStatus` so the page can show the reviewed-trade gate progress. This
+remains UI/control-state only: live order placement is still intentionally
+disabled, matching `GO_LIVE_READINESS.md`. Ran `npm run build` and copied
+`dist/` to `/var/www/xeniostrade`.
+
+### Real-money wallet, live-API credential, and journal scaffolding (deployed — pm2 restarted, dist rebuilt)
+
+Owner asked to "prepare the system for real money trading so that we just need
+to add the API for it when real money trading is on." This is infrastructure
+only — **no order-placement code path was touched**, so `GO_LIVE_READINESS.md`'s
+answer stays **NO** exactly as before. What changed:
+
+1. **Wallet model gets an `environment` field** (`src/lib/wallets.js`):
+   `TESTNET` (existing main + 8 bot wallets, unchanged behavior) vs
+   `REAL_MONEY` (new). New default wallet `wallet-real-money` (kind `MAIN`,
+   `balanceMode: EXCHANGE_SYNC`, `syncProvider: BINANCE_FUTURES_LIVE`,
+   `enabled: false`, `manualBalance: 0`) is synthesized automatically by
+   `normalizeWallets` the same way the other 9 always have been — no manual
+   settings.json edit was needed. `getMainWallet(wallets, environment)` now
+   takes an environment (defaults to `TESTNET`, so every existing call site is
+   unaffected); new `getRealMoneyWallet()` / `isRealMoneyWallet()` /
+   `isTestnetWallet()` exports. **Fixed a latent collision**: with a second
+   `MAIN`-kind blueprint, `findMatchingWallet` would have matched both
+   blueprints to the same incoming `wallet-main` row (untagged legacy wallets
+   have no `environment` field) and produced two wallets sharing one id — now
+   matches main-kind wallets by environment too, with "untagged = testnet".
+   Verified with a throwaway script against the live `wallet-main` (real
+   $853.45 synced balance) before touching the running server — no collision,
+   old wallet's data untouched, new wallet synthesized clean.
+2. **Live Binance Futures credentials** (`server/mock-trading-server.js`):
+   new `liveApiKey`/`liveSecretKey` settings fields, stored, masked, and
+   self-healed via the recovery snapshot exactly like the existing testnet
+   `apiKey`/`secretKey` (mirrored through `normalizeSettings`,
+   `buildSettingsRecoverySnapshot`, `getSettingsRecoverySnapshot`,
+   `inspectSettingsRegressionRisk`, `selfHealSettingsIfNeeded`,
+   `mergeSettingsUpdate`, `sanitizeSettingsForClient`, and the settings audit
+   log). `getEffectiveCredentials(settings, environment)` now branches on
+   environment; new `futuresLiveBaseUrl` (`fapi.binance.com`) +
+   `getFuturesBaseUrl(environment)`. **Only wired into the read-only wallet
+   balance sync** (`syncExchangeWalletBalance` picks creds + base URL from the
+   wallet being synced) — every order-placement function
+   (`placeBinanceOrder`, `setBinanceLeverage`, etc.) still defaults to the
+   testnet base URL and was not touched, since the real-money wallet is `MAIN`
+   kind and therefore structurally excluded from `getTradingWallets()` / the
+   auto-trade loop. It can never place an order regardless of what credentials
+   are saved.
+3. **Wallets page** (`WalletsPage.jsx`): new Testnet / Real Money tab toggle.
+   Testnet tab is the unchanged existing UI. Real Money tab shows a single
+   `RealMoneyWalletCard` (red/danger theme) with its own Sync Now, guardrail
+   copy, and an explicit "no bot places live orders yet" banner.
+4. **Settings → API Credentials**: new "Real Money — Binance Futures Live API"
+   panel below the existing testnet one, same present/masked pattern, red
+   warning banner reiterating that saving keys here does not enable trading.
+5. **Journal → Real Money Journal** (new tab, `JournalRealMoneyPage` in
+   `JournalSummaryPage.jsx`): shows the real-money wallet's live funding
+   balance/sync status, and a wallet-calendar section that activates
+   automatically once a real-money *trading* wallet exists (none does yet, so
+   today it shows "no live trades yet"). Server's `/api/journal-summary` now
+   also returns `realMoneyMainWallet`.
+
+**Verified before/after restart:** `node --test` 51/51 both before and after;
+`npm run build` clean; imported the server module standalone
+(`XENIOS_SERVER_AUTOSTART=off`) and inspected `getSettings()` output against
+the live `server/data/settings.json` before restarting pm2. `pm2 restart
+xeniostrade-api` came back clean (`AI: READY`, 4 open testnet trades intact,
+`Wallets 8 enabled` unchanged). `npm run build` output redeployed to `dist/`.
+
+**Gotcha for next session:** a stray diagnostic `node -e` import of the new
+module (before the pm2 restart) called `getSettings()`, which triggered the
+existing auto-heal-on-read path and wrote the new wallet + `liveApiKey`/
+`liveSecretKey` fields into the *live* `settings.json` while the *old* pm2
+process was still running. The old process's own next read-normalize-write
+cycle (old code, fixed-shape `normalizeSettings`) dropped the two new
+top-level fields again and kept the new wallet only as an untyped "extra"
+entry — harmless (still `MAIN` kind, still disabled, still excluded from
+trading) but a reminder: **don't import `mock-trading-server.js` and call
+`getSettings()`/anything that can write while the live pm2 process is running
+old code** — either restart pm2 first, or test against a copied settings.json.
+
+**Not done (deliberately out of scope — this was infra prep, not a go-live
+step):** no bot wallet has a `REAL_MONEY` environment yet, so the Real Money
+Journal has nothing to show; no order-placement function reads live
+credentials or the live base URL; `normalizeWallets`' final mapping loop still
+hard-codes every non-main wallet to `MANUAL`/local-paper, so a "real-money bot
+wallet" that actually executes live orders does not exist yet and would need
+its own careful design (that hard-coded branch, plus threading `baseUrl`
+through the order-placement functions, plus a real execution-path review) —
+exactly the "Live execution path unreviewed" gap `GO_LIVE_READINESS.md` already
+called out.
+
+---
+
+## WHERE WE LEFT OFF  — as of 2026-09-04
+
+### Bots 1–4: AI entry reversed to win-biased + AI loss-minimising early exit (uncommitted, needs pm2 restart)
+
+All in `server/mock-trading-server.js`:
+
+1. **Entry (`scoreCandidateWithAiFilter`)** — new `WIN_BIASED_SIGNAL_MODELS`
+   set (`model-1..4`). For those bots the loss-averse asymmetry is flipped:
+   winning setup families rewarded ×3.2 (up to +32) / losers only ×1.6 (−16);
+   win-rate >50 lifts ×0.7 / <50 trims ×0.3; `provenLoser` force-skip disabled;
+   new `provenWinner` (reliable family, win rate ≥50% or avgReward ≥1) lifts the
+   score to `threshold + 12`. Bots 5–8 untouched (still loss-averse).
+2. **Exit — new `evaluateAiLossExit()`**, wired into `updateOpenTrades()` next
+   to the Bot 4 money stop. Only for `model-1..4`, only on a losing open trade,
+   only once it is ≥35 % of the way to its stop (`AI_EARLY_EXIT_MIN_DRAWDOWN_FRACTION`).
+   Scores 0–100 from the backtest **losing-trade profile** for the trade's setup
+   family (sub-50 % win rate = dominant term, negative avgReward adds, a
+   positive-expectancy family subtracts) + live behaviour (drawdown fraction ×42,
+   +12 gave-back-profit, +10/+18 stalled 90 m/4 h). Score ≥ `AI_EARLY_EXIT_SCORE`
+   (60) → close at mark price as `CLOSED_SL`/`SL` with an `aiLossExit` metadata
+   block. Winners and bots 5–8 are never touched. Verified by an in-process
+   harness against the live `learning-bot-train-status.json`: model-1 exits
+   ~dd 0.85 (or dd 0.5 + stalled/gave-back), model-4 (worst avgReward) by ~dd 0.6.
+   `node --test` (51/51) still green.
+
+**Still to do:** `npx pm2 restart xeniostrade-api` to load it; watch the AI
+early-exit terminal lines and whether realised losses on 1–4 shrink vs the full
+stop. Thresholds/weights are module constants — tune in place.
+
+---
+
+## Earlier — as of 2026-08-31 17:30 UTC
 
 ### −1 USD hard money-stop backtest (Bots 1–3) — done, still net-negative
 

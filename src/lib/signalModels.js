@@ -451,20 +451,15 @@ function normalizeSignalModelStrategyOverride(modelId, override, strategy = {}) 
 
 export function normalizeSymbolRiskProfiles(profiles = {}) {
   if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return {}
-
-  return Object.fromEntries(
-    Object.entries(profiles)
-      .map(([rawSymbol, rawProfile]) => {
-        const symbol = String(rawSymbol || '').trim().toUpperCase()
-        if (!symbol || !rawProfile || typeof rawProfile !== 'object' || Array.isArray(rawProfile)) return null
-        const leverage = toFiniteNumber(rawProfile.leverage)
-        const stopLossPercent = toFiniteNumber(rawProfile.stopLossPercent)
-        const takeProfitPercent = toFiniteNumber(rawProfile.takeProfitPercent)
-        if (leverage <= 0 || stopLossPercent <= 0 || takeProfitPercent <= 0) return null
-        return [symbol, { leverage, stopLossPercent, takeProfitPercent }]
-      })
-      .filter(Boolean),
-  )
+  return Object.fromEntries(Object.entries(profiles).map(([rawSymbol, rawProfile]) => {
+    const symbol = String(rawSymbol || '').trim().toUpperCase()
+    const leverage = Number(rawProfile?.leverage)
+    const stopLossPercent = Number(rawProfile?.stopLossPercent)
+    const takeProfitPercent = Number(rawProfile?.takeProfitPercent)
+    return symbol && Number.isFinite(leverage) && leverage > 0 && Number.isFinite(stopLossPercent) && stopLossPercent > 0 && Number.isFinite(takeProfitPercent) && takeProfitPercent > 0
+      ? [symbol, { leverage, stopLossPercent, takeProfitPercent }]
+      : null
+  }).filter(Boolean))
 }
 
 function calculateMarginFromNotional(notional, leverage) {
@@ -623,10 +618,6 @@ export const SIGNAL_MODELS = [
     totalSignals: model11Signals.length,
     professionalSignalCount: 0,
     signals: model11Signals,
-    // Kept small and fixed so the live Claude API is only ever called for a
-    // handful of symbols per scan — this is a real, metered API call, not a
-    // free technical-indicator computation.
-    fixedUniverseSymbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'],
   },
 ]
 
@@ -700,9 +691,7 @@ export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runnin
   const strategyOverride = signalModelStrategies[signalModel.id] || null
   const resolvedSymbol = String(symbol || '').trim().toUpperCase()
   const symbolRiskProfiles = normalizeSymbolRiskProfiles(strategy?.symbolRiskProfiles)
-  const symbolRiskProfile = strategyOverride?.useSymbolRiskProfile !== false && resolvedSymbol
-    ? symbolRiskProfiles[resolvedSymbol] || null
-    : null
+  const symbolRiskProfile = strategyOverride?.useSymbolRiskProfile !== false && resolvedSymbol ? symbolRiskProfiles[resolvedSymbol] || null : null
   const baseStrategy = {
     ...strategy,
     ...(resolvedBot3RiskPresetId ? { bot3RiskPresetId: resolvedBot3RiskPresetId } : {}),
@@ -735,10 +724,7 @@ export function getEffectiveSignalModelStrategy(strategy = {}, modelId, { runnin
   const riskPerTradePercent = Math.max(toFiniteNumber(riskProfile.riskPerTradePercent), 0)
   const dailyMaxLossPercent = Math.max(toFiniteNumber(riskProfile.dailyMaxLossPercent), 0)
   const estimatedStopLossPercent = Math.max(
-    toFiniteNumber(
-      symbolRiskProfile?.stopLossPercent ?? riskProfile.estimatedStopLossPercent,
-      resolvedBaseStrategy.stopLossPercent,
-    ),
+    toFiniteNumber(symbolRiskProfile?.stopLossPercent ?? riskProfile.estimatedStopLossPercent, resolvedBaseStrategy.stopLossPercent),
     0,
   )
   const configuredRiskAmount = resolvedRunningBalance > 0

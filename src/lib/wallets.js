@@ -8,9 +8,18 @@ export const EXCHANGE_SYNC_WALLET_BALANCE_MODE = 'EXCHANGE_SYNC'
 export const PHASE_1_WALLET_STAGE = 'PHASE_1'
 export const PHASE_2_WALLET_STAGE = 'PHASE_2'
 export const DEFAULT_WALLET_SYNC_PROVIDER = 'BINANCE_FUTURES'
+export const REAL_MONEY_WALLET_SYNC_PROVIDER = 'BINANCE_FUTURES_LIVE'
 export const MAIN_WALLET_KIND = 'MAIN'
 export const BOT_WALLET_KIND = 'BOT'
 export const MAIN_WALLET_ID = 'wallet-main'
+// Testnet wallets run on Binance Futures Testnet demo funds. Real-money wallets
+// are the live-funds counterpart, kept separate end to end (credentials, sync
+// provider, journal) so no live order can ever be routed through a testnet
+// wallet or vice versa.
+export const TESTNET_WALLET_ENVIRONMENT = 'TESTNET'
+export const REAL_MONEY_WALLET_ENVIRONMENT = 'REAL_MONEY'
+export const DEFAULT_WALLET_ENVIRONMENT = TESTNET_WALLET_ENVIRONMENT
+export const REAL_MONEY_WALLET_ID = 'wallet-real-money'
 // 6000+ USDT Binance Futures Testnet demo funds split across the bot wallets.
 export const DEFAULT_BOT_WALLET_COUNT = 11
 export const DEFAULT_BOT_ALLOCATION_USDT = 750
@@ -19,6 +28,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: MAIN_WALLET_ID,
     kind: MAIN_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Main Wallet',
     colorKey: 'slate',
     balanceMode: EXCHANGE_SYNC_WALLET_BALANCE_MODE,
@@ -27,6 +37,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-1',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 1',
     assignedSignalModelId: 'model-1',
     colorKey: 'sky',
@@ -35,6 +46,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-2',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 2',
     assignedSignalModelId: 'model-2',
     colorKey: 'emerald',
@@ -43,6 +55,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-3',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 3',
     assignedSignalModelId: 'model-3',
     colorKey: 'amber',
@@ -51,6 +64,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-4',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 4',
     assignedSignalModelId: 'model-4',
     colorKey: 'rose',
@@ -59,6 +73,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-5',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 5',
     assignedSignalModelId: 'model-5',
     colorKey: 'violet',
@@ -67,6 +82,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-6',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 6',
     assignedSignalModelId: 'model-6',
     colorKey: 'cyan',
@@ -75,6 +91,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-7',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 7',
     assignedSignalModelId: 'model-7',
     colorKey: 'fuchsia',
@@ -83,6 +100,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-8',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 8',
     assignedSignalModelId: 'model-8',
     colorKey: 'lime',
@@ -91,6 +109,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-9',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 9 — Experimental',
     assignedSignalModelId: 'model-9',
     colorKey: 'orange',
@@ -101,6 +120,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-10',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 10 — Consolidated',
     assignedSignalModelId: 'model-10',
     colorKey: 'blue',
@@ -109,12 +129,22 @@ const DEFAULT_WALLET_BLUEPRINTS = [
   {
     id: 'wallet-model-11',
     kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
     name: 'Wallet 11 — Bot Claude',
     assignedSignalModelId: 'model-11',
     colorKey: 'teal',
     // Small forward-test allocation, same reasoning as Wallet 9: this is a
     // testnet ledger allocation, and every decision is a metered live LLM call.
     allocationBalance: 100,
+  },
+  {
+    id: REAL_MONEY_WALLET_ID,
+    kind: MAIN_WALLET_KIND,
+    environment: REAL_MONEY_WALLET_ENVIRONMENT,
+    name: 'Real Money Wallet',
+    colorKey: 'crimson',
+    balanceMode: EXCHANGE_SYNC_WALLET_BALANCE_MODE,
+    manualBalance: 0,
   },
 ]
 
@@ -139,12 +169,26 @@ export function normalizeWalletBalanceMode(balanceMode) {
     : MANUAL_WALLET_BALANCE_MODE
 }
 
+export function normalizeWalletEnvironment(environment) {
+  return String(environment || DEFAULT_WALLET_ENVIRONMENT).toUpperCase() === REAL_MONEY_WALLET_ENVIRONMENT
+    ? REAL_MONEY_WALLET_ENVIRONMENT
+    : TESTNET_WALLET_ENVIRONMENT
+}
+
 export function isMainWallet(wallet = {}) {
   return normalizeWalletKind(wallet.kind || (wallet.id === MAIN_WALLET_ID ? MAIN_WALLET_KIND : BOT_WALLET_KIND)) === MAIN_WALLET_KIND
 }
 
 export function isTradingWallet(wallet = {}) {
   return !isMainWallet(wallet)
+}
+
+export function isRealMoneyWallet(wallet = {}) {
+  return normalizeWalletEnvironment(wallet.environment) === REAL_MONEY_WALLET_ENVIRONMENT
+}
+
+export function isTestnetWallet(wallet = {}) {
+  return !isRealMoneyWallet(wallet)
 }
 
 export function isExchangeSyncWallet(wallet = {}) {
@@ -210,9 +254,12 @@ export function getWalletAllocationFundingBalance(wallet = {}) {
 
 export function createDefaultWallet(blueprint, overrides = {}) {
   const kind = normalizeWalletKind(overrides.kind || blueprint.kind)
-  const balanceMode = kind === MAIN_WALLET_KIND
-    ? EXCHANGE_SYNC_WALLET_BALANCE_MODE
-    : MANUAL_WALLET_BALANCE_MODE
+  const environment = normalizeWalletEnvironment(overrides.environment || blueprint.environment)
+  const balanceMode = normalizeWalletBalanceMode(
+    overrides.balanceMode
+    || blueprint.balanceMode
+    || (kind === MAIN_WALLET_KIND ? EXCHANGE_SYNC_WALLET_BALANCE_MODE : MANUAL_WALLET_BALANCE_MODE),
+  )
   const assignedSignalModelId = kind === MAIN_WALLET_KIND
     ? null
     : ensureSignalModelId(overrides.assignedSignalModelId || blueprint.assignedSignalModelId || DEFAULT_SIGNAL_MODEL_ID)
@@ -221,10 +268,14 @@ export function createDefaultWallet(blueprint, overrides = {}) {
     ...overrides,
     kind,
   })
+  const defaultSyncProvider = environment === REAL_MONEY_WALLET_ENVIRONMENT
+    ? REAL_MONEY_WALLET_SYNC_PROVIDER
+    : DEFAULT_WALLET_SYNC_PROVIDER
 
   return {
     id: String(overrides.id || blueprint.id),
     kind,
+    environment,
     name: String(overrides.name || blueprint.name),
     enabled: kind === MAIN_WALLET_KIND ? false : (overrides.enabled == null ? true : Boolean(overrides.enabled)),
     stage: normalizeWalletStage(overrides.stage, balanceMode),
@@ -238,7 +289,7 @@ export function createDefaultWallet(blueprint, overrides = {}) {
       kind === MAIN_WALLET_KIND ? blueprint.manualBalance : allocationBalance,
     )),
     production: {
-      syncProvider: String(overrides.production?.syncProvider || DEFAULT_WALLET_SYNC_PROVIDER),
+      syncProvider: String(overrides.production?.syncProvider || defaultSyncProvider),
       syncStatus: String(overrides.production?.syncStatus || 'NOT_CONNECTED'),
       lastSyncedBalance: overrides.production?.lastSyncedBalance == null
         ? null
@@ -270,10 +321,16 @@ function findMatchingWallet(blueprint, incomingWallets = []) {
   }
 
   if (blueprint.kind === MAIN_WALLET_KIND) {
-    return incomingWallets.find((wallet) => (
-      normalizeWalletKind(wallet.kind || (wallet.id === MAIN_WALLET_ID ? MAIN_WALLET_KIND : BOT_WALLET_KIND)) === MAIN_WALLET_KIND
-      || (isExchangeSyncWallet(wallet) && !wallet.assignedSignalModelId)
-    )) || null
+    const blueprintEnvironment = normalizeWalletEnvironment(blueprint.environment)
+    return incomingWallets.find((wallet) => {
+      const walletLooksLikeMain = normalizeWalletKind(wallet.kind || (wallet.id === MAIN_WALLET_ID ? MAIN_WALLET_KIND : BOT_WALLET_KIND)) === MAIN_WALLET_KIND
+        || (isExchangeSyncWallet(wallet) && !wallet.assignedSignalModelId)
+      // A wallet with no environment tag at all is legacy data — only ever the
+      // original testnet main wallet, so treat "untagged" as testnet. This
+      // keeps the new real-money blueprint from adopting the existing main
+      // wallet's id/balance the first time it's synthesized.
+      return walletLooksLikeMain && normalizeWalletEnvironment(wallet.environment) === blueprintEnvironment
+    }) || null
   }
 
   const assignedMatch = incomingWallets.find((wallet) => (
@@ -328,11 +385,7 @@ export function normalizeWallets(rawWallets = []) {
       }
     }
 
-    return {
-      ...wallet,
-      balanceMode: MANUAL_WALLET_BALANCE_MODE,
-      stage: PHASE_1_WALLET_STAGE,
-    }
+    return wallet
   })
 }
 
@@ -341,8 +394,15 @@ export function getWalletById(walletId, wallets = []) {
   return normalizedWallets.find((wallet) => wallet.id === walletId) || null
 }
 
-export function getMainWallet(wallets = []) {
-  return normalizeWallets(wallets).find((wallet) => isMainWallet(wallet)) || null
+export function getMainWallet(wallets = [], environment = TESTNET_WALLET_ENVIRONMENT) {
+  const targetEnvironment = normalizeWalletEnvironment(environment)
+  return normalizeWallets(wallets).find((wallet) => (
+    isMainWallet(wallet) && normalizeWalletEnvironment(wallet.environment) === targetEnvironment
+  )) || null
+}
+
+export function getRealMoneyWallet(wallets = []) {
+  return getMainWallet(wallets, REAL_MONEY_WALLET_ENVIRONMENT)
 }
 
 export function getTradingWallets(wallets = []) {
@@ -376,14 +436,21 @@ export function getTotalWalletStartingBalance(wallets = []) {
 }
 
 export function inferWalletIdFromTrade(trade, wallets = []) {
+  // An explicit walletId pointing at a MAIN-kind wallet (the testnet Main
+  // Wallet or the Real Money Wallet) must be honored as-is. Checking it only
+  // against getTradingWallets() (bot wallets) below would silently reassign
+  // every real-money trade to its bot's testnet reference wallet on the next
+  // read/hydrate pass - which breaks that wallet's own open-position/daily
+  // risk caps (they filter trade history by exact walletId match).
+  const allWallets = normalizeWallets(wallets)
+  const explicitWalletId = String(trade?.walletId || '').trim()
+  if (explicitWalletId && allWallets.some((wallet) => wallet.id === explicitWalletId)) {
+    return explicitWalletId
+  }
+
   const normalizedWallets = getTradingWallets(wallets)
   if (normalizedWallets.length === 0) {
     return null
-  }
-
-  const explicitWalletId = String(trade?.walletId || '').trim()
-  if (explicitWalletId && normalizedWallets.some((wallet) => wallet.id === explicitWalletId)) {
-    return explicitWalletId
   }
 
   const signalModelId = String(trade?.signalModelId || '').trim()

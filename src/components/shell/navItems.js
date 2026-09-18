@@ -20,6 +20,7 @@ export const NAV_GROUPS = [
           { to: '/dashboard', label: 'Overview' },
           { to: '/dashboard/market', label: 'Market' },
           { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
+          { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
           { to: '/dashboard/workflow', label: 'Workflow Notifications' },
           { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
           { to: '/dashboard/codex', label: 'Codex Console' },
@@ -36,7 +37,15 @@ export const NAV_GROUPS = [
           { to: '/mock-trading/auto-trade-activity', label: 'Auto Trade Activity' },
         ],
       },
-      { to: '/trade-history', label: 'Trade History', Icon: History },
+      {
+        to: '/trade-history',
+        label: 'Trade History',
+        Icon: History,
+        children: [
+          { to: '/trade-history', label: 'Testnet Trades' },
+          { to: '/trade-history/real-money', label: 'Real Money Trades' },
+        ],
+      },
     ],
   },
   {
