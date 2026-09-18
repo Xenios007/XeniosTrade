@@ -62,7 +62,22 @@ import {
 import { getCodexConsoleStatus, runCodexConsoleTurn } from './codex-console.js'
 import { BOT5TO8_BUILDERS } from './strategy/bots5to8.js'
 import { refreshBotClaudeDecisions } from './strategy/bot-claude.js'
+import { refreshBotGptDecisions } from './strategy/bot-gpt.js'
+import { refreshBotGeminiDecisions } from './strategy/bot-gemini.js'
+import { refreshBotGrokDecisions } from './strategy/bot-grok.js'
+import { refreshBotOpenrouterDecisions } from './strategy/bot-openrouter.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
+
+// One entry per LLM-driven bot (model-11..15). Refreshing a decision is the
+// only async step in an otherwise-synchronous scan/dispatch pipeline - see
+// llm-trading-engine.js for why each bot keeps its own decision cache.
+const LLM_BOT_DECISION_REFRESHERS = {
+  'model-11': refreshBotClaudeDecisions,
+  'model-12': refreshBotGptDecisions,
+  'model-13': refreshBotGeminiDecisions,
+  'model-14': refreshBotGrokDecisions,
+  'model-15': refreshBotOpenrouterDecisions,
+}
 
 dotenv.config()
 
@@ -388,8 +403,13 @@ const defaultLearningBotSettings = {
     // testnet-scoped through the server's exchange credentials and small risk profile.
     'model-9': { enabled: true, paperOnly: false, thresholdScore: 45 },
     'model-10': { enabled: true, paperOnly: false, thresholdScore: 45 },
-    // Bot 11 "Bot Claude" is a live LLM-driven experiment, same posture as Bot 9/10.
+    // Bots 11-15 "Bot Claude / GPT / Gemini / Grok / OpenRouter" are live
+    // LLM-driven experiments, same posture as Bot 9/10.
     'model-11': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-12': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-13': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-14': { enabled: true, paperOnly: false, thresholdScore: 45 },
+    'model-15': { enabled: true, paperOnly: false, thresholdScore: 45 },
   },
 }
 
@@ -9343,12 +9363,12 @@ async function runAutoTrader(trigger = 'MANUAL') {
         continue
       }
 
-      if (walletSignalModelId === 'model-11') {
-        // Bot Claude's per-symbol builder is synchronous and only reads a
-        // cache; this is the one place that actually calls the live
-        // Anthropic API, once per closed 5M candle per symbol.
-        await refreshBotClaudeDecisions({ symbols: walletScanSymbols, getSymbolInputs }).catch((error) => {
-          pushWalletStep(`Claude API refresh failed: ${error instanceof Error ? error.message : error}`, 'blocked')
+      if (LLM_BOT_DECISION_REFRESHERS[walletSignalModelId]) {
+        // Each LLM bot's per-symbol builder is synchronous and only reads a
+        // cache; this is the one place that actually calls the live API,
+        // once per closed 5M candle per symbol.
+        await LLM_BOT_DECISION_REFRESHERS[walletSignalModelId]({ symbols: walletScanSymbols, getSymbolInputs }).catch((error) => {
+          pushWalletStep(`${getSignalModel(walletSignalModelId).name} API refresh failed: ${error instanceof Error ? error.message : error}`, 'blocked')
         })
       }
 

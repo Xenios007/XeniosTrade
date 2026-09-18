@@ -3,7 +3,7 @@ import { DEFAULT_MARGIN_MODE, normalizeMarginMode } from './marginModes.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID, resolveTradeStylePresetId } from './strategyPresets.js'
 
 export const DEFAULT_SIGNAL_MODEL_ID = 'model-1'
-export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']
+export const SIGNAL_MODEL_STRATEGY_OVERRIDE_IDS = ['model-1', 'model-2', 'model-4', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11', 'model-12', 'model-13', 'model-14', 'model-15']
 export const SIGNAL_MODEL_STRATEGY_OVERRIDE_KEYS = [
   'tradeStylePresetId',
   'marginMode',
@@ -194,13 +194,31 @@ const model10Signals = [
   { key: 'c-testnet-guardrails', label: 'Separate testnet risk guardrails pass', detail: 'Exchange position, protective-order, daily-loss, size and freshness checks must all pass.' },
 ]
 
-const model11Signals = [
-  { key: 'llm-context-snapshot', label: 'Multi-timeframe feature snapshot built', detail: 'A closed-candle 1H/15M/5M indicator snapshot (trend, RSI, ATR, Bollinger, VWAP, volume, funding) is assembled for the live model call.' },
-  { key: 'llm-live-call', label: 'Live Claude API call for this symbol/candle', detail: 'The Anthropic Claude API is called fresh for this symbol once its 5M candle has closed — never a cached or hand-coded rule.' },
-  { key: 'llm-direction-decision', label: 'Claude returns LONG, SHORT, or WAIT', detail: 'The model reads the snapshot and decides a direction or explicitly waits; it never defaults to a trade.' },
-  { key: 'llm-confidence-gate', label: 'Confidence at or above the trade floor', detail: 'Claude also returns a 0–100 confidence score. Only decisions at or above the configured floor are taken.' },
-  { key: 'llm-risk-plan', label: 'Claude sets its own stop/target distance', detail: 'Stop-loss and take-profit are Claude-chosen percentages off the current close, applied to a small fixed testnet risk budget.' },
-]
+// Every LLM-driven bot scans this same small, fixed universe rather than the
+// full volatility-ranked list: it bounds live-API spend and keeps a
+// head-to-head comparison apples-to-apples (all five bots are asked about
+// the exact same symbols on the exact same schedule).
+export const LLM_TRADE_FIXED_UNIVERSE_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
+
+// Every LLM-driven bot (Claude / GPT / Gemini / Grok / OpenRouter) is
+// evaluated on the exact same five checkpoints — only the calling provider
+// differs — so a head-to-head comparison is fair rather than an artifact of
+// different gating.
+function buildLlmModelSignals(providerLabel, apiLabel = providerLabel) {
+  return [
+    { key: 'llm-context-snapshot', label: 'Multi-timeframe feature snapshot built', detail: 'A closed-candle 1H/15M/5M indicator snapshot (trend, RSI, ATR, Bollinger, VWAP, volume, funding) is assembled for the live model call.' },
+    { key: 'llm-live-call', label: `Live ${apiLabel} API call for this symbol/candle`, detail: `The ${apiLabel} API is called fresh for this symbol once its 5M candle has closed — never a cached or hand-coded rule.` },
+    { key: 'llm-direction-decision', label: `${providerLabel} returns LONG, SHORT, or WAIT`, detail: `The model reads the snapshot and decides a direction or explicitly waits; it never defaults to a trade.` },
+    { key: 'llm-confidence-gate', label: 'Confidence at or above the trade floor', detail: `${providerLabel} also returns a 0–100 confidence score. Only decisions at or above the configured floor are taken.` },
+    { key: 'llm-risk-plan', label: `${providerLabel} sets its own stop/target distance`, detail: `Stop-loss and take-profit are ${providerLabel}-chosen percentages off the current close, applied to a small fixed testnet risk budget.` },
+  ]
+}
+
+const model11Signals = buildLlmModelSignals('Claude', 'Anthropic Claude')
+const model12Signals = buildLlmModelSignals('GPT', 'OpenAI GPT')
+const model13Signals = buildLlmModelSignals('Gemini', 'Google Gemini')
+const model14Signals = buildLlmModelSignals('Grok', 'xAI Grok')
+const model15Signals = buildLlmModelSignals('OpenRouter', 'OpenRouter')
 
 
 export const DEFAULT_BOT3_RISK_PRESET_ID = 'bot3-20'
@@ -342,10 +360,12 @@ export const DEFAULT_BOT10_CONSOLIDATED_SETTINGS = {
   dailyProfitTarget: 10,
 }
 
-// Bot Claude: a live Anthropic Claude API call decides direction + risk, so it
-// keeps the same small, testnet-scoped footprint as the other experimental
-// bots (9/10) until it has earned a forward sample.
-export const DEFAULT_BOT11_CLAUDE_SETTINGS = {
+// Every LLM-driven bot (Claude / GPT / Gemini / Grok / OpenRouter) shares
+// the same small, testnet-scoped footprint as the other experimental bots
+// (9/10) until it has earned a forward sample — and the same footprint
+// across all five keeps a head-to-head comparison about the model's calls,
+// not different risk sizing.
+const DEFAULT_LLM_BOT_SETTINGS = {
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   marginMode: DEFAULT_MARGIN_MODE,
   marginPerTrade: 10,
@@ -359,6 +379,12 @@ export const DEFAULT_BOT11_CLAUDE_SETTINGS = {
   dailyProfitTarget: 15,
 }
 
+export const DEFAULT_BOT11_CLAUDE_SETTINGS = { ...DEFAULT_LLM_BOT_SETTINGS }
+export const DEFAULT_BOT12_GPT_SETTINGS = { ...DEFAULT_LLM_BOT_SETTINGS }
+export const DEFAULT_BOT13_GEMINI_SETTINGS = { ...DEFAULT_LLM_BOT_SETTINGS }
+export const DEFAULT_BOT14_GROK_SETTINGS = { ...DEFAULT_LLM_BOT_SETTINGS }
+export const DEFAULT_BOT15_OPENROUTER_SETTINGS = { ...DEFAULT_LLM_BOT_SETTINGS }
+
 const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-1': DEFAULT_BOT1_SETTINGS,
   'model-2': DEFAULT_BOT2_SETTINGS,
@@ -370,6 +396,10 @@ const SIGNAL_MODEL_DEFAULT_STRATEGY_OVERRIDES = {
   'model-9': DEFAULT_BOT9_HIGH_PRECISION_SETTINGS,
   'model-10': DEFAULT_BOT10_CONSOLIDATED_SETTINGS,
   'model-11': DEFAULT_BOT11_CLAUDE_SETTINGS,
+  'model-12': DEFAULT_BOT12_GPT_SETTINGS,
+  'model-13': DEFAULT_BOT13_GEMINI_SETTINGS,
+  'model-14': DEFAULT_BOT14_GROK_SETTINGS,
+  'model-15': DEFAULT_BOT15_OPENROUTER_SETTINGS,
 }
 
 export const BOT3_RISK_PRESETS = [
@@ -612,12 +642,69 @@ export const SIGNAL_MODELS = [
     tag: 'Claude AI Trader',
     status: 'experimental',
     strategyFamily: 'llm-claude',
-    description: 'The first of a family of LLM-driven bots (Bot Claude, then Bot GPT / Bot Gemini / Bot Grok) meant to compare how different frontier models trade the same market. Every scan cycle it sends a fresh multi-timeframe feature snapshot to the Anthropic Claude API and lets the model decide direction, confidence, and its own stop/target — there is no hand-coded technical rule engine behind this bot.',
-    executionRule: 'Once a symbol’s 5M candle closes, Claude is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when Claude returns LONG or SHORT with confidence at or above the configured floor; Claude also sets the stop-loss/take-profit percentages. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    description: 'The first of a family of LLM-driven bots (Bot Claude, Bot GPT, Bot Gemini, Bot Grok, Bot OpenRouter) meant to compare how different frontier models trade the same market. Every scan cycle it sends a fresh multi-timeframe feature snapshot to the Anthropic Claude API and lets the model decide direction, confidence, and its own stop/target — there is no hand-coded technical rule engine behind this bot.',
+    executionRule: 'Once a symbol’s 5M candle closes, Claude is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when Claude returns LONG or SHORT with confidence at or above the configured floor; Claude also sets the stop-loss/take-profit percentages. Scans a small fixed universe (BTC/ETH/SOL/BNB) to bound API spend and keep the comparison apples-to-apples. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
     minimumScore: 60,
     totalSignals: model11Signals.length,
     professionalSignalCount: 0,
     signals: model11Signals,
+    fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
+  },
+  {
+    id: 'model-12',
+    name: 'Bot GPT',
+    tag: 'GPT AI Trader',
+    status: 'experimental',
+    strategyFamily: 'llm-gpt',
+    description: 'Bot Claude\'s sibling in the frontier-model comparison family, calling OpenAI\'s API instead. Sees the exact same multi-timeframe feature snapshot, on the same schedule, with the same confidence floor and risk budget as Bot Claude — the only thing that differs is which model answers.',
+    executionRule: 'Once a symbol’s 5M candle closes, GPT is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when GPT returns LONG or SHORT with confidence at or above the configured floor; GPT also sets the stop-loss/take-profit percentages. Scans the same small fixed universe (BTC/ETH/SOL/BNB) as its siblings. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    minimumScore: 60,
+    totalSignals: model12Signals.length,
+    professionalSignalCount: 0,
+    signals: model12Signals,
+    fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
+  },
+  {
+    id: 'model-13',
+    name: 'Bot Gemini',
+    tag: 'Gemini AI Trader',
+    status: 'experimental',
+    strategyFamily: 'llm-gemini',
+    description: 'Bot Claude\'s sibling in the frontier-model comparison family, calling Google\'s Gemini API instead. Sees the exact same multi-timeframe feature snapshot, on the same schedule, with the same confidence floor and risk budget as Bot Claude — the only thing that differs is which model answers.',
+    executionRule: 'Once a symbol’s 5M candle closes, Gemini is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when Gemini returns LONG or SHORT with confidence at or above the configured floor; Gemini also sets the stop-loss/take-profit percentages. Scans the same small fixed universe (BTC/ETH/SOL/BNB) as its siblings. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    minimumScore: 60,
+    totalSignals: model13Signals.length,
+    professionalSignalCount: 0,
+    signals: model13Signals,
+    fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
+  },
+  {
+    id: 'model-14',
+    name: 'Bot Grok',
+    tag: 'Grok AI Trader',
+    status: 'experimental',
+    strategyFamily: 'llm-grok',
+    description: 'Bot Claude\'s sibling in the frontier-model comparison family, calling xAI\'s Grok API instead. Sees the exact same multi-timeframe feature snapshot, on the same schedule, with the same confidence floor and risk budget as Bot Claude — the only thing that differs is which model answers.',
+    executionRule: 'Once a symbol’s 5M candle closes, Grok is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when Grok returns LONG or SHORT with confidence at or above the configured floor; Grok also sets the stop-loss/take-profit percentages. Scans the same small fixed universe (BTC/ETH/SOL/BNB) as its siblings. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    minimumScore: 60,
+    totalSignals: model14Signals.length,
+    professionalSignalCount: 0,
+    signals: model14Signals,
+    fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
+  },
+  {
+    id: 'model-15',
+    name: 'Bot OpenRouter',
+    tag: 'OpenRouter AI Trader',
+    status: 'experimental',
+    strategyFamily: 'llm-openrouter',
+    description: 'Bot Claude\'s sibling in the frontier-model comparison family, routed through OpenRouter instead of a single provider — defaults to a Llama model so the five-bot roster covers five distinct model families, but can be pointed at any model OpenRouter serves. Sees the exact same multi-timeframe feature snapshot, on the same schedule, with the same confidence floor and risk budget as Bot Claude.',
+    executionRule: 'Once a symbol’s 5M candle closes, the configured OpenRouter model is called live with that symbol’s 1H/15M/5M snapshot. A trade is only taken when it returns LONG or SHORT with confidence at or above the configured floor; it also sets the stop-loss/take-profit percentages. Scans the same small fixed universe (BTC/ETH/SOL/BNB) as its siblings. Runs on a small, testnet-scoped risk budget until it has earned a forward sample.',
+    minimumScore: 60,
+    totalSignals: model15Signals.length,
+    professionalSignalCount: 0,
+    signals: model15Signals,
+    fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
   },
 ]
 

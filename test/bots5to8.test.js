@@ -7,6 +7,10 @@ import {
   buildBot7SignalSnapshot, buildBot8SignalSnapshot, buildBot9SignalSnapshot, buildBot10SignalSnapshot, BOT5TO8_BUILDERS,
 } from '../server/strategy/bots5to8.js'
 import { buildBotClaudeSignalSnapshot } from '../server/strategy/bot-claude.js'
+import { buildBotGptSignalSnapshot } from '../server/strategy/bot-gpt.js'
+import { buildBotGeminiSignalSnapshot } from '../server/strategy/bot-gemini.js'
+import { buildBotGrokSignalSnapshot } from '../server/strategy/bot-grok.js'
+import { buildBotOpenrouterSignalSnapshot } from '../server/strategy/bot-openrouter.js'
 import {
   getSignalModel, getEffectiveSignalModelStrategy, buildDefaultSignalModelStrategies, SIGNAL_MODELS,
 } from '../src/lib/signalModels.js'
@@ -17,6 +21,9 @@ const strat = (id) => getEffectiveSignalModelStrategy(
   id, { runningBalance: 1000 },
 )
 
+const LLM_BOT_IDS = ['model-11', 'model-12', 'model-13', 'model-14', 'model-15']
+const ALL_5TO15_IDS = ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', ...LLM_BOT_IDS]
+
 const BUILDERS = {
   'model-5': buildBot5SignalSnapshot,
   'model-6': buildBot6SignalSnapshot,
@@ -25,16 +32,27 @@ const BUILDERS = {
   'model-9': buildBot9SignalSnapshot,
   'model-10': buildBot10SignalSnapshot,
   'model-11': buildBotClaudeSignalSnapshot,
+  'model-12': buildBotGptSignalSnapshot,
+  'model-13': buildBotGeminiSignalSnapshot,
+  'model-14': buildBotGrokSignalSnapshot,
+  'model-15': buildBotOpenrouterSignalSnapshot,
 }
 
-test('all 11 signal models registered, 5-11 carry a strategyFamily', () => {
-  assert.equal(SIGNAL_MODELS.length, 11)
-  for (const id of ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']) {
+test('all 15 signal models registered, 5-15 carry a strategyFamily', () => {
+  assert.equal(SIGNAL_MODELS.length, 15)
+  for (const id of ALL_5TO15_IDS) {
     const m = getSignalModel(id)
     assert.ok(m.strategyFamily, `${id} missing strategyFamily`)
   }
-  const fams = ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11'].map((id) => getSignalModel(id).strategyFamily)
-  assert.equal(new Set(fams).size, 7, 'families must be distinct')
+  const fams = ALL_5TO15_IDS.map((id) => getSignalModel(id).strategyFamily)
+  assert.equal(new Set(fams).size, ALL_5TO15_IDS.length, 'families must be distinct')
+})
+
+test('every LLM bot (11-15) is scoped to the same small fixed universe', () => {
+  for (const id of LLM_BOT_IDS) {
+    const m = getSignalModel(id)
+    assert.deepEqual(m.fixedUniverseSymbols, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'], `${id} universe`)
+  }
 })
 
 test('insufficient history -> not-ready snapshot, never throws', () => {
@@ -120,14 +138,14 @@ test('a ready snapshot is well-formed (SL/TP ordering, positive sizing, family t
   }
 })
 
-test('dispatch: analyzeSymbolStrategy runs models 5-11 without throwing', async () => {
+test('dispatch: analyzeSymbolStrategy runs models 5-15 without throwing', async () => {
   process.env.XENIOS_SERVER_AUTOSTART = 'off'
   const srv = await import('../server/mock-trading-server.js')
   const b1h = synthRawKlines(200, { step: 3_600_000 })
   const s15 = synthRawKlines(400, { step: 900_000 })
   const e5 = synthRawKlines(1200, { step: 300_000 })
   const strategy = { runningBalance: 1000, marginMode: 'ISOLATED' }
-  for (const id of ['model-5', 'model-6', 'model-7', 'model-8', 'model-9', 'model-10', 'model-11']) {
+  for (const id of ALL_5TO15_IDS) {
     const mc = id === 'model-8'
       ? { fundingRate: 0.0006, fundingPercentile: 0.95, fundingAvailable: true }
       : {}
@@ -135,28 +153,39 @@ test('dispatch: analyzeSymbolStrategy runs models 5-11 without throwing', async 
   }
 })
 
-test('BOT5TO8_BUILDERS maps model-5..11', () => {
+test('BOT5TO8_BUILDERS maps model-5..15', () => {
   assert.deepEqual(
     Object.keys(BOT5TO8_BUILDERS).sort(),
-    ['model-10', 'model-11', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9'],
+    ['model-10', 'model-11', 'model-12', 'model-13', 'model-14', 'model-15', 'model-5', 'model-6', 'model-7', 'model-8', 'model-9'],
   )
 })
 
-test('Bot Claude (model-11) is a no-op watch state without ANTHROPIC_API_KEY', () => {
-  const previousKey = process.env.ANTHROPIC_API_KEY
-  delete process.env.ANTHROPIC_API_KEY
-  try {
-    const snap = buildBotClaudeSignalSnapshot({
-      symbol: 'BTCUSDT',
-      signalModel: getSignalModel('model-11'),
-      effectiveStrategy: strat('model-11'),
-      closedEntryTimeframe: synthCandles(200, { step: 300_000 }),
-    })
-    assert.equal(snap.ready, false)
-    assert.equal(snap.signalModelId, 'model-11')
-    assert.match(snap.summary, /ANTHROPIC_API_KEY/)
-  } finally {
-    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY
-    else process.env.ANTHROPIC_API_KEY = previousKey
+test('every LLM bot (11-15) is a no-op watch state without its API key', () => {
+  const cases = [
+    { id: 'model-11', builder: buildBotClaudeSignalSnapshot, envVars: ['ANTHROPIC_API_KEY'] },
+    { id: 'model-12', builder: buildBotGptSignalSnapshot, envVars: ['OPENAI_API_KEY'] },
+    { id: 'model-13', builder: buildBotGeminiSignalSnapshot, envVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] },
+    { id: 'model-14', builder: buildBotGrokSignalSnapshot, envVars: ['XAI_API_KEY'] },
+    { id: 'model-15', builder: buildBotOpenrouterSignalSnapshot, envVars: ['OPENROUTER_API_KEY'] },
+  ]
+  for (const { id, builder, envVars } of cases) {
+    const previousValues = envVars.map((envVar) => process.env[envVar])
+    for (const envVar of envVars) delete process.env[envVar]
+    try {
+      const snap = builder({
+        symbol: 'BTCUSDT',
+        signalModel: getSignalModel(id),
+        effectiveStrategy: strat(id),
+        closedEntryTimeframe: synthCandles(200, { step: 300_000 }),
+      })
+      assert.equal(snap.ready, false, `${id} should not be ready without ${envVars.join('/')}`)
+      assert.equal(snap.signalModelId, id)
+      assert.match(snap.summary, /API key/i)
+    } finally {
+      envVars.forEach((envVar, index) => {
+        if (previousValues[index] === undefined) delete process.env[envVar]
+        else process.env[envVar] = previousValues[index]
+      })
+    }
   }
 })

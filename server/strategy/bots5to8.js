@@ -14,6 +14,10 @@
 
 import { _internals } from '../backtest/feature-lib.js'
 import { buildBotClaudeSignalSnapshot } from './bot-claude.js'
+import { buildBotGptSignalSnapshot } from './bot-gpt.js'
+import { buildBotGeminiSignalSnapshot } from './bot-gemini.js'
+import { buildBotGrokSignalSnapshot } from './bot-grok.js'
+import { buildBotOpenrouterSignalSnapshot } from './bot-openrouter.js'
 import { finiteSeries, indicatorBundle, lastOf, notReady, num, sizeAndShape } from './shared-signals.js'
 
 const { emaSeries, rsiSeries, atrSeries, mean } = _internals
@@ -309,10 +313,15 @@ export const BOT5TO8_BUILDERS = {
   'model-8': buildBot8SignalSnapshot,
   'model-9': buildBot9SignalSnapshot,
   'model-10': buildBot10SignalSnapshot,
-  // Bot 11 "Bot Claude" — the entry decision comes from a live Anthropic
-  // Claude API call (see server/strategy/bot-claude.js), not a technical
-  // rule set. This builder stays synchronous like every other one here: it
-  // only reads the latest cached decision, which mock-trading-server.js
-  // refreshes asynchronously (once per closed candle) before this dispatch runs.
+  // Bots 11-15 "Bot Claude / GPT / Gemini / Grok / OpenRouter" — the entry
+  // decision comes from a live LLM API call (see llm-trading-engine.js and
+  // each bot-<name>.js), not a technical rule set. Every builder here stays
+  // synchronous: it only reads the latest cached decision, which
+  // mock-trading-server.js refreshes asynchronously (once per closed
+  // candle) before this dispatch runs.
   'model-11': buildBotClaudeSignalSnapshot,
+  'model-12': buildBotGptSignalSnapshot,
+  'model-13': buildBotGeminiSignalSnapshot,
+  'model-14': buildBotGrokSignalSnapshot,
+  'model-15': buildBotOpenrouterSignalSnapshot,
 }

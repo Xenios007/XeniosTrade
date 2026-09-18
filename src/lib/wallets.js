@@ -21,7 +21,7 @@ export const REAL_MONEY_WALLET_ENVIRONMENT = 'REAL_MONEY'
 export const DEFAULT_WALLET_ENVIRONMENT = TESTNET_WALLET_ENVIRONMENT
 export const REAL_MONEY_WALLET_ID = 'wallet-real-money'
 // 6000+ USDT Binance Futures Testnet demo funds split across the bot wallets.
-export const DEFAULT_BOT_WALLET_COUNT = 11
+export const DEFAULT_BOT_WALLET_COUNT = 15
 export const DEFAULT_BOT_ALLOCATION_USDT = 750
 
 const DEFAULT_WALLET_BLUEPRINTS = [
@@ -135,6 +135,42 @@ const DEFAULT_WALLET_BLUEPRINTS = [
     colorKey: 'teal',
     // Small forward-test allocation, same reasoning as Wallet 9: this is a
     // testnet ledger allocation, and every decision is a metered live LLM call.
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-12',
+    kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
+    name: 'Wallet 12 — Bot GPT',
+    assignedSignalModelId: 'model-12',
+    colorKey: 'indigo',
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-13',
+    kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
+    name: 'Wallet 13 — Bot Gemini',
+    assignedSignalModelId: 'model-13',
+    colorKey: 'sky',
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-14',
+    kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
+    name: 'Wallet 14 — Bot Grok',
+    assignedSignalModelId: 'model-14',
+    colorKey: 'stone',
+    allocationBalance: 100,
+  },
+  {
+    id: 'wallet-model-15',
+    kind: BOT_WALLET_KIND,
+    environment: TESTNET_WALLET_ENVIRONMENT,
+    name: 'Wallet 15 — Bot OpenRouter',
+    assignedSignalModelId: 'model-15',
+    colorKey: 'fuchsia',
     allocationBalance: 100,
   },
   {
