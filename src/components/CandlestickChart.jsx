@@ -3,6 +3,7 @@ import { ChevronDown, LoaderCircle } from 'lucide-react'
 import { formatPrice } from '../lib/formatters'
 import { calculateEMA, calculateSMA, calculateVWAP } from '../lib/indicators'
 import { getSignalModel } from '../lib/signalModels'
+import { computeSixtyCandleForecast, buildForecastWavePoints, intervalToMs, FORECAST_HORIZON_CANDLES } from '../lib/chartForecast'
 import { Panel } from './Panel'
 
 const intervals = [
@@ -16,7 +17,26 @@ const indicatorItems = [
   { key: 'bb', label: 'BB 20,2' },
   { key: 'rsi', label: 'RSI 14' },
 ]
-const CHART_SCENARIO_RIGHT_OFFSET = 14
+// Reserves horizontal room to the right of the latest candle so the
+// in-chart forecast line (drawn out to FORECAST_HORIZON_CANDLES) is visible
+// without the user having to scroll.
+const CHART_SCENARIO_RIGHT_OFFSET = FORECAST_HORIZON_CANDLES + 4
+// The forecast's underlying bot signals re-poll every 15s (App.jsx) and their
+// entry/take-profit levels track live price, so the percent shifts by tiny
+// amounts almost every poll. A new prediction line (P1, P2, ...) is only
+// drawn once the consensus has actually moved by this much or flipped
+// direction - not on every tiny live-price wiggle.
+const FORECAST_REDRAW_PERCENT_THRESHOLD = 0.15
+// Each new prediction gets the next color in this palette (cycling), purely
+// so P1/P2/P3/... stay visually distinguishable from each other on the chart
+// - the color carries no other meaning.
+const FORECAST_COLOR_PALETTE = ['#f59e0b', '#38bdf8', '#a78bfa', '#fb7185', '#34d399', '#f472b6', '#facc15', '#22d3ee']
+// Caps how many prediction lines stay on the chart at once - the oldest is
+// removed as a new one is added past this. Matches the palette length so
+// every prediction visible at any moment has a genuinely distinct color.
+// P-numbers themselves keep counting up forever and are never reused, even
+// once their line has been evicted.
+const FORECAST_MAX_VISIBLE_PREDICTIONS = FORECAST_COLOR_PALETTE.length
 
 function isFinitePrice(value) {
   return Number.isFinite(Number(value))
@@ -597,6 +617,11 @@ export function CandlestickChart({
   const rsiPriceLinesRef = useRef([])
   const patternSeriesRef = useRef([])
   const patternSigRef = useRef('')
+  // Every prediction ever drawn for the current symbol/interval, oldest
+  // first - each is a frozen snapshot (its own series), never mutated after
+  // creation. Reset only on a symbol/interval change (see chartViewKey effect).
+  const predictionsRef = useRef([])
+  const predictionCounterRef = useRef(0)
   const didFitRef = useRef(false)
   const prevViewKeyRef = useRef('')
   const [chartEngineReady, setChartEngineReady] = useState(false)
@@ -617,6 +642,7 @@ export function CandlestickChart({
     () => chartPatterns.map((pattern) => pattern.id).join('|'),
     [chartPatterns],
   )
+  const forecast = useMemo(() => computeSixtyCandleForecast(modelAnalyses), [modelAnalyses])
   const activeBotVisualSpec = useMemo(
     () => getResolvedActiveBotVisualSpec(activeModel, data, activeModelAnalysis),
     [activeModel, data, activeModelAnalysis],
@@ -759,6 +785,8 @@ export function CandlestickChart({
           rsiPriceLinesRef.current = []
           patternSeriesRef.current = []
           patternSigRef.current = ''
+          predictionsRef.current = []
+          predictionCounterRef.current = 0
           chart.remove()
         }
       } catch (error) {
@@ -788,6 +816,19 @@ export function CandlestickChart({
     if (prevViewKeyRef.current !== chartViewKey) {
       prevViewKeyRef.current = chartViewKey
       didFitRef.current = false
+
+      // A prediction's wave is drawn in this symbol/interval's own time and
+      // price space, so it doesn't carry over to a different market or timeframe.
+      const chart = chartApiRef.current
+      predictionsRef.current.forEach(({ series }) => {
+        try {
+          chart?.removeSeries(series)
+        } catch {
+          // already detached
+        }
+      })
+      predictionsRef.current = []
+      predictionCounterRef.current = 0
     }
 
     candle.setData(data)
@@ -797,6 +838,78 @@ export function CandlestickChart({
       didFitRef.current = true
     }
   }, [data, chartViewKey, chartEngineReady, loading])
+
+  // Draft 60-candle forecast lines: every time the weighted bot-signal
+  // consensus (computeSixtyCandleForecast) genuinely changes - a direction
+  // flip, or the percent moving by FORECAST_REDRAW_PERCENT_THRESHOLD or more
+  // since the last one - a NEW hand-sketched wave is added as P{n}, labelled
+  // with its percent and colored from FORECAST_COLOR_PALETTE. Predictions are
+  // never mutated once drawn, only evicted oldest-first past
+  // FORECAST_MAX_VISIBLE_PREDICTIONS (or all at once on a symbol/interval
+  // change - see the chartViewKey effect above), so the chart keeps a
+  // running, bounded visual record of the most recent predictions made.
+  useEffect(() => {
+    const chart = chartApiRef.current
+    const runtime = chartRuntimeRef.current
+    if (!chartEngineReady || !chart || !runtime?.LineSeries || !forecast.direction) {
+      return
+    }
+
+    const latestCandle = data[data.length - 1]
+    if (!latestCandle) {
+      return
+    }
+
+    const existing = predictionsRef.current
+    const last = existing[existing.length - 1] || null
+    const percentMoved = !last || Math.abs(forecast.percent - last.percent) >= FORECAST_REDRAW_PERCENT_THRESHOLD
+    const isNewPrediction = !last || last.direction !== forecast.direction || percentMoved
+
+    if (!isNewPrediction) {
+      return
+    }
+
+    const predictionNumber = predictionCounterRef.current + 1
+    predictionCounterRef.current = predictionNumber
+    const isLong = forecast.direction === 'LONG'
+    const horizonSeconds = Math.round((intervalToMs(interval) * FORECAST_HORIZON_CANDLES) / 1000)
+    const wavePoints = buildForecastWavePoints({
+      startTime: latestCandle.time,
+      startPrice: latestCandle.close,
+      horizonSeconds,
+      direction: forecast.direction,
+      percent: forecast.percent,
+    })
+    const color = FORECAST_COLOR_PALETTE[(predictionNumber - 1) % FORECAST_COLOR_PALETTE.length]
+
+    const series = chart.addSeries(runtime.LineSeries, {
+      color,
+      lineWidth: 3,
+      lineStyle: 0,
+      lineType: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+      title: `P${predictionNumber} ${isLong ? '+' : '-'}${forecast.percent.toFixed(2)}%`,
+    })
+    series.setData(wavePoints)
+
+    const nextPredictions = [...existing, {
+      series,
+      direction: forecast.direction,
+      percent: forecast.percent,
+      time: latestCandle.time,
+    }]
+    while (nextPredictions.length > FORECAST_MAX_VISIBLE_PREDICTIONS) {
+      const evicted = nextPredictions.shift()
+      try {
+        chart.removeSeries(evicted.series)
+      } catch {
+        // already detached
+      }
+    }
+    predictionsRef.current = nextPredictions
+  }, [forecast.direction, forecast.percent, data, interval, chartEngineReady])
 
   // Indicator overlays + RSI guide lines.
   useEffect(() => {

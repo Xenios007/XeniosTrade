@@ -31,6 +31,7 @@ import {
   getSignalModelName,
   getSignalModelTrackedSymbols,
   normalizeSignalModelStrategies,
+  normalizeSymbolRiskProfiles,
   resolveBot3RiskPresetId,
   SIGNAL_MODELS,
 } from '../src/lib/signalModels.js'
@@ -47,9 +48,12 @@ import {
   normalizeWalletEnvironment,
   normalizeWallets,
   REAL_MONEY_WALLET_ENVIRONMENT,
+  REAL_MONEY_WALLET_ID,
+  TESTNET_WALLET_ENVIRONMENT,
 } from '../src/lib/wallets.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID } from '../src/lib/strategyPresets.js'
 import { detectChartPatterns, patternScoreForSide } from '../src/lib/chartPatterns.js'
+import { computeSixtyCandleForecast } from '../src/lib/chartForecast.js'
 import {
   DEFAULT_AUTO_TRADE_SESSIONS,
   isHourWithinScheduledSessions,
@@ -57,6 +61,7 @@ import {
 } from '../src/lib/tradingSessions.js'
 import { getCodexConsoleStatus, runCodexConsoleTurn } from './codex-console.js'
 import { BOT5TO8_BUILDERS } from './strategy/bots5to8.js'
+import { registerConsolidatedBot } from './consolidated-bot.js'
 
 dotenv.config()
 
@@ -268,6 +273,14 @@ let lastSettingsRegressionWarningSignature = ''
 // Bot 4 (model-4) cuts any open position the instant its unrealized PnL reaches this loss, in USDT.
 const MODEL4_HARD_MONEY_STOP_USDT = 1
 
+// Local-paper auto trades are flattened after this many hours if neither the take-profit
+// nor the stop-loss has been hit. Matches the 48h time stop already enforced by the
+// backtest engine (server/backtest/exit-policy.js MAX_HOLD_MS) and the consolidated bot's
+// live testnet loop (server/consolidated-testnet.js TESTNET_LIMITS.maxHoldHours), so a
+// paper trade can no longer sit open indefinitely (e.g. a stalled USDCUSDT position that
+// never reaches its bracket) and live paper trading matches what was actually backtested.
+const PAPER_TRADE_MAX_HOLD_HOURS = 48
+
 // Bots 1-4: AI loss-minimising early exit.
 // While a trade on one of these bots is open AND under water, the AI scores it
 // against the backtest's LOSING-trade profile for its setup family (negative
@@ -292,6 +305,12 @@ const defaultStrategySettingsBase = {
   preferredSymbols: DEFAULT_PREFERRED_SYMBOLS,
   activeSignalModelId: DEFAULT_SIGNAL_MODEL_ID,
   realMoneySignalModelId: DEFAULT_SIGNAL_MODEL_ID,
+  // Master kill switch for live execution. Even when true, only the wallet
+  // matching realMoneySignalModelId (or the dedicated wallet-real-money
+  // wallet) can ever be treated as REAL_MONEY - see
+  // resolveAuthorizedWalletEnvironment. Defaults off; the Real Money Trading
+  // page has the toggle.
+  realMoneyExecutionArmed: false,
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   bot3RiskPresetId: DEFAULT_BOT3_RISK_PRESET_ID,
   sessionScheduleEnabled: false,
@@ -307,6 +326,7 @@ const defaultStrategySettingsBase = {
   maxLossPerDay: 20,
   dailyProfitTarget: 50,
   timezone: 'Asia/Manila',
+  symbolRiskProfiles: {},
 }
 const defaultStrategySettings = {
   ...defaultStrategySettingsBase,
@@ -637,6 +657,10 @@ function formatTradeModeLabel(mode = '') {
     return 'Binance Demo'
   }
 
+  if (mode === 'binance-futures-live') {
+    return 'Binance Live'
+  }
+
   if (mode === 'local-paper') {
     return 'Local Paper'
   }
@@ -731,6 +755,8 @@ function getTradeOutcomeTitle(status = '') {
       return 'Trade Closed - Stop Loss'
     case 'CLOSED_MANUAL':
       return 'Trade Closed - Manual Exit'
+    case 'CLOSED_TIMEOUT':
+      return 'Trade Closed - Time Stop'
     default:
       return 'Trade Closed'
   }
@@ -809,7 +835,7 @@ function formatLearningBotStatusLine(trainStatus = defaultLearningBotTrainStatus
 
 function buildTerminalMonitorSnapshot(settings = {}, trades = [], livePriceMap = {}, trainStatus = defaultLearningBotTrainStatus) {
   const enabledWallets = getTradingWallets(settings.wallets).filter((wallet) => wallet.enabled)
-  const binanceCount = trades.filter((trade) => trade.mode === 'binance-futures-testnet').length
+  const binanceCount = trades.filter((trade) => isBinanceExecutionMode(trade.mode)).length
   const paperCount = trades.filter((trade) => trade.mode === 'local-paper').length
   let pricedTradeCount = 0
   let totalOpenPnl = 0
@@ -877,11 +903,13 @@ function normalizeSettings(rawSettings = {}) {
 
   strategy.activeSignalModelId = ensureSignalModelId(strategy.activeSignalModelId)
   strategy.realMoneySignalModelId = ensureSignalModelId(strategy.realMoneySignalModelId)
+  strategy.realMoneyExecutionArmed = Boolean(strategy.realMoneyExecutionArmed)
   strategy.bot3RiskPresetId = resolveBot3RiskPresetId(strategy.bot3RiskPresetId)
   strategy.sessionScheduleEnabled = Boolean(strategy.sessionScheduleEnabled)
   strategy.scheduledSessions = normalizeAutoTradeSessions(strategy.scheduledSessions)
   strategy.marginMode = normalizeMarginMode(strategy.marginMode)
   strategy.signalModelStrategies = normalizeSignalModelStrategies(strategy.signalModelStrategies, strategy)
+  strategy.symbolRiskProfiles = normalizeSymbolRiskProfiles(strategy.symbolRiskProfiles)
   strategy.maxLossPerTrade = getStrategyDerivedMaxLossPerTrade(strategy)
 
   return {
@@ -1342,10 +1370,16 @@ function normalizeVolatileMarketTicker(ticker) {
   }
 }
 
+// Stablecoin-vs-USDT pairs (USDC, FDUSD, TUSD, DAI, ...) pass the liquidity x volatility
+// scan on raw quote volume alone even though the price barely moves, which lets a
+// mean-reversion bot open a position whose bracket distance it can structurally never
+// reach (see Bot 5/Bot 6 getting slot-locked on USDCUSDT for days). Excluded outright.
+const STABLECOIN_BASE_ASSETS = new Set(['USDC', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'GUSD', 'EURI', 'PYUSD'])
+
 function getTradableUsdtSymbols(exchangeInfo) {
   return new Set(
     (exchangeInfo?.symbols || [])
-      .filter((item) => item.status === 'TRADING' && item.quoteAsset === 'USDT')
+      .filter((item) => item.status === 'TRADING' && item.quoteAsset === 'USDT' && !STABLECOIN_BASE_ASSETS.has(item.baseAsset))
       .map((item) => item.symbol),
   )
 }
@@ -1367,6 +1401,38 @@ function rankVolatileMarkets(tickers, tradableSymbols, limit = VOLATILE_SYMBOL_L
       || right.absoluteChangePercent - left.absoluteChangePercent
     ))
     .slice(0, limit)
+}
+
+// A candidate must have actually moved at least as far as its own stop-loss distance over
+// the last 24h before it is accepted. Without this, a low-volatility symbol (a stablecoin
+// pair slipping past the liquidity filter, a quiet alt, ...) can score high enough on
+// pattern/indicator checks to open a position whose bracket it can never reach, locking
+// the wallet's open-position slot indefinitely (see Bot 5/Bot 6 on USDCUSDT).
+const CANDIDATE_RANGE_LOOKBACK_HOURS = 24
+const MIN_RANGE_TO_STOP_RATIO = 1
+
+function evaluateCandidateRangeViability(candidate, marketInputs) {
+  const biasCandles = Array.isArray(marketInputs?.bias) ? marketInputs.bias : []
+  const recentCandles = biasCandles.slice(-CANDIDATE_RANGE_LOOKBACK_HOURS)
+  const entryPrice = Number(candidate?.entryPrice || 0)
+  const stopLoss = Number(candidate?.stopLoss || 0)
+
+  if (recentCandles.length === 0 || !Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(stopLoss) || stopLoss <= 0) {
+    // Not enough data to evaluate; never block a trade on missing/unavailable market data.
+    return { viable: true, rangePercent: null, slDistancePercent: null, rangeHours: recentCandles.length }
+  }
+
+  const highestHigh = Math.max(...recentCandles.map((candle) => Number(candle.high)))
+  const lowestLow = Math.min(...recentCandles.map((candle) => Number(candle.low)))
+  const rangePercent = ((highestHigh - lowestLow) / entryPrice) * 100
+  const slDistancePercent = (Math.abs(entryPrice - stopLoss) / entryPrice) * 100
+
+  return {
+    viable: rangePercent >= slDistancePercent * MIN_RANGE_TO_STOP_RATIO,
+    rangePercent,
+    slDistancePercent,
+    rangeHours: recentCandles.length,
+  }
 }
 
 function normalizeTradeRisk(trade, strategy) {
@@ -3034,6 +3100,80 @@ export function applyPatternAiNudge(decision, patternScore) {
   }
 }
 
+// Cross-bot consensus influence on entry and take-profit, built from the same
+// draft 60-candle forecast drawn on the Market chart (src/lib/chartForecast.js
+// computeSixtyCandleForecast), but computed leave-one-out per candidate: a
+// bot reacts to what the OTHER bots' current signals for this symbol imply,
+// never partly to its own vote (see getLeaveOneOutForecastForCandidate).
+//
+// Same bounded, asymmetric, never-a-hard-gate shape as the chart-pattern
+// nudge above: agreement adds a little, disagreement subtracts more, and
+// unlike a hard filter it can only ever move a bot that is already
+// rule-ready — it never creates a trade or vetoes one on its own.
+const FORECAST_AI_SCORE_WEIGHT = 6
+const FORECAST_AI_CONFLICT_WEIGHT = 14
+
+// `forecastAgreement` is -1..1: positive means the other bots' consensus
+// direction matches this candidate's direction (scaled by their confidence),
+// negative means they disagree, 0 means no consensus among the other bots.
+export function applyForecastAiNudge(decision, forecastAgreement) {
+  const base = Number(decision?.finalScore || 0)
+  const threshold = Number(decision?.thresholdScore || 0)
+  const clamped = Math.max(-1, Math.min(1, Number(forecastAgreement) || 0))
+  const weight = clamped < 0 ? FORECAST_AI_CONFLICT_WEIGHT : FORECAST_AI_SCORE_WEIGHT
+  const delta = Math.round(clamped * weight)
+  const nudged = Math.max(0, Math.min(100, base + delta))
+  const accept = decision?.bootstrapAccept
+    ? Boolean(decision.accept)
+    : nudged >= threshold
+
+  return {
+    delta,
+    finalScore: nudged,
+    accept,
+    flipped: (base >= threshold) !== (nudged >= threshold),
+  }
+}
+
+// Bounded, extension-only take-profit blend: when the other bots' consensus
+// forecast agrees with this candidate's direction AND implies more room than
+// the candidate's own take-profit, nudge the target partway toward the
+// forecast price. Never shrinks a TP, never applies against an opposing or
+// absent consensus, and is capped so it can only ever extend the bot's own
+// planned distance by at most `maxExtensionMultiple` - a nudge on top of the
+// bot's own risk/reward math, not a replacement for it.
+const FORECAST_TP_BLEND_WEIGHT = 0.3
+const FORECAST_TP_MAX_EXTENSION_MULTIPLE = 1.5
+
+export function applyForecastTakeProfitBlend(candidate, forecast) {
+  const entryPrice = Number(candidate?.entryPrice || 0)
+  const takeProfit = Number(candidate?.takeProfit || 0)
+
+  if (
+    !forecast?.direction
+    || forecast.direction !== candidate?.direction
+    || !(entryPrice > 0)
+    || !(takeProfit > 0)
+  ) {
+    return { takeProfit, extended: false }
+  }
+
+  const sign = candidate.direction === 'LONG' ? 1 : -1
+  const forecastTarget = entryPrice * (1 + sign * (Number(forecast.percent || 0) / 100))
+  const ownDistance = Math.abs(takeProfit - entryPrice)
+  const forecastDistance = Math.abs(forecastTarget - entryPrice)
+
+  if (!(forecastDistance > ownDistance)) {
+    return { takeProfit, extended: false }
+  }
+
+  const cappedForecastDistance = Math.min(forecastDistance, ownDistance * FORECAST_TP_MAX_EXTENSION_MULTIPLE)
+  const blendedDistance = ownDistance + (cappedForecastDistance - ownDistance) * FORECAST_TP_BLEND_WEIGHT
+  const blendedTakeProfit = Number((entryPrice + sign * blendedDistance).toFixed(8))
+
+  return { takeProfit: blendedTakeProfit, extended: blendedTakeProfit !== takeProfit }
+}
+
 function buildSignalAnalysisAiAdvisory(
   analysis = null,
   effectiveStrategy = null,
@@ -3750,6 +3890,62 @@ function requiresBinanceExecution({ wallet = null } = {}) {
   return isExchangeSyncWallet(wallet)
 }
 
+// Only the single bot assigned on the Real Money Trading page ("Assign Real
+// Money Bot" -> settings.strategy.realMoneySignalModelId), or the dedicated
+// wallet-real-money MAIN wallet itself, may ever be treated as a live/
+// real-money wallet. Every other wallet is forced down to testnet here,
+// regardless of how its own `environment` field is tagged, so a config
+// mistake (or a wallet still carrying a stale/incorrect REAL_MONEY tag) can
+// never route real orders or a real balance sync through the wrong bot.
+function resolveAuthorizedWalletEnvironment(wallet, settings, { readOnly = false } = {}) {
+  const rawEnvironment = normalizeWalletEnvironment(wallet?.environment)
+  if (rawEnvironment !== REAL_MONEY_WALLET_ENVIRONMENT) {
+    return rawEnvironment
+  }
+
+  const realMoneySignalModelId = ensureSignalModelId(settings?.strategy?.realMoneySignalModelId)
+  const isAuthorizedRealMoneyWallet = Boolean(
+    wallet?.id === REAL_MONEY_WALLET_ID
+    || (wallet?.assignedSignalModelId && wallet.assignedSignalModelId === realMoneySignalModelId),
+  )
+
+  if (!isAuthorizedRealMoneyWallet) {
+    return TESTNET_WALLET_ENVIRONMENT
+  }
+
+  // Master kill switch: even a correctly-tagged, authorized real-money wallet
+  // is forced to testnet for ORDER EXECUTION unless the owner has explicitly
+  // armed live execution on the Real Money Trading page. This must NOT gate
+  // read-only balance/position sync (readOnly: true) — otherwise the wallet's
+  // own visibility into its real Binance balance breaks any time execution
+  // isn't armed, which is most of the time by design, and the wallet page
+  // silently falls back to whatever testnet account shares its credentials.
+  if (!readOnly && !settings?.strategy?.realMoneyExecutionArmed) {
+    return TESTNET_WALLET_ENVIRONMENT
+  }
+
+  return REAL_MONEY_WALLET_ENVIRONMENT
+}
+
+// Hard position-size ceiling for the dedicated real-money wallet - applied on
+// top of whatever the assigned bot's own (testnet-scaled) strategy computes,
+// so live size never depends on a per-model config meant for a much larger
+// paper allocation. stopLossPercent/takeProfitPercent are intentionally left
+// alone - those define the trade's technical structure, not its size.
+// maxLossPerTrade is intentionally absent: getEffectiveSignalModelStrategy
+// always re-derives it from marginPerTrade x leverage x stopLossPercent for
+// non-balance-risk models, so a fixed value here would just be silently
+// discarded - the margin/leverage caps below already bound it tightly (at
+// model-5's own 0.7% stop distance, ~0.10 USDT/trade).
+const REAL_MONEY_EXECUTION_RISK_CAPS = {
+  marginPerTrade: 5,
+  leverage: 3,
+  maxOpenPositions: 1,
+  maxTradesPerDay: 2,
+  maxLossesPerDay: 1,
+  maxLossPerDay: 2,
+}
+
 function safeParseJson(text, fallback = {}) {
   if (!text) {
     return fallback
@@ -3827,12 +4023,13 @@ async function fetchSignedFuturesApi(pathname, {
   return parsed
 }
 
-async function setBinanceMarginType({ symbol, marginMode, apiKey, secretKey }) {
+async function setBinanceMarginType({ symbol, marginMode, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   try {
     await fetchSignedFuturesApi('/fapi/v1/marginType', {
       method: 'POST',
       apiKey,
       secretKey,
+      baseUrl,
       params: {
         symbol,
         marginType: marginMode,
@@ -3855,11 +4052,12 @@ async function setBinanceMarginType({ symbol, marginMode, apiKey, secretKey }) {
   }
 }
 
-async function setBinanceLeverage({ symbol, leverage, apiKey, secretKey }) {
+async function setBinanceLeverage({ symbol, leverage, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   await fetchSignedFuturesApi('/fapi/v1/leverage', {
     method: 'POST',
     apiKey,
     secretKey,
+    baseUrl,
     params: {
       symbol,
       leverage,
@@ -3875,7 +4073,7 @@ async function fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl = future
   })
 }
 
-async function fetchBinanceOrderStatus({ symbol, orderId, apiKey, secretKey }) {
+async function fetchBinanceOrderStatus({ symbol, orderId, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   if (!symbol || !orderId) {
     return null
   }
@@ -3883,6 +4081,7 @@ async function fetchBinanceOrderStatus({ symbol, orderId, apiKey, secretKey }) {
   return fetchSignedFuturesApi('/fapi/v1/order', {
     apiKey,
     secretKey,
+    baseUrl,
     params: {
       symbol,
       orderId,
@@ -3890,7 +4089,7 @@ async function fetchBinanceOrderStatus({ symbol, orderId, apiKey, secretKey }) {
   })
 }
 
-async function fetchBinanceAlgoOrderStatus({ algoId, clientAlgoId, apiKey, secretKey }) {
+async function fetchBinanceAlgoOrderStatus({ algoId, clientAlgoId, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   if (!algoId && !clientAlgoId) {
     return null
   }
@@ -3898,6 +4097,7 @@ async function fetchBinanceAlgoOrderStatus({ algoId, clientAlgoId, apiKey, secre
   return fetchSignedFuturesApi('/fapi/v1/algoOrder', {
     apiKey,
     secretKey,
+    baseUrl,
     params: {
       algoId,
       clientAlgoId,
@@ -3905,10 +4105,11 @@ async function fetchBinanceAlgoOrderStatus({ algoId, clientAlgoId, apiKey, secre
   })
 }
 
-async function fetchBinanceUserTrades({ symbol, startTime = 0, limit = 100, apiKey, secretKey }) {
+async function fetchBinanceUserTrades({ symbol, startTime = 0, limit = 100, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   return fetchSignedFuturesApi('/fapi/v1/userTrades', {
     apiKey,
     secretKey,
+    baseUrl,
     params: {
       symbol,
       startTime,
@@ -3917,25 +4118,27 @@ async function fetchBinanceUserTrades({ symbol, startTime = 0, limit = 100, apiK
   })
 }
 
-async function placeBinanceOrder({ apiKey, secretKey, ...params }) {
+async function placeBinanceOrder({ apiKey, secretKey, baseUrl = futuresTestnetBaseUrl, ...params }) {
   return fetchSignedFuturesApi('/fapi/v1/order', {
     method: 'POST',
     apiKey,
     secretKey,
+    baseUrl,
     params,
   })
 }
 
-async function placeBinanceAlgoOrder({ apiKey, secretKey, ...params }) {
+async function placeBinanceAlgoOrder({ apiKey, secretKey, baseUrl = futuresTestnetBaseUrl, ...params }) {
   return fetchSignedFuturesApi('/fapi/v1/algoOrder', {
     method: 'POST',
     apiKey,
     secretKey,
+    baseUrl,
     params,
   })
 }
 
-async function cancelBinanceOrder({ symbol, orderId, apiKey, secretKey }) {
+async function cancelBinanceOrder({ symbol, orderId, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   if (!symbol || !orderId) {
     return null
   }
@@ -3945,6 +4148,7 @@ async function cancelBinanceOrder({ symbol, orderId, apiKey, secretKey }) {
       method: 'DELETE',
       apiKey,
       secretKey,
+      baseUrl,
       params: {
         symbol,
         orderId,
@@ -3960,7 +4164,7 @@ async function cancelBinanceOrder({ symbol, orderId, apiKey, secretKey }) {
   }
 }
 
-async function cancelBinanceAlgoOrder({ algoId, clientAlgoId, apiKey, secretKey }) {
+async function cancelBinanceAlgoOrder({ algoId, clientAlgoId, apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   if (!algoId && !clientAlgoId) {
     return null
   }
@@ -3970,6 +4174,7 @@ async function cancelBinanceAlgoOrder({ algoId, clientAlgoId, apiKey, secretKey 
       method: 'DELETE',
       apiKey,
       secretKey,
+      baseUrl,
       params: {
         algoId,
         clientAlgoId,
@@ -4026,6 +4231,7 @@ async function fetchProtectiveOrderStatus({
   clientAlgoId,
   apiKey,
   secretKey,
+  baseUrl = futuresTestnetBaseUrl,
 }) {
   if (algoId || clientAlgoId) {
     return fetchBinanceAlgoOrderStatus({
@@ -4033,6 +4239,7 @@ async function fetchProtectiveOrderStatus({
       clientAlgoId,
       apiKey,
       secretKey,
+      baseUrl,
     })
   }
 
@@ -4042,6 +4249,7 @@ async function fetchProtectiveOrderStatus({
       orderId,
       apiKey,
       secretKey,
+      baseUrl,
     })
   }
 
@@ -4055,6 +4263,7 @@ async function cancelProtectiveOrder({
   clientAlgoId,
   apiKey,
   secretKey,
+  baseUrl = futuresTestnetBaseUrl,
 }) {
   if (algoId || clientAlgoId) {
     return cancelBinanceAlgoOrder({
@@ -4062,6 +4271,7 @@ async function cancelProtectiveOrder({
       clientAlgoId,
       apiKey,
       secretKey,
+      baseUrl,
     })
   }
 
@@ -4071,6 +4281,7 @@ async function cancelProtectiveOrder({
       orderId,
       apiKey,
       secretKey,
+      baseUrl,
     })
   }
 
@@ -4081,8 +4292,12 @@ function getTrackedTradeQuantity(trade = {}) {
   return Number(trade.exchangeExecutedQuantity ?? trade.quantity ?? 0)
 }
 
-function isBinanceTestnetTrade(trade = {}) {
-  return String(trade?.mode || '') === 'binance-futures-testnet'
+function isBinanceExecutionMode(mode) {
+  return mode === 'binance-futures-testnet' || mode === 'binance-futures-live'
+}
+
+function isBinanceExecutedTrade(trade = {}) {
+  return isBinanceExecutionMode(String(trade?.mode || ''))
 }
 
 function isOpenExchangeOrder(order) {
@@ -5451,6 +5666,13 @@ function buildSignalCandidate({
   waitingSummary,
   patternLabel = null,
 }) {
+  const profile = effectiveStrategy.symbolRiskProfile
+  const profileStopLoss = profile
+    ? direction === 'LONG' ? entryPrice * (1 - effectiveStrategy.stopLossPercent / 100) : entryPrice * (1 + effectiveStrategy.stopLossPercent / 100)
+    : stopLoss
+  const profileTakeProfit = profile
+    ? direction === 'LONG' ? entryPrice * (1 + effectiveStrategy.takeProfitPercent / 100) : entryPrice * (1 - effectiveStrategy.takeProfitPercent / 100)
+    : takeProfit
   const professionalRequiredCount = signalModel.id === 'model-2' ? 2 : 0
   const combinedChecks = signalModel.id === 'model-2'
     ? [...baseChecks, ...professionalChecks]
@@ -5466,7 +5688,7 @@ function buildSignalCandidate({
     strategy: effectiveStrategy,
     signalModelId: signalModel.id,
     entryPrice,
-    stopLoss,
+    stopLoss: profileStopLoss,
     runningBalance: effectiveStrategy.runningBalance,
   })
 
@@ -5481,16 +5703,17 @@ function buildSignalCandidate({
     allSignalsPassed: score === combinedChecks.length,
     ready,
     entryPrice,
-    stopLoss,
-    takeProfit,
+    stopLoss: profileStopLoss,
+    takeProfit: profileTakeProfit,
     confidence: combinedChecks.length > 0 ? score / combinedChecks.length : 0,
     positionNotional: positionSizing.positionNotional,
     margin: positionSizing.margin,
+    leverage: positionSizing.strategy.leverage,
     configuredStopLossPercent: positionSizing.configuredStopLossPercent,
     maxLossPerTrade: positionSizing.maxLossPerTrade,
     summary: ready ? readySummary : waitingSummary,
-    support,
-    resistance,
+    support: profile ? (direction === 'LONG' ? profileStopLoss : profileTakeProfit) : support,
+    resistance: profile ? (direction === 'LONG' ? profileTakeProfit : profileStopLoss) : resistance,
     checklist: enrichSignalChecks(signalModel, combinedChecks),
     patternLabel,
   }
@@ -6055,6 +6278,7 @@ function buildSignalAnalysisSnapshotLegacy(
   const signalModel = getSignalModel(signalModelId)
   const effectiveStrategy = getEffectiveSignalModelStrategy(strategy, signalModelId, {
     runningBalance: strategy?.runningBalance,
+    symbol,
   })
 
   if (!latestBias || !previousBias || !latestSetup || !previousSetup || !latestEntry || !previousEntry) {
@@ -6227,13 +6451,19 @@ function buildSignalAnalysisSnapshotLegacy(
     const selectedScore = selectedDirection === 'LONG' ? longScore : shortScore
     const selectedThresholdPassed = selectedScore >= signalModel.minimumScore
     const selectedSide = selectedDirection === 'LONG' ? 'BUY' : 'SELL'
-    const selectedStopLoss = selectedDirection === 'LONG' ? longStopLoss : shortStopLoss
-    const selectedTakeProfit = selectedDirection === 'LONG' ? longTakeProfit : shortTakeProfit
+    const structuralStopLoss = selectedDirection === 'LONG' ? longStopLoss : shortStopLoss
+    const structuralTakeProfit = selectedDirection === 'LONG' ? longTakeProfit : shortTakeProfit
+    const profileStopLoss = effectiveStrategy.symbolRiskProfile
+      ? selectedDirection === 'LONG' ? latestEntry.close * (1 - effectiveStrategy.stopLossPercent / 100) : latestEntry.close * (1 + effectiveStrategy.stopLossPercent / 100)
+      : structuralStopLoss
+    const profileTakeProfit = effectiveStrategy.symbolRiskProfile
+      ? selectedDirection === 'LONG' ? latestEntry.close * (1 + effectiveStrategy.takeProfitPercent / 100) : latestEntry.close * (1 - effectiveStrategy.takeProfitPercent / 100)
+      : structuralTakeProfit
     const positionSizing = calculateSignalModelPositionSizing({
       strategy: effectiveStrategy,
       signalModelId,
       entryPrice: latestEntry.close,
-      stopLoss: selectedStopLoss,
+      stopLoss: profileStopLoss,
       runningBalance: effectiveStrategy.runningBalance,
     })
     const selectedSupport = structureSupport
@@ -6261,11 +6491,12 @@ function buildSignalAnalysisSnapshotLegacy(
       professionalRequiredCount: 0,
       allSignalsPassed: selectedScore === selectedChecks.length,
       entryPrice: latestEntry.close,
-      stopLoss: selectedStopLoss,
-      takeProfit: selectedTakeProfit,
+      stopLoss: profileStopLoss,
+      takeProfit: profileTakeProfit,
       confidence: selectedChecks.length > 0 ? selectedScore / selectedChecks.length : 0,
       positionNotional: positionSizing.positionNotional,
       margin: positionSizing.margin,
+      leverage: positionSizing.strategy.leverage,
       configuredStopLossPercent: positionSizing.configuredStopLossPercent,
       maxLossPerTrade: positionSizing.maxLossPerTrade,
       summary: ready
@@ -6508,6 +6739,7 @@ function buildBot4SignalSnapshot({
     confidence: ready ? 0.5 : 0,
     positionNotional: positionSizing.positionNotional,
     margin: positionSizing.margin,
+    leverage: positionSizing.strategy.leverage,
     configuredStopLossPercent: positionSizing.configuredStopLossPercent,
     maxLossPerTrade: positionSizing.maxLossPerTrade,
     summary: ready ? readySummary : waitingSummary,
@@ -6538,6 +6770,7 @@ export function buildSignalAnalysisSnapshot(
   const signalModel = getSignalModel(signalModelId)
   const effectiveStrategy = getEffectiveSignalModelStrategy(strategy, signalModelId, {
     runningBalance: strategy?.runningBalance,
+    symbol,
   })
   const closedBiasTimeframe = getClosedCandleSeries(biasTimeframe, 60 * 60_000)
   const closedSetupTimeframe = getClosedCandleSeries(setupTimeframe, 15 * 60_000)
@@ -7107,7 +7340,7 @@ function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotT
   const trackedSymbols = Array.from(new Set((settings.strategy.preferredSymbols || []).filter(Boolean)))
   const validatedTestnetTrades = history.filter((trade) => (
     ['VALIDATED', 'EXECUTED'].includes(String(trade.validationStatus || '').toUpperCase())
-    && trade.mode === 'binance-futures-testnet'
+    && isBinanceExecutionMode(trade.mode)
   ))
   const automatedTestnetTrades = validatedTestnetTrades.filter((trade) => trade.source === 'AUTO')
   const closedAutomatedTestnetTrades = automatedTestnetTrades.filter(isClosedTrade)
@@ -7128,7 +7361,7 @@ function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotT
   const closedTrades = history.filter(isClosedTrade)
   const openLocalPaperTrades = history.filter((trade) => (
     String(trade.status || '').toUpperCase() === 'OPEN'
-    && trade.mode !== 'binance-futures-testnet'
+    && !isBinanceExecutionMode(trade.mode)
   ))
   const liveGateValidationStartedAt = Date.parse('2026-06-08T21:00:00.000Z')
   const postHardeningClosedAutoTrades = closedTrades.filter((trade) => (
@@ -7508,7 +7741,7 @@ async function syncExchangeWalletBalance({
     }
   }
 
-  const walletEnvironment = normalizeWalletEnvironment(syncedWallet.environment)
+  const walletEnvironment = resolveAuthorizedWalletEnvironment(syncedWallet, currentSettings, { readOnly: true })
   const environmentLabel = walletEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
     ? 'Binance Futures Live'
     : 'Binance Futures Testnet'
@@ -7584,6 +7817,7 @@ async function closeExchangePositionImmediately({
   symbolInfo = null,
   apiKey,
   secretKey,
+  baseUrl = futuresTestnetBaseUrl,
 }) {
   if (!symbol || !side || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
     throw new Error('A valid symbol, side, and quantity are required to close the exchange position.')
@@ -7593,6 +7827,7 @@ async function closeExchangePositionImmediately({
   const closeOrder = await placeBinanceOrder({
     apiKey,
     secretKey,
+    baseUrl,
     symbol,
     side: getOppositeTradeSide(side),
     type: 'MARKET',
@@ -7605,6 +7840,7 @@ async function closeExchangePositionImmediately({
     orderId: closeOrder.orderId,
     apiKey,
     secretKey,
+    baseUrl,
   })
 
   return {
@@ -7614,7 +7850,7 @@ async function closeExchangePositionImmediately({
   }
 }
 
-async function cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey }) {
+async function cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   await Promise.allSettled([
     cancelProtectiveOrder({
       symbol: trade.symbol,
@@ -7623,6 +7859,7 @@ async function cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey }) {
       clientAlgoId: trade.exchangeStopAlgoClientId || trade.exchangeStopClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }),
     cancelProtectiveOrder({
       symbol: trade.symbol,
@@ -7631,12 +7868,40 @@ async function cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey }) {
       clientAlgoId: trade.exchangeTakeProfitAlgoClientId || trade.exchangeTakeProfitClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }),
   ])
 }
 
-async function createExchangeTradeExecution(payload, settings, { forceBinance = false } = {}) {
-  const { apiKey, secretKey } = getEffectiveCredentials(settings)
+// Create the replacement first, then cancel the existing TP. This order keeps
+// the exchange position protected if Binance rejects the replacement request.
+async function extendExchangeTakeProfitForBot8(trade, nextTakeProfit, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
+  const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), trade.symbol)
+  if (!symbolInfo) throw new Error(`No futures symbol rules found for ${trade.symbol}.`)
+
+  const quantity = getTrackedTradeQuantity(trade)
+  const triggerPrice = normalizeFuturesPrice(symbolInfo, nextTakeProfit, getProtectiveTriggerRoundMode(trade.side, 'TAKE_PROFIT_MARKET'))
+  const replacement = await placeBinanceAlgoOrder({
+    apiKey, secretKey, baseUrl, algoType: 'CONDITIONAL', symbol: trade.symbol, side: getOppositeTradeSide(trade.side), type: 'TAKE_PROFIT_MARKET',
+    triggerPrice: formatFuturesPrice(symbolInfo, triggerPrice, getProtectiveTriggerRoundMode(trade.side, 'TAKE_PROFIT_MARKET')),
+    quantity: formatFuturesQuantity(symbolInfo, quantity), reduceOnly: 'true', workingType: 'CONTRACT_PRICE', priceProtect: 'TRUE', clientAlgoId: `xenios${Date.now()}ai_tp`,
+  })
+  try {
+    await cancelProtectiveOrder({ symbol: trade.symbol, orderId: trade.exchangeTakeProfitOrderId, algoId: trade.exchangeTakeProfitAlgoId, clientAlgoId: trade.exchangeTakeProfitAlgoClientId || trade.exchangeTakeProfitClientOrderId, apiKey, secretKey, baseUrl })
+  } catch (error) {
+    await cancelProtectiveOrder({ symbol: trade.symbol, orderId: replacement?.orderId, algoId: replacement?.algoId, clientAlgoId: replacement?.clientAlgoId, apiKey, secretKey, baseUrl }).catch(() => null)
+    throw error
+  }
+  return { ...trade, takeProfit: triggerPrice, exchangeTakeProfitOrderId: replacement.orderId || null, exchangeTakeProfitClientOrderId: replacement.clientOrderId || null, exchangeTakeProfitAlgoId: replacement.algoId || null, exchangeTakeProfitAlgoClientId: replacement.clientAlgoId || null }
+}
+
+async function createExchangeTradeExecution(payload, settings, { forceBinance = false, environment } = {}) {
+  const resolvedEnvironment = normalizeWalletEnvironment(environment)
+  const isLive = resolvedEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
+  const executionMode = isLive ? 'binance-futures-live' : 'binance-futures-testnet'
+  const environmentLabel = isLive ? 'Binance Futures Live' : 'Binance Futures Testnet'
+  const baseUrl = getFuturesBaseUrl(resolvedEnvironment)
+  const { apiKey, secretKey } = getEffectiveCredentials(settings, resolvedEnvironment)
   const marginMode = normalizeMarginMode(payload.marginMode ?? settings.strategy.marginMode)
 
   if (!forceBinance) {
@@ -7651,7 +7916,7 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     return {
       mode: 'local-paper',
       validationStatus: 'SIMULATED',
-      message: 'Binance testnet keys are not configured. Saved as local paper trade.',
+      message: `${environmentLabel} keys are not configured. Saved as local paper trade.`,
     }
   }
 
@@ -7677,16 +7942,19 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     marginMode,
     apiKey,
     secretKey,
+    baseUrl,
   })
   await setBinanceLeverage({
     symbol: payload.symbol,
     leverage: payload.leverage,
     apiKey,
     secretKey,
+    baseUrl,
   })
 
   const clientOrderSeed = `xenios${Date.now()}${Math.random().toString(36).slice(2, 6)}`
   const entryOrder = await placeBinanceOrder({
+    baseUrl,
     apiKey,
     secretKey,
     symbol: payload.symbol,
@@ -7700,12 +7968,13 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     orderId: entryOrder.orderId,
     apiKey,
     secretKey,
+    baseUrl,
   })
   const executedQuantity = Number(entryOrderStatus?.executedQty || entryOrder.executedQty || payload.quantity)
   const resolvedEntryPrice = getExchangeOrderFillPrice(entryOrderStatus || entryOrder, payload.entryPrice)
 
   if (!Number.isFinite(executedQuantity) || executedQuantity <= 0) {
-    throw new Error('Binance testnet did not return a valid executed quantity for the entry order.')
+    throw new Error(`${environmentLabel} did not return a valid executed quantity for the entry order.`)
   }
 
   let stopOrder = null
@@ -7715,6 +7984,7 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     stopOrder = await placeBinanceAlgoOrder({
       apiKey,
       secretKey,
+      baseUrl,
       algoType: 'CONDITIONAL',
       symbol: payload.symbol,
       side: getOppositeTradeSide(payload.side),
@@ -7733,6 +8003,7 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     takeProfitOrder = await placeBinanceAlgoOrder({
       apiKey,
       secretKey,
+      baseUrl,
       algoType: 'CONDITIONAL',
       symbol: payload.symbol,
       side: getOppositeTradeSide(payload.side),
@@ -7750,9 +8021,9 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     })
 
     return {
-      mode: 'binance-futures-testnet',
+      mode: executionMode,
       validationStatus: 'EXECUTED',
-      message: `Order executed on Binance USD-M Futures Testnet in ${marginMode.toLowerCase()} margin mode with exchange-side protective algo orders.`,
+      message: `Order executed on ${environmentLabel} in ${marginMode.toLowerCase()} margin mode with exchange-side protective algo orders.`,
       entryPrice: resolvedEntryPrice > 0 ? resolvedEntryPrice : Number(payload.entryPrice || 0),
       quantity: executedQuantity,
       notional: Number(((resolvedEntryPrice > 0 ? resolvedEntryPrice : Number(payload.entryPrice || 0)) * executedQuantity).toFixed(8)),
@@ -7778,6 +8049,7 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
         clientAlgoId: stopOrder?.clientAlgoId,
         apiKey,
         secretKey,
+        baseUrl,
       }),
       cancelProtectiveOrder({
         symbol: payload.symbol,
@@ -7786,6 +8058,7 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
         clientAlgoId: takeProfitOrder?.clientAlgoId,
         apiKey,
         secretKey,
+        baseUrl,
       }),
     ])
 
@@ -7796,19 +8069,21 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
       symbolInfo: resolvedSymbolInfo,
       apiKey,
       secretKey,
+      baseUrl,
     }).catch(() => null)
 
     throw new Error(`Failed to place exchange-side stop loss / take profit after entry: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
-async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey }) {
+async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   const fills = await fetchBinanceUserTrades({
     symbol: trade.symbol,
     startTime: Math.max(Number(trade.transactTime || 0) - 60_000, 0),
     limit: 100,
     apiKey,
     secretKey,
+    baseUrl,
   })
 
   const trackedQuantity = getTrackedTradeQuantity(trade)
@@ -7868,7 +8143,7 @@ async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKe
   }
 }
 
-async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, secretKey }, latestPrices) {
+async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }, latestPrices) {
   const [stopOrderStatus, takeProfitOrderStatus] = await Promise.all([
     fetchProtectiveOrderStatus({
       symbol: trade.symbol,
@@ -7877,6 +8152,7 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
       clientAlgoId: trade.exchangeStopAlgoClientId || trade.exchangeStopClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }).catch(() => null),
     fetchProtectiveOrderStatus({
       symbol: trade.symbol,
@@ -7885,6 +8161,7 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
       clientAlgoId: trade.exchangeTakeProfitAlgoClientId || trade.exchangeTakeProfitClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }).catch(() => null),
   ])
 
@@ -7896,6 +8173,7 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
       clientAlgoId: trade.exchangeTakeProfitAlgoClientId || trade.exchangeTakeProfitClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }).catch(() => null)
     return closeTradeRecord({
       trade,
@@ -7914,6 +8192,7 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
       clientAlgoId: trade.exchangeStopAlgoClientId || trade.exchangeStopClientOrderId,
       apiKey,
       secretKey,
+      baseUrl,
     }).catch(() => null)
     return closeTradeRecord({
       trade,
@@ -7928,8 +8207,8 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
     return trade
   }
 
-  await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey })
-  const reconciledFill = await resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey }).catch(() => null)
+  await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey, baseUrl })
+  const reconciledFill = await resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl }).catch(() => null)
   let exitPrice = Number(reconciledFill?.exitPrice || 0)
 
   if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
@@ -7978,12 +8257,16 @@ async function recordTrade({
   const settings = await getSettings()
   const wallets = normalizeWallets(settings.wallets)
   const wallet = getWalletById(walletId, wallets)
+  const environment = resolveAuthorizedWalletEnvironment(wallet, settings)
+  const environmentLabel = environment === REAL_MONEY_WALLET_ENVIRONMENT
+    ? 'Binance Futures Live'
+    : 'Binance Futures Testnet'
   const mustExecuteOnBinance = requiresBinanceExecution({ wallet, source })
-  if (mustExecuteOnBinance && !hasExchangeCredentials(settings)) {
+  if (mustExecuteOnBinance && !hasExchangeCredentials(settings, environment)) {
     throw new Error(
       isAutoTradeSource(source)
-        ? 'Auto trades must execute on Binance Futures Testnet. Configure the Binance Testnet API key and secret before the bot can open a trade.'
-        : 'Binance Futures Testnet API key and secret are required before a Phase 2 wallet can place a trade.',
+        ? `Auto trades must execute on ${environmentLabel}. Configure the ${environmentLabel} API key and secret before the bot can open a trade.`
+        : `${environmentLabel} API key and secret are required before a Phase 2 wallet can place a trade.`,
     )
   }
   const resolvedConfiguredStopLossPercent = Number(
@@ -8008,11 +8291,11 @@ async function recordTrade({
     entryPrice,
     leverage,
     marginMode: resolvedMarginMode,
-  }, settings, { forceBinance: mustExecuteOnBinance })
-  if (mustExecuteOnBinance && execution.mode !== 'binance-futures-testnet') {
+  }, settings, { forceBinance: mustExecuteOnBinance, environment })
+  if (mustExecuteOnBinance && !isBinanceExecutionMode(execution.mode)) {
     throw new Error(
       isAutoTradeSource(source)
-        ? 'Auto trades must execute on Binance Futures Testnet. The order was blocked because Binance execution was not confirmed.'
+        ? `Auto trades must execute on ${environmentLabel}. The order was blocked because Binance execution was not confirmed.`
         : 'Phase 2 wallets must execute on Binance Futures Testnet. Check the API credentials and wallet sync state.',
     )
   }
@@ -8107,7 +8390,9 @@ function closeTradeRecord({
 }
 
 function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = null, learningBotSettings = defaultLearningBotSettings) {
-  if (trade.status !== 'OPEN' || isBinanceTestnetTrade(trade)) {
+  const signalModelId = ensureSignalModelId(trade.signalModelId)
+  const isBot8Trade = signalModelId === 'model-8'
+  if (trade.status !== 'OPEN' || (isBinanceExecutedTrade(trade) && !isBot8Trade)) {
     return trade
   }
 
@@ -8121,9 +8406,8 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
   }
 
   const config = normalizeLearningBotSettings(learningBotSettings)
-  const signalModelId = ensureSignalModelId(trade.signalModelId)
   const perBotOverride = config.perBotOverrides?.[signalModelId] || null
-  const aiEnabled = Boolean(perBotOverride?.enabled || config.aiEntryFilter.enabled)
+  const aiEnabled = isBot8Trade || Boolean(perBotOverride?.enabled || config.aiEntryFilter.enabled)
 
   if (!aiEnabled || !trainStatus?.metrics) {
     return trade
@@ -8152,7 +8436,12 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
   let managementAction = null
   let managementReason = ''
 
-  if (decision.accept) {
+  if (isBot8Trade && !decision.accept && progressToTarget <= -0.2) {
+    managementAction = 'emergency-exit'
+    managementReason = `Bot 8 AI rejected ${decision.setupFamily} at ${decision.finalScore}/${decision.thresholdScore} after an adverse move; closing well before the liquidation zone.`
+  }
+
+  if (!managementAction && decision.accept) {
     if (progressToTarget >= 0.45) {
       nextStopLoss = direction === 1
         ? Math.max(stopLoss, entryPrice)
@@ -8161,14 +8450,14 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
       managementReason = `AI accepted ${decision.setupFamily} and moved stop toward breakeven at score ${decision.finalScore}/${decision.thresholdScore}.`
     }
 
-    if (progressToTarget >= 0.75 && Number(decision.setupStats?.avgReward || 0) > 0) {
+    if (progressToTarget >= (isBot8Trade ? 0.7 : 0.75) && Number(decision.setupStats?.avgReward || 0) > 0) {
       nextTakeProfit = direction === 1
-        ? Math.max(nextTakeProfit, entryPrice + (initialReward * 1.12))
-        : Math.min(nextTakeProfit, entryPrice - (initialReward * 1.12))
+        ? Math.max(nextTakeProfit, entryPrice + (initialReward * (isBot8Trade ? 1.2 : 1.12)))
+        : Math.min(nextTakeProfit, entryPrice - (initialReward * (isBot8Trade ? 1.2 : 1.12)))
       managementAction = 'extend-target'
       managementReason = `AI accepted ${decision.setupFamily} and extended take profit using profitable policy data.`
     }
-  } else if (inProfit && progressToTarget >= 0.2) {
+  } else if (!managementAction && inProfit && progressToTarget >= 0.2) {
     nextStopLoss = direction === 1
       ? Math.max(stopLoss, entryPrice - (initialRisk * 0.35))
       : Math.min(stopLoss, entryPrice + (initialRisk * 0.35))
@@ -8210,7 +8499,7 @@ function applyAiOpenTradeManagement(trade = {}, currentPrice = 0, trainStatus = 
 export function evaluateAiLossExit(trade = {}, currentPrice = 0, trainStatus = null, learningBotSettings = defaultLearningBotSettings) {
   const idle = { exit: false, score: 0, reason: '' }
 
-  if (trade.status !== 'OPEN' || isBinanceTestnetTrade(trade)) {
+  if (trade.status !== 'OPEN' || isBinanceExecutedTrade(trade)) {
     return idle
   }
 
@@ -8334,18 +8623,37 @@ export function evaluateAiLossExit(trade = {}, currentPrice = 0, trainStatus = n
 async function updateOpenTrades() {
   let settings = await getSettings()
   const learningBotTrainStatus = await getLearningBotTrainStatus().catch(() => defaultLearningBotTrainStatus)
-  const exchangeCredentials = getEffectiveCredentials(settings)
-  const syncedWallet = getPrimaryExchangeSyncedWallet(settings.wallets)
-  let exchangeAccountSnapshot = null
+  const walletExchangeContextCache = new Map()
 
-  if (syncedWallet) {
-    const syncResult = await syncExchangeWalletBalance({
-      settings,
-      walletId: syncedWallet.id,
-      suppressErrors: true,
-    })
-    settings = syncResult.settings
-    exchangeAccountSnapshot = syncResult.accountSnapshot
+  // Each bot wallet can carry its own environment (testnet vs real money), so
+  // credentials, base URL, and the synced account snapshot used to reconcile
+  // a trade must be resolved per-wallet, not from one shared/global pair —
+  // otherwise a real-money trade could be reconciled against a testnet
+  // account snapshot (or vice versa), silently corrupting its close state.
+  async function getWalletExchangeContext(walletId) {
+    if (walletExchangeContextCache.has(walletId)) {
+      return walletExchangeContextCache.get(walletId)
+    }
+
+    const wallet = getWalletById(walletId, settings.wallets)
+    const environment = resolveAuthorizedWalletEnvironment(wallet, settings)
+    const credentials = getEffectiveCredentials(settings, environment)
+    const baseUrl = getFuturesBaseUrl(environment)
+    let accountSnapshot = null
+
+    if (wallet && credentials.apiKey && credentials.secretKey) {
+      const syncResult = await syncExchangeWalletBalance({
+        settings,
+        walletId: wallet.id,
+        suppressErrors: true,
+      })
+      settings = syncResult.settings
+      accountSnapshot = syncResult.accountSnapshot
+    }
+
+    const context = { wallet, environment, credentials, baseUrl, accountSnapshot }
+    walletExchangeContextCache.set(walletId, context)
+    return context
   }
 
   const history = await getTradeHistory()
@@ -8379,13 +8687,35 @@ async function updateOpenTrades() {
       continue
     }
 
-    if (isBinanceTestnetTrade(normalizedTrade) && exchangeAccountSnapshot && exchangeCredentials.apiKey && exchangeCredentials.secretKey) {
-      const reconciledTrade = await reconcileExchangeTradeState(
+    const tradeExchangeContext = isBinanceExecutedTrade(normalizedTrade) && normalizedTrade.walletId
+      ? await getWalletExchangeContext(normalizedTrade.walletId)
+      : null
+
+    if (tradeExchangeContext && tradeExchangeContext.accountSnapshot && tradeExchangeContext.credentials.apiKey && tradeExchangeContext.credentials.secretKey) {
+      const { credentials: exchangeCredentials, baseUrl: exchangeBaseUrl, accountSnapshot: exchangeAccountSnapshot } = tradeExchangeContext
+      let reconciledTrade = await reconcileExchangeTradeState(
         normalizedTrade,
         exchangeAccountSnapshot,
-        exchangeCredentials,
+        { ...exchangeCredentials, baseUrl: exchangeBaseUrl },
         latestPrices,
       )
+
+      if (reconciledTrade.status === 'OPEN' && ensureSignalModelId(reconciledTrade.signalModelId) === 'model-8') {
+        const ticker = await fetchTickerPrice(reconciledTrade.symbol).catch(() => null)
+        const livePrice = Number(ticker?.price || 0)
+        const managedTrade = applyAiOpenTradeManagement(reconciledTrade, livePrice, learningBotTrainStatus, settings.learningBot)
+        const managementAction = managedTrade.aiManagement?.action
+        if (managementAction === 'emergency-exit') {
+          await cancelProtectiveOrdersForTrade(reconciledTrade, { ...exchangeCredentials, baseUrl: exchangeBaseUrl })
+          const closeResult = await closeExchangePositionImmediately({ symbol: reconciledTrade.symbol, side: reconciledTrade.side, quantity: getTrackedTradeQuantity(reconciledTrade), apiKey: exchangeCredentials.apiKey, secretKey: exchangeCredentials.secretKey, baseUrl: exchangeBaseUrl })
+          reconciledTrade = closeTradeRecord({ trade: managedTrade, exitPrice: Number(closeResult.exitPrice || livePrice), status: 'CLOSED_AI_RISK', result: 'AI_RISK', closedAt: closeResult.closedAt })
+        } else if (managementAction === 'extend-target' && Number(managedTrade.takeProfit) !== Number(reconciledTrade.takeProfit)) {
+          reconciledTrade = await extendExchangeTakeProfitForBot8(reconciledTrade, managedTrade.takeProfit, { ...exchangeCredentials, baseUrl: exchangeBaseUrl })
+          reconciledTrade = { ...reconciledTrade, aiManagement: managedTrade.aiManagement }
+        } else if (JSON.stringify(managedTrade) !== JSON.stringify(reconciledTrade)) {
+          reconciledTrade = managedTrade
+        }
+      }
 
       if (JSON.stringify(reconciledTrade) !== JSON.stringify(normalizedTrade)) {
         changed = true
@@ -8430,6 +8760,28 @@ async function updateOpenTrades() {
       const action = managedTrade.aiManagement?.action || 'adjusted'
       const reason = managedTrade.aiManagement?.reason || 'AI adjusted the open-trade management levels.'
       logTerminalLine('AI', `${managedTrade.symbol} open trade ${action}: ${reason}`, 'accent')
+    }
+
+    if (managedTrade.aiManagement?.action === 'emergency-exit') {
+      changed = true
+      const closedTrade = closeTradeRecord({ trade: managedTrade, exitPrice: currentPrice, status: 'CLOSED_AI_RISK', result: 'AI_RISK' })
+      logTradeClosedToTerminal(normalizedTrade, closedTrade)
+      updated.push(closedTrade)
+      continue
+    }
+
+    const tradeAgeHours = (Date.now() - Number(managedTrade.transactTime || 0)) / 3_600_000
+    if (tradeAgeHours >= PAPER_TRADE_MAX_HOLD_HOURS) {
+      changed = true
+      const closedTrade = closeTradeRecord({
+        trade: managedTrade,
+        exitPrice: currentPrice,
+        status: 'CLOSED_TIMEOUT',
+        result: 'TIMEOUT',
+      })
+      logTradeClosedToTerminal(normalizedTrade, closedTrade)
+      updated.push(closedTrade)
+      continue
     }
 
     const canUseObservedRange = Number(managedTrade.transactTime || 0) < Number(priceSnapshot.latestCandleOpenTime || 0)
@@ -8612,6 +8964,21 @@ async function runAutoTrader(trigger = 'MANUAL') {
 
     const universeSymbols = settings.strategy.preferredSymbols || []
     const enabledWallets = getTradingWallets(settings.wallets).filter((wallet) => wallet.enabled)
+
+    // wallet-real-money is a MAIN-kind wallet and is intentionally excluded
+    // from getTradingWallets()/enabled above - it only ever joins a run when
+    // the owner has explicitly armed live execution (Real Money Trading page
+    // -> "Arm Live Trading"). It always runs the currently-assigned bot's
+    // signal model, sized by REAL_MONEY_EXECUTION_RISK_CAPS (applied further
+    // below), never the assigned bot's own testnet-scaled strategy.
+    const realMoneyWallet = getRealMoneyWallet(settings.wallets)
+    if (settings.strategy.realMoneyExecutionArmed && realMoneyWallet) {
+      enabledWallets.push({
+        ...realMoneyWallet,
+        assignedSignalModelId: ensureSignalModelId(settings.strategy.realMoneySignalModelId),
+      })
+    }
+
     pushStep('Fetched Binance Futures exchange info.', 'info')
     pushStep(`Liquidity x volatility scan selected the top ${universeSymbols.length} symbols: ${universeSymbols.join(', ')}.`, 'info')
     pushStep(
@@ -8651,6 +9018,57 @@ async function runAutoTrader(trigger = 'MANUAL') {
       }
 
       return symbolInputCache.get(symbol)
+    }
+
+    // Every bot's full signal snapshot for a symbol, cached per run so the
+    // leave-one-out forecast below is computed once per symbol total (not
+    // once per wallet) - reuses the same cached klines as getSymbolInputs, so
+    // this is pure CPU, no extra Binance calls.
+    const symbolAllModelSnapshotCache = new Map()
+    async function getAllModelSnapshotsForSymbol(symbol) {
+      if (symbolAllModelSnapshotCache.has(symbol)) {
+        return symbolAllModelSnapshotCache.get(symbol)
+      }
+
+      const marketInputs = await getSymbolInputs(symbol)
+      const snapshots = {}
+
+      for (const model of SIGNAL_MODELS) {
+        if (model.status === 'blank') {
+          continue
+        }
+
+        try {
+          const modelStrategy = getEffectiveSignalModelStrategy(settings.strategy, model.id, {})
+          const snapshot = buildSignalAnalysisSnapshot(
+            symbol,
+            marketInputs.bias,
+            marketInputs.higher,
+            marketInputs.entry,
+            modelStrategy,
+            model.id,
+            marketInputs.marketContext,
+            marketInputs.trigger,
+          )
+          if (snapshot) {
+            snapshots[model.id] = snapshot
+          }
+        } catch {
+          // One model failing to evaluate this symbol just means fewer forecast
+          // votes - never let it break the wallet whose candidate we're scoring.
+        }
+      }
+
+      symbolAllModelSnapshotCache.set(symbol, snapshots)
+      return snapshots
+    }
+
+    // The draft cross-bot forecast for one candidate, excluding the
+    // candidate's own signal model so a bot never nudges itself with its own
+    // vote (see computeSixtyCandleForecast's excludeModelId).
+    async function getLeaveOneOutForecastForCandidate(candidate) {
+      const snapshots = await getAllModelSnapshotsForSymbol(candidate.symbol)
+      return computeSixtyCandleForecast(snapshots, { excludeModelId: candidate.signalModelId })
     }
 
     const walletResults = []
@@ -8778,9 +9196,36 @@ async function runAutoTrader(trigger = 'MANUAL') {
         strategy: settings.strategy,
         startingBalance: getWalletEffectiveStartingBalance(resolvedWallet),
       })
-      const walletStrategy = getEffectiveSignalModelStrategy(settings.strategy, walletSignalModelId, {
+      let walletStrategy = getEffectiveSignalModelStrategy(settings.strategy, walletSignalModelId, {
         runningBalance: baseWalletAccountSnapshot.runningBalance,
       })
+
+      if (resolvedWallet.id === REAL_MONEY_WALLET_ID) {
+        // buildSignalAnalysisSnapshot() re-derives its own "effective strategy"
+        // from strategy.signalModelStrategies[modelId] on every call - a flat
+        // top-level override here is not enough, it gets silently re-clobbered
+        // back to the assigned bot's own (much larger) numbers the moment the
+        // signal scan runs. The caps must also live in
+        // signalModelStrategies[walletSignalModelId] so that re-derivation
+        // resolves to the same capped values instead of undoing them.
+        const cappedModelStrategy = {
+          ...(walletStrategy.signalModelStrategies?.[walletSignalModelId] || {}),
+          ...REAL_MONEY_EXECUTION_RISK_CAPS,
+        }
+        walletStrategy = {
+          ...walletStrategy,
+          ...REAL_MONEY_EXECUTION_RISK_CAPS,
+          signalModelStrategies: {
+            ...walletStrategy.signalModelStrategies,
+            [walletSignalModelId]: cappedModelStrategy,
+          },
+        }
+        pushWalletStep(
+          `Live execution armed. Position size hard-capped: ${REAL_MONEY_EXECUTION_RISK_CAPS.marginPerTrade} USDT margin x${REAL_MONEY_EXECUTION_RISK_CAPS.leverage} (~${walletStrategy.maxLossPerTrade} USDT max loss/trade from the assigned bot's own stop distance), max loss/day ${REAL_MONEY_EXECUTION_RISK_CAPS.maxLossPerDay} USDT, ${REAL_MONEY_EXECUTION_RISK_CAPS.maxOpenPositions} open position max, ${REAL_MONEY_EXECUTION_RISK_CAPS.maxTradesPerDay} trades/day max.`,
+          'info',
+        )
+      }
+
       let walletAccountSnapshot = summarizeAccount({
         trades: walletHistory,
         livePrices: openTradePrices,
@@ -9043,6 +9488,37 @@ async function runAutoTrader(trigger = 'MANUAL') {
         continue
       }
 
+      // Draft cross-bot forecast, leave-one-out (excludes this wallet's own
+      // signal model). Bounded, extension-only TP blend - see
+      // applyForecastTakeProfitBlend; never shrinks the bot's own target and
+      // never applies against an opposing or absent consensus.
+      const leaveOneOutForecast = await getLeaveOneOutForecastForCandidate(candidate)
+      const forecastTpBlend = applyForecastTakeProfitBlend(candidate, leaveOneOutForecast)
+      if (forecastTpBlend.extended) {
+        pushWalletStep(
+          `Other-bot consensus forecast (${leaveOneOutForecast.direction} ${leaveOneOutForecast.percent.toFixed(2)}%, confidence ${(leaveOneOutForecast.confidence * 100).toFixed(0)}%) extended take-profit from ${candidate.takeProfit.toFixed(6)} to ${forecastTpBlend.takeProfit.toFixed(6)}.`,
+          'info',
+          { symbol: candidate.symbol, direction: candidate.direction },
+        )
+        candidate.takeProfit = forecastTpBlend.takeProfit
+      }
+
+      const candidateMarketInputs = await getSymbolInputs(candidate.symbol).catch(() => null)
+      const candidateRangeCheck = evaluateCandidateRangeViability(candidate, candidateMarketInputs)
+      if (!candidateRangeCheck.viable) {
+        pushWalletStep(
+          `Blocked ${candidate.symbol} because its ${candidateRangeCheck.rangeHours}h price range (${candidateRangeCheck.rangePercent.toFixed(3)}%) is smaller than its stop-loss distance (${candidateRangeCheck.slDistancePercent.toFixed(3)}%). This setup cannot realistically reach its brackets.`,
+          'blocked',
+          { symbol: candidate.symbol, rangePercent: candidateRangeCheck.rangePercent, slDistancePercent: candidateRangeCheck.slDistancePercent },
+        )
+        await finishWallet({
+          executed: false,
+          reason: `${candidate.symbol} recent price range is too small for its configured stop distance.`,
+          order: null,
+        })
+        continue
+      }
+
       const symbolInfo = findSymbolRules(exchangeInfo, candidate.symbol)
       if (!symbolInfo) {
         pushWalletStep(`Missing futures symbol rules for ${candidate.symbol}.`, 'blocked')
@@ -9152,6 +9628,24 @@ async function runAutoTrader(trigger = 'MANUAL') {
         aiFilterDecision.patternScore = Number(patternScoreValue.toFixed(3))
         aiFilterDecision.patternScoreDelta = patternNudge.delta
 
+        // Leave-one-out cross-bot forecast nudge, on top of the pattern
+        // nudge above - same bounded, asymmetric, never-a-hard-gate shape.
+        const forecastAgreement = leaveOneOutForecast.direction
+          ? (leaveOneOutForecast.direction === candidate.direction ? leaveOneOutForecast.confidence : -leaveOneOutForecast.confidence)
+          : 0
+        const forecastNudge = applyForecastAiNudge(aiFilterDecision, forecastAgreement)
+        if (forecastNudge.delta !== 0) {
+          pushWalletStep(
+            `Other-bot consensus forecast (${leaveOneOutForecast.direction || 'split'} ${leaveOneOutForecast.percent.toFixed(2)}%) ${forecastNudge.delta > 0 ? 'added' : 'removed'} ${Math.abs(forecastNudge.delta)} to the AI score: ${aiFilterDecision.finalScore} -> ${forecastNudge.finalScore}/${aiFilterDecision.thresholdScore}${forecastNudge.flipped ? ` (${forecastNudge.accept ? 'now clears' : 'now below'} the threshold)` : ''}.`,
+            'info',
+            { symbol: candidate.symbol, forecastAgreement: Number(forecastAgreement.toFixed(3)), forecastDelta: forecastNudge.delta },
+          )
+        }
+        aiFilterDecision.finalScore = forecastNudge.finalScore
+        aiFilterDecision.accept = forecastNudge.accept
+        aiFilterDecision.forecastAgreement = Number(forecastAgreement.toFixed(3))
+        aiFilterDecision.forecastScoreDelta = forecastNudge.delta
+
         pushWalletStep(
           `AI filter scored ${candidate.symbol} ${aiFilterDecision.finalScore}/100 for ${aiFilterDecision.setupFamily} using ${aiFilterDecision.policySource} policy (threshold ${aiFilterDecision.thresholdScore}).`,
           aiFilterDecision.accept ? 'pass' : 'blocked',
@@ -9203,7 +9697,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
           notional: candidate.positionNotional,
           margin: candidate.margin ?? walletStrategy.marginPerTrade,
           marginMode: walletStrategy.marginMode,
-          leverage: walletStrategy.leverage,
+          leverage: candidate.leverage ?? walletStrategy.leverage,
           configuredStopLossPercent: candidate.configuredStopLossPercent ?? walletStrategy.stopLossPercent,
           source: 'AUTO',
           signalSummary: candidate.summary,
@@ -9220,6 +9714,10 @@ async function runAutoTrader(trigger = 'MANUAL') {
             patternScore: aiFilterDecision.patternScore ?? Number(candidate.patternScore || 0),
             patternScoreDelta: aiFilterDecision.patternScoreDelta ?? 0,
             patternBias: candidate.patternBias || 'neutral',
+            forecastAgreement: aiFilterDecision.forecastAgreement ?? 0,
+            forecastScoreDelta: aiFilterDecision.forecastScoreDelta ?? 0,
+            forecastDirection: leaveOneOutForecast.direction,
+            forecastPercent: leaveOneOutForecast.percent,
           } : null,
           walletId: resolvedWallet.id,
           walletName: resolvedWallet.name,
@@ -9896,20 +10394,26 @@ app.post('/api/trade-history/:tradeId/manual-close', async (request, response) =
 
     let updatedTrade
 
-    if (isBinanceTestnetTrade(trade)) {
-      const { apiKey, secretKey } = getEffectiveCredentials(settings)
+    if (isBinanceExecutedTrade(trade)) {
+      const closeWallet = getWalletById(trade.walletId, settings.wallets)
+      const closeEnvironment = resolveAuthorizedWalletEnvironment(closeWallet, settings)
+      const closeEnvironmentLabel = closeEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
+        ? 'Binance Futures Live'
+        : 'Binance Futures Testnet'
+      const { apiKey, secretKey } = getEffectiveCredentials(settings, closeEnvironment)
+      const closeBaseUrl = getFuturesBaseUrl(closeEnvironment)
 
       if (!apiKey || !secretKey) {
         response.status(409).json({
-          error: 'Binance Futures Testnet API key and secret are required to manually close a Phase 2 trade.',
+          error: `${closeEnvironmentLabel} API key and secret are required to manually close this trade.`,
         })
         return
       }
 
-      const accountSnapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey })
+      const accountSnapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl: closeBaseUrl })
       const openPositionAmount = Math.abs(getExchangePositionAmount(accountSnapshot, trade.symbol))
 
-      await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey })
+      await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey, baseUrl: closeBaseUrl })
 
       let closeResult = null
       if (openPositionAmount > 1e-8) {
@@ -9919,10 +10423,11 @@ app.post('/api/trade-history/:tradeId/manual-close', async (request, response) =
           quantity: openPositionAmount,
           apiKey,
           secretKey,
+          baseUrl: closeBaseUrl,
         })
       }
 
-      const reconciledFill = await resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey }).catch(() => null)
+      const reconciledFill = await resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl: closeBaseUrl }).catch(() => null)
       let exitPrice = Number(closeResult?.exitPrice || reconciledFill?.exitPrice || 0)
 
       if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
@@ -10257,6 +10762,33 @@ if (shouldServeBuiltFrontend) {
 }
 
 if (IS_MAIN_MODULE) {
+// Bot 10 (Consolidated Knowledge) has its own complete backend
+// (server/consolidated-bot.js + consolidated-testnet.js, already built,
+// tested, and documented in docs/CONSOLIDATED_BOT.md) that was never
+// actually mounted onto this app - so /api/consolidated/* 404'd and its
+// autostart scan loop never ran, even though server/data/consolidated/
+// testnet-state.json already had testnet entries enabled from a past
+// session. Wiring it in here restores that, using the same testnet
+// credential fields (settings.apiKey/secretKey, env-fallback) the rest of
+// the app's Binance Testnet execution already uses.
+async function getConsolidatedTestnetCredentials() {
+  const currentSettings = await getSettings()
+  return {
+    apiKey: currentSettings.apiKey || process.env.BINANCE_TESTNET_API_KEY || '',
+    secretKey: currentSettings.secretKey || process.env.BINANCE_TESTNET_SECRET_KEY || '',
+  }
+}
+
+registerConsolidatedBot(app, {
+  dataDir,
+  fetchKlines,
+  toCandleData,
+  buildSignalAnalysisSnapshot,
+  getSettings,
+  getTestnetCredentials: getConsolidatedTestnetCredentials,
+  autostart: IS_MAIN_MODULE,
+})
+
 setInterval(() => {
   updateOpenTrades().catch((error) => {
     console.error('Failed to update open trades:', error)

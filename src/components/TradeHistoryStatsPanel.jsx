@@ -23,11 +23,12 @@ export function TradeHistoryStatsPanel({
   trackedSymbols = [],
   wallets = [],
   title = 'Trade Performance',
+  startingBalance = null,
 }) {
   const accountSnapshot = summarizeAccount({
     trades,
     livePrices,
-    startingBalance: getTotalWalletStartingBalance(wallets),
+    startingBalance: startingBalance != null ? startingBalance : getTotalWalletStartingBalance(wallets),
   })
   const winRate = accountSnapshot.closedTradeCount > 0 ? (accountSnapshot.wins / accountSnapshot.closedTradeCount) * 100 : 0
   const symbolsToShow = trackedSymbols.length > 0

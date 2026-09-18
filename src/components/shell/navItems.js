@@ -42,7 +42,7 @@ export const NAV_GROUPS = [
         label: 'Trade History',
         Icon: History,
         children: [
-          { to: '/trade-history', label: 'All Trades' },
+          { to: '/trade-history', label: 'Testnet Trades' },
           { to: '/trade-history/real-money', label: 'Real Money Trades' },
         ],
       },
@@ -59,7 +59,6 @@ export const NAV_GROUPS = [
           { to: '/journal', label: 'Summary' },
           { to: '/journal/head-to-head', label: 'Head to Head' },
           { to: '/journal/wallet', label: 'Wallet Journal' },
-          { to: '/journal/real-money', label: 'Real Money Journal' },
         ],
       },
       {
@@ -87,6 +86,7 @@ export const NAV_GROUPS = [
         children: [
           { to: '/settings/automation', label: 'Automation' },
           { to: '/settings/strategy', label: 'Bot Strategy' },
+          { to: '/settings/symbol-risk', label: 'Symbol Risk Profiles' },
           { to: '/settings/credentials', label: 'API Credentials' },
         ],
       },

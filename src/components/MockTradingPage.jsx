@@ -664,8 +664,8 @@ export function MockTradingPage({
 
         <button
           type="button"
-          disabled={previewModel.status === 'blank' || previewModelIsActive || switchingSignalModel}
-          onClick={() => onSelectSignalModel(previewModel.id)}
+          disabled={(previewModel.status === 'blank' && previewModel.id !== 'model-10') || previewModelIsActive || switchingSignalModel}
+          onClick={() => previewModel.id === 'model-10' ? window.location.assign('/bot-10') : onSelectSignalModel(previewModel.id)}
           className={`inline-flex shrink-0 items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold transition ${
             previewModel.status === 'blank'
               ? 'cursor-not-allowed border border-white/10 bg-white/[0.03] text-slate-500'
@@ -674,7 +674,9 @@ export function MockTradingPage({
               : 'bg-sky-400 text-slate-950 hover:bg-sky-300 disabled:bg-slate-700 disabled:text-slate-400'
           }`}
         >
-          {previewModel.status === 'blank'
+          {previewModel.id === 'model-10'
+            ? 'Open Bot 10 Controls'
+            : previewModel.status === 'blank'
             ? 'Waiting For Rules'
             : previewModelIsActive
               ? 'Analysis Focus'

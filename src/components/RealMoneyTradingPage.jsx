@@ -47,7 +47,7 @@ function getSyncStatusTone(syncStatus) {
   return 'border-amber-400/20 bg-amber-400/10 text-amber-100'
 }
 
-function getLiveStatusMeta({ hasLiveCredentials, syncStatus, learningStatus }) {
+function getLiveStatusMeta({ hasLiveCredentials, syncStatus, armed }) {
   if (!hasLiveCredentials) {
     return {
       label: 'Keys Needed',
@@ -66,20 +66,20 @@ function getLiveStatusMeta({ hasLiveCredentials, syncStatus, learningStatus }) {
     }
   }
 
-  if (!learningStatus?.realMoneyTradeReady) {
+  if (!armed) {
     return {
-      label: 'Locked By Review Gate',
-      tone: 'border-red-400/25 bg-red-400/10 text-red-100',
+      label: 'Disarmed (Paper Only)',
+      tone: 'border-sky-400/20 bg-sky-400/10 text-sky-100',
       icon: LockKeyhole,
-      detail: 'The learning-bot reviewed-trade target has not been reached.',
+      detail: 'Live order placement is off. The assigned bot keeps trading testnet paper only.',
     }
   }
 
   return {
-    label: 'Ready For Manual Review',
-    tone: 'border-sky-400/20 bg-sky-400/10 text-sky-100',
+    label: 'LIVE - Armed',
+    tone: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
     icon: CheckCircle2,
-    detail: 'The data gate is satisfied, but live order placement is still intentionally disabled.',
+    detail: 'Live order placement is on for the assigned bot only, hard-capped in size.',
   }
 }
 
@@ -159,7 +159,8 @@ export function RealMoneyTradingPage({
   const wins = realMoneyTrades.filter((trade) => !isTradeOpen(trade) && Number(trade.pnl || 0) > 0).length
   const winRate = closedTrades > 0 ? wins / closedTrades : 0
   const syncStatus = String(fundingWallet?.production?.syncStatus || 'NOT_CONNECTED')
-  const liveStatus = getLiveStatusMeta({ hasLiveCredentials, syncStatus, learningStatus: aiTrainingStatus })
+  const armed = Boolean(settings.strategy?.realMoneyExecutionArmed)
+  const liveStatus = getLiveStatusMeta({ hasLiveCredentials, syncStatus, armed })
   const LiveStatusIcon = liveStatus.icon
   const effectiveSelectedStrategy = getEffectiveSignalModelStrategy(settings.strategy, selectedModelId, {
     runningBalance: accountSnapshot.runningBalance,
@@ -167,6 +168,8 @@ export function RealMoneyTradingPage({
   const takeProfitPerTrade = getStrategyDerivedTakeProfitPerTrade(effectiveSelectedStrategy)
   const selectedBotRiskSummary = `${formatUsdt(effectiveSelectedStrategy.maxLossPerTrade)} max loss / ${formatUsdt(takeProfitPerTrade)} target, ${effectiveSelectedStrategy.leverage}x`
   const canSave = ready && !saving && selectedModelId && selectedModelId !== assignedModelId
+  const canToggleArm = ready && !saving && hasLiveCredentials
+  const liveCapsSummary = 'Live trades are hard-capped regardless of the bot’s own strategy: 5 USDT margin x3 leverage (~0.10 USDT max loss/trade at the assigned bot’s own stop distance), 2 USDT max loss/day, 1 open position, 2 trades/day.'
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -181,11 +184,25 @@ export function RealMoneyTradingPage({
     })
   }
 
+  async function handleToggleArmed() {
+    if (!canToggleArm) {
+      return
+    }
+
+    await onSave({
+      strategy: {
+        realMoneyExecutionArmed: !armed,
+      },
+    })
+  }
+
   return (
     <div className="grid gap-6">
       <Panel title="Real Money Trading Summary">
-        <div className="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-4 text-sm text-red-100">
-          Real-money trading remains separated from testnet automation. This page records the assigned live rollout bot and monitors the live funding wallet status.
+        <div className={`rounded-2xl border px-4 py-4 text-sm ${armed ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-red-400/30 bg-red-400/10 text-red-100'}`}>
+          {armed
+            ? 'Live execution is ARMED. The assigned bot below can place real Binance Futures orders, hard-capped in size (see the risk caps note further down). Every other bot stays testnet-only regardless of this switch.'
+            : 'Live execution is OFF. This page records the assigned live rollout bot and monitors the live funding wallet status; no bot can place a real order while disarmed.'}
         </div>
 
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -193,7 +210,7 @@ export function RealMoneyTradingPage({
             label="Live Status"
             value={liveStatus.label}
             detail={liveStatus.detail}
-            tone={liveStatus.label.includes('Ready') ? 'text-sky-200' : liveStatus.label.includes('Locked') ? 'text-red-200' : 'text-amber-200'}
+            tone={armed ? 'text-emerald-200' : 'text-sky-200'}
             Icon={LiveStatusIcon}
           />
           <StatCard
@@ -241,7 +258,9 @@ export function RealMoneyTradingPage({
                 <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">Live Trade Status</div>
                 <div className="mt-1 text-sm font-semibold">{liveStatus.label}</div>
                 <div className="mt-2 text-xs leading-relaxed">{liveStatus.detail}</div>
-                <div className="mt-2 text-xs leading-relaxed opacity-80">Execution path: disabled</div>
+                <div className="mt-2 text-xs leading-relaxed opacity-80">
+                  Execution path: {armed ? 'ARMED - live orders can fire' : 'disabled'}
+                </div>
               </div>
             </div>
           </div>
@@ -271,14 +290,41 @@ export function RealMoneyTradingPage({
           <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
             <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-slate-500">
               <ShieldAlert className="h-4 w-4" />
-              Readiness Gate
+              Training Data Depth
             </div>
             <div className="mt-3 text-lg font-semibold text-white">
-              {aiTrainingStatus.realMoneyTradeReady ? 'Review target reached' : 'Collecting evidence'}
+              {aiTrainingStatus.realMoneyTradeReady ? 'Review target reached' : 'Still growing'}
             </div>
             <div className="mt-2 text-xs leading-relaxed text-slate-400">
-              {formatReadinessProgress(aiTrainingStatus)}
+              {formatReadinessProgress(aiTrainingStatus)} - informational only, does not block live execution.
             </div>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Arm Live Trading">
+        <div className={`rounded-2xl border px-4 py-4 text-sm ${armed ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-white/10 bg-white/[0.03] text-slate-300'}`}>
+          {liveCapsSummary}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-4">
+          <button
+            type="button"
+            onClick={handleToggleArmed}
+            disabled={!canToggleArm}
+            className={`rounded-2xl px-5 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 ${
+              armed
+                ? 'bg-slate-800 text-red-200 hover:bg-slate-700'
+                : 'bg-emerald-400 text-slate-950'
+            }`}
+          >
+            {saving ? 'Saving...' : armed ? 'Disarm Live Trading' : 'Arm Live Trading'}
+          </button>
+          <div className="text-xs leading-relaxed text-slate-400">
+            {armed
+              ? `Currently ARMED for ${assignedModel.name}. Disarm instantly stops any further live orders; open positions are not force-closed.`
+              : !hasLiveCredentials
+                ? 'Add live Binance Futures API keys in Settings before arming.'
+                : `Currently disarmed. Arming lets ${assignedModel.name} place real orders on the live funding wallet, hard-capped as above.`}
           </div>
         </div>
       </Panel>
@@ -310,11 +356,12 @@ export function RealMoneyTradingPage({
         </form>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300">
-            Current selection: {selectedModel.name}. This does not enable live order placement by itself.
+            Current selection: {selectedModel.name}. Changing this does not enable live order placement by itself
+            &mdash; use the Arm Live Trading switch above for that.
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300">
-            {selectedBotWallet ? `${selectedBotWallet.name} is the testnet reference wallet. ` : ''}
-            Planned risk: {selectedBotRiskSummary}.
+            {selectedBotWallet ? `${selectedBotWallet.name} is the testnet reference wallet, sized ${selectedBotRiskSummary}. ` : ''}
+            Live orders (when armed) route through the dedicated Real Money Wallet at the hard-capped size shown above, not this testnet size.
           </div>
         </div>
       </Panel>

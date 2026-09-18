@@ -9,6 +9,7 @@
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",
+    "consolidated:train": "node --max-old-space-size=6144 server/backtest/train-consolidated.js",
     "test": "node --test --test-force-exit \"test/**/*.test.js\"",
     "test:py": "server/learning-bot/.venv/Scripts/python.exe -m pytest server/learning-bot/tests -q",
     "build": "vite build",
