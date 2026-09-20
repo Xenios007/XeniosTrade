@@ -10261,8 +10261,8 @@ app.put('/api/ai-trading/config', async (request, response) => {
     // Older clients send only agents/risk (any `risk` is ignored: it is fixed in code); a missing `execution` must not silently
     // reset the trading mode or disarm/arm real money — keep what is saved.
     const next = await saveAiTradingConfig({ ...body, execution: body.execution ?? current.execution, scan: body.scan ?? current.scan })
-    if (next.execution.mode !== current.execution.mode || next.execution.realArmed !== current.execution.realArmed) {
-      console.warn(`[ai-trading] Execution settings changed: mode ${current.execution.mode} -> ${next.execution.mode}, real armed ${current.execution.realArmed} -> ${next.execution.realArmed}`)
+    if (next.execution.mode !== current.execution.mode || next.execution.realArmed !== current.execution.realArmed || next.execution.autoExecuteReal !== current.execution.autoExecuteReal) {
+      console.warn(`[ai-trading] Execution settings changed: mode ${current.execution.mode} -> ${next.execution.mode}, real armed ${current.execution.realArmed} -> ${next.execution.realArmed}, real auto-execute ${Boolean(current.execution.autoExecuteReal)} -> ${Boolean(next.execution.autoExecuteReal)}`)
     }
     response.json({ ok: true, config: next })
   } catch (error) {
@@ -10320,11 +10320,17 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     getMarketInputs: getAiMarketInputs,
   })
   run.trigger = trigger
-  // Testnet auto-execution. Real money is never automatic (assertCanExecute refuses auto + real).
-  if (run.final?.approved && config.execution.mode === 'testnet' && config.execution.autoExecuteTestnet) {
+  // Auto-execution. Testnet: when autoExecuteTestnet is on. Real money: only when armed AND autoExecuteReal is on (both reset
+  // themselves when the mode changes or real money is disarmed). openAiTrade re-reads the config and assertCanExecute enforces the
+  // same rule again, so a switch flipped mid-run still stops the order.
+  const autoMode = config.execution.mode
+  const autoOn = autoMode === 'testnet'
+    ? config.execution.autoExecuteTestnet === true
+    : autoMode === 'real' && config.execution.realArmed === true && config.execution.autoExecuteReal === true
+  if (run.final?.approved && autoOn) {
     try {
-      const trade = await openAiTrade({ run, mode: 'testnet', auto: true })
-      run.execution = { status: 'opened', mode: 'testnet', tradeId: trade.id, at: Date.now(), auto: true }
+      const trade = await openAiTrade({ run, mode: autoMode, auto: true })
+      run.execution = { status: 'opened', mode: autoMode, tradeId: trade.id, at: Date.now(), auto: true }
       if (run.testMode) {
         // Test mode is a one-shot pipeline check: it has done its job once a trade opened, so put the Analyst back to normal.
         const latest = await getAiTradingConfig()
@@ -10332,7 +10338,7 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
         console.log(`[ai-trading] Test mode opened ${run.final.action} ${run.symbol} on testnet; test mode switched off.`)
       }
     } catch (error) {
-      run.execution = { status: 'failed', mode: 'testnet', error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
+      run.execution = { status: 'failed', mode: autoMode, error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
     }
   }
   return run
@@ -10362,7 +10368,7 @@ app.post('/api/ai-trading/run', async (request, response) => {
 })
 
 // Auto-scan: every 5 min, when switched on in AI Settings, run the pipeline for each enabled symbol in turn.
-// Testnet auto-execute applies exactly as for a manual run; real money is never opened here. One cycle at a time:
+// Auto-execute applies exactly as for a manual run: testnet when autoExecuteTestnet is on, real money only when armed and autoExecuteReal is on. One cycle at a time:
 // a tick that arrives while the previous cycle is still running is dropped, not queued.
 let aiScanCycleRunning = false
 

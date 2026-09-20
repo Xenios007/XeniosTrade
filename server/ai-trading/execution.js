@@ -87,13 +87,15 @@ export function assertCanExecute({ run, mode, config, trades = [], livePrice, no
   }
 
   if (mode === 'real') {
-    if (auto) {
-      throw new AiExecutionError('Real money trades are never opened automatically.')
-    }
     if (execution.realArmed !== true) {
       throw new AiExecutionError('Real money trading is not armed. Arm it on the AI Settings page first.', 403)
     }
-    if (String(confirm).trim().toUpperCase() !== run.symbol) {
+    if (auto) {
+      // Armed is not enough: automatic real-money entries are their own switch (config.execution.autoExecuteReal).
+      if (execution.autoExecuteReal !== true) {
+        throw new AiExecutionError('Real money auto-execute is off. Turn it on in AI Settings, or execute this run yourself.', 403)
+      }
+    } else if (String(confirm).trim().toUpperCase() !== run.symbol) {
       throw new AiExecutionError(`Type ${run.symbol} to confirm this real money trade.`, 400)
     }
   }

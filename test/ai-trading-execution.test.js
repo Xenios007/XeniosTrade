@@ -47,6 +47,16 @@ test('config: real arming needs real mode and an explicit true; switching to tes
   assert.equal(normalizeAiTradingConfig({ execution: { realMaxMarginUsdt: 9999 } }).execution.realMaxMarginUsdt, 100)
 })
 
+test('config: real-money auto-execute is off by default and only survives while real mode is armed', () => {
+  const auto = (execution) => normalizeAiTradingConfig({ execution }).execution.autoExecuteReal
+  assert.equal(auto({}), false, 'off by default')
+  assert.equal(auto({ mode: 'real', realArmed: true, autoExecuteReal: true }), true)
+  assert.equal(auto({ mode: 'real', realArmed: true }), false, 'arming alone does not make anything automatic')
+  assert.equal(auto({ mode: 'real', realArmed: false, autoExecuteReal: true }), false, 'disarming turns it off')
+  assert.equal(auto({ mode: 'testnet', realArmed: true, autoExecuteReal: true }), false, 'switching mode turns it off')
+  assert.equal(auto({ mode: 'real', realArmed: true, autoExecuteReal: 'true' }), false, 'needs an explicit true')
+})
+
 test('an approved, fresh testnet run can be executed', () => {
   const { plan, side } = assertCanExecute(base())
   assert.equal(side, 'BUY')
@@ -77,7 +87,7 @@ test('stale plans and price drift are refused', () => {
   rejects(base({ livePrice: 98.5, run: makeRun({ final: { ...makeRun().final, trade: { ...makeRun().final.trade, stopLoss: 98.6 } } }) }), /beyond/)
 })
 
-test('real money: needs real mode, the arm switch, the typed symbol, a fresh plan, and is never automatic', () => {
+test('real money: needs real mode, the arm switch, a fresh plan, and the typed symbol unless auto-execute is on', () => {
   const armed = config({ mode: 'real', realArmed: true })
   const real = (over = {}) => base({ mode: 'real', config: armed, confirm: 'BTCUSDT', ...over })
 
@@ -88,10 +98,26 @@ test('real money: needs real mode, the arm switch, the typed symbol, a fresh pla
   rejects(base({ mode: 'real', config: config() }), /mode/)
   rejects(real({ confirm: '' }), /Type BTCUSDT/)
   rejects(real({ confirm: 'ETHUSDT' }), /Type BTCUSDT/)
-  rejects(real({ auto: true }), /never opened automatically/)
   rejects(real({ now: NOW + 11 * 60_000 }), /min old/)
   rejects(real({ livePrice: 100.6 }), /moved/) // 0.6% > the 0.5% real-money limit that testnet (1.5%) would accept
   assertCanExecute(base({ livePrice: 100.6 }))
+})
+
+test('real money auto-execute: needs the switch AND being armed; then no typed symbol, but every other check still applies', () => {
+  const armedAuto = config({ mode: 'real', realArmed: true, autoExecuteReal: true })
+  const auto = (over = {}) => base({ mode: 'real', config: armedAuto, auto: true, confirm: '', ...over })
+
+  assertCanExecute(auto()) // no confirm typed
+  rejects(auto({ config: config({ mode: 'real', realArmed: true }) }), /auto-execute is off/)
+  rejects(auto({ config: config({ mode: 'real', realArmed: false, autoExecuteReal: true }) }), /not armed/)
+  // the safety checks are the same as a manual real trade
+  rejects(auto({ now: NOW + 11 * 60_000 }), /min old/)
+  rejects(auto({ livePrice: 100.6 }), /moved/)
+  rejects(auto({ livePrice: 0 }), /live price/)
+  rejects(auto({ trades: [{ aiRunId: 'x', status: 'OPEN', symbol: 'ETHUSDT', aiTradingMode: 'real' }] }), /limited to 1/)
+  rejects(auto({ trades: [{ aiRunId: 'ai-trading-BTCUSDT-1', status: 'CLOSED_TP' }] }), /already been executed/)
+  // a manual real execute still needs the typed symbol even when auto-execute is on
+  rejects(base({ mode: 'real', config: armedAuto, confirm: '' }), /Type BTCUSDT/)
 })
 
 test('real money is limited to one open AI position; testnet to five', () => {

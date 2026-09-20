@@ -34,7 +34,7 @@ export function AiModeBadge() {
     : execution.realArmed
       ? 'border-rose-400/40 bg-rose-400/15 text-rose-200'
       : 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-  const label = !real ? 'Testnet mode' : execution.realArmed ? 'Real money · armed' : 'Real money · disarmed'
+  const label = !real ? 'Testnet mode' : execution.realArmed ? (execution.autoExecuteReal ? 'Real money · armed · auto' : 'Real money · armed') : 'Real money · disarmed'
 
   return (
     <Link to="/ai-settings" title="Change trading mode" className={`inline-flex items-center rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] ${tone}`}>

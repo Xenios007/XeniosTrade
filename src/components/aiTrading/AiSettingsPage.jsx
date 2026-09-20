@@ -188,7 +188,7 @@ export function AiSettingsPage({ settings }) {
               Look for trades automatically every {Math.round(AI_SCAN_INTERVAL_MS / 60_000)} minutes
               <span className="mt-0.5 block text-xs text-slate-500">
                 Runs the pipeline for each symbol below, one after another, with no click. In testnet mode an approved trade opens by itself (if auto-execute is on).
-                Real money is never opened automatically. Each run spends model calls, so keep the list short.
+                Real money is only opened by itself when it is armed and its own auto-execute switch (Real money wallet, below) is on. Each run spends model calls, so keep the list short.
               </span>
             </span>
             <Toggle
@@ -285,12 +285,30 @@ export function AiSettingsPage({ settings }) {
           <div className="flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-xs leading-relaxed text-amber-100">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
             <p>
-              Real money is never automatic. Even when armed, every live order needs you to press Execute on an approved run and type the symbol.
-              The size is scaled down to the margin cap below and your available balance, stops and targets are placed on the exchange,
+              {execution.autoExecuteReal
+                ? 'Auto-execute is ON: an approved run opens a live order by itself, with no click and no confirmation.'
+                : 'Auto-execute is off: even when armed, every live order needs you to press Execute on an approved run and type the symbol.'}
+              {' '}The size is scaled down to the margin cap below and your available balance, stops and targets are placed on the exchange,
               and the plan is refused if it is older than 10 minutes or the price has moved more than 0.5%. Only one real position can be open at a time.
               The system's own readiness review still says it is not ready for real money — treat this as a small live experiment.
             </p>
           </div>
+
+          <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+            <span>
+              Open approved decisions automatically (real money)
+              <span className="mt-0.5 block text-xs text-slate-500">
+                Like testnet: a run that passes every gate opens a live order with no click and no typed confirmation. Only works while real money is armed;
+                disarming or switching mode turns it off again. The margin cap, one-position limit, 10-minute plan age and 0.5% price-drift checks still apply.
+              </span>
+            </span>
+            <Toggle
+              checked={Boolean(execution.autoExecuteReal)}
+              disabled={busy || !execution.realArmed}
+              label="Auto-execute on real money"
+              onChange={(value) => saveExecution({ autoExecuteReal: value }, value ? 'Real money auto-execute is ON: approved runs now open live orders by themselves.' : 'Real money auto-execute is off.')}
+            />
+          </label>
 
           <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
             <span>
@@ -360,7 +378,7 @@ export function AiSettingsPage({ settings }) {
                 : !ledger?.credentials.real
                   ? 'Live Binance API keys are not saved.'
                   : execution.realArmed
-                    ? 'Armed: approved runs can be executed live, one confirmation each.'
+                    ? (execution.autoExecuteReal ? 'Armed with auto-execute: approved runs open live orders by themselves.' : 'Armed: approved runs can be executed live, one confirmation each.')
                     : 'Disarmed: no live order can be placed.'}
             </span>
           </div>
@@ -408,7 +426,7 @@ export function AiSettingsPage({ settings }) {
               <button
                 type="button"
                 disabled={busy || typed.trim().toUpperCase() !== ARM_PHRASE}
-                onClick={async () => { if (await saveExecution({ realArmed: true }, 'Real money is armed. Nothing trades until you execute an approved run.')) setArming(false) }}
+                onClick={async () => { if (await saveExecution({ realArmed: true }, 'Real money is armed. Nothing trades until you execute an approved run (or switch on real-money auto-execute).')) setArming(false) }}
                 className="rounded-full bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Arm
@@ -418,7 +436,7 @@ export function AiSettingsPage({ settings }) {
         >
           <p className="text-sm leading-relaxed text-amber-100">
             Armed, an approved AI run can be executed on your live Binance account (max {execution.realMaxMarginUsdt} USDT margin, one position at a time).
-            Every order still needs your confirmation. Switching back to testnet mode disarms it automatically.
+            Every order needs your confirmation unless you also switch on real-money auto-execute. Switching back to testnet mode disarms it (and turns auto-execute off) automatically.
           </p>
           <label className="grid gap-1 text-xs text-slate-400">
             Type <code className="text-amber-200">{ARM_PHRASE}</code> to continue

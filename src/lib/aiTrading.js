@@ -108,8 +108,11 @@ export const AI_TRADING_EXECUTION_LIMITS = {
 
 export const DEFAULT_AI_TRADING_EXECUTION = {
   mode: 'testnet',
-  // Testnet only: open approved decisions automatically. Real money is NEVER automatic.
+  // Testnet: open approved decisions automatically.
   autoExecuteTestnet: true,
+  // Real money: same idea, but a separate explicit opt-in that is only honoured while mode is real AND armed (normalize
+  // resets it to false when the mode changes or real money is disarmed), so arming alone never makes anything automatic.
+  autoExecuteReal: false,
   // Real-money arm switch. Only honoured while mode === 'real'; switching mode disarms it.
   realArmed: false,
   // The Position Manager always reviews open trades. It only ACTS (moves stops, takes partials, exits) on testnet unless this is
@@ -120,7 +123,7 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
 }
 
 // Auto-scan: every AI_SCAN_INTERVAL_MS the server runs the pipeline for each enabled symbol (see
-// server/ai-trading/scan.js). Off by default. It never opens real money: `assertCanExecute` refuses auto + real.
+// server/ai-trading/scan.js). Off by default. It opens real money only when armed AND `autoExecuteReal` is on (`assertCanExecute` enforces it).
 export const AI_SCAN_INTERVAL_MS = 5 * 60_000
 export const AI_SCAN_COOLDOWN_MS = 15 * 60_000
 
@@ -190,13 +193,16 @@ export function normalizeAiTradingConfig(raw) {
 
   const executionSource = source.execution && typeof source.execution === 'object' ? source.execution : {}
   const mode = AI_TRADING_MODES.includes(executionSource.mode) ? executionSource.mode : DEFAULT_AI_TRADING_EXECUTION.mode
+  const realArmed = mode === 'real' && executionSource.realArmed === true
   const execution = {
     mode,
     autoExecuteTestnet: 'autoExecuteTestnet' in executionSource
       ? executionSource.autoExecuteTestnet === true
       : DEFAULT_AI_TRADING_EXECUTION.autoExecuteTestnet,
     // Arming needs an explicit `true` AND real mode; anything else (missing, "true", 1) stays disarmed.
-    realArmed: mode === 'real' && executionSource.realArmed === true,
+    realArmed,
+    // Auto-executing real money needs its own explicit `true`, on top of real mode and being armed.
+    autoExecuteReal: realArmed && executionSource.autoExecuteReal === true,
     positionManagerActsOnReal: executionSource.positionManagerActsOnReal === true,
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,

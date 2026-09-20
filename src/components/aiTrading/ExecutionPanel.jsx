@@ -60,7 +60,11 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
             {execution?.autoExecuteTestnet ? 'Auto-execute is on but this run was not opened.' : 'Auto-execute is off.'} Open it on the testnet wallet:
           </span>
         ) : armed ? (
-          <span className="text-xs text-amber-200">Real money is armed. This is never automatic — you place each trade yourself.</span>
+          <span className="text-xs text-amber-200">
+            {execution?.autoExecuteReal
+              ? 'Real money auto-execute is on but this run was not opened. You can still place it yourself:'
+              : 'Real money is armed with auto-execute off — you place each trade yourself.'}
+          </span>
         ) : (
           <span className="text-xs text-slate-400">Real money is not armed. <Link to="/ai-settings" className="text-sky-300 hover:underline">Arm it in AI Settings</Link> to trade this.</span>
         )}
