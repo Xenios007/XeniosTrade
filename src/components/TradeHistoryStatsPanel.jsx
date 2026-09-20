@@ -41,6 +41,7 @@ export function TradeHistoryStatsPanel({
   onSyncMainWallet,
   syncingWalletId = null,
   startingBalance = null,
+  unsyncedBalanceNote = 'Main wallet not synced yet — showing simulated bot-ledger balance.',
 }) {
   const accountSnapshot = summarizeAccount({
     trades,
@@ -70,7 +71,7 @@ export function TradeHistoryStatsPanel({
       Icon: WalletCards,
       detail: hasRealWalletBalance
         ? `Synced from ${mainWallet.name} • last synced ${formatSyncTime(mainWallet.production.lastSyncedAt)}`
-        : 'Main wallet not synced yet — showing simulated bot-ledger balance.',
+        : unsyncedBalanceNote,
     },
     {
       label: 'Realized PnL',

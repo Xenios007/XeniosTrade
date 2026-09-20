@@ -1,6 +1,8 @@
 import { LogOut, Menu } from 'lucide-react'
 import { CoinAvatar } from '../CoinAvatar'
 import { BrandMark } from '../BrandMark'
+import { IS_AI_APP } from '../../lib/appMode'
+import { AiModeBadge } from '../aiTrading/AiModeBadge'
 
 function formatUsdt(value) {
   const number = Number(value || 0)
@@ -74,6 +76,9 @@ export function TopBar({
           <BrandMark className="h-7 w-7" />
         </div>
 
+        {IS_AI_APP ? (
+          <AiModeBadge />
+        ) : (
         <label className="flex items-center gap-2">
           <span className="sr-only">Selected market</span>
           <span className="hidden sm:inline-flex">
@@ -91,23 +96,24 @@ export function TopBar({
             ))}
           </select>
         </label>
+        )}
 
-        {tradingMode ? (
+        {!IS_AI_APP && tradingMode ? (
           <span className="hidden rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-300 md:inline-flex">
             {tradingMode}
           </span>
         ) : null}
 
-        <MarketDataDot health={marketDataHealth} />
+        {!IS_AI_APP ? <MarketDataDot health={marketDataHealth} /> : null}
 
         <div className="ml-auto flex items-center gap-3">
-          {account ? (
+          {!IS_AI_APP && account ? (
             <div className="hidden text-right sm:block">
               <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Balance</div>
               <div className="text-sm font-semibold text-white">{formatUsdt(account.runningBalance)}</div>
             </div>
           ) : null}
-          {account ? (
+          {!IS_AI_APP && account ? (
             <div className="hidden text-right md:block">
               <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Realized P/L</div>
               <div className={`text-sm font-semibold ${pnlTone(account.realizedPnl)}`}>

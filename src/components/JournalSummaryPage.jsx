@@ -129,7 +129,7 @@ function getHeadToHeadGridStyle(walletCount) {
   }
 }
 
-function WalletJournalCalendar({ walletView, activeMonth, onMonthChange, availableMonths, monthIndex }) {
+export function WalletJournalCalendar({ walletView, activeMonth, onMonthChange, availableMonths, monthIndex }) {
   const tone = getWalletTone(walletView.walletColorKey)
   const itemsByDate = new Map(walletView.items.map((item) => [String(item.date), item]))
   const currentMonthItems = walletView.items

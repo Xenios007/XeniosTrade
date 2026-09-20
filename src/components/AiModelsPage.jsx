@@ -1,15 +1,27 @@
-import { useState } from 'react'
-import { NavLink, Route, Routes } from 'react-router-dom'
-import { AI_PROVIDERS } from '../lib/aiProviders'
+import { useEffect, useState } from 'react'
+import { Link, NavLink, Navigate, Route, Routes } from 'react-router-dom'
+import { AI_PROVIDERS, getAiProvider, isLocalLoginReady } from '../lib/aiProviders'
+import { AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS } from '../lib/aiTrading'
+import { APP_MODE, APP_MODE_AI, APP_MODE_BOT, isAiModelsTabVisible } from '../lib/appMode'
+import { AiModelsBrowser } from './AiModelsBrowser'
 import { getSignalModel } from '../lib/signalModels'
 import { Panel } from './Panel'
+import { Badge } from './ui/Badge'
 import { Modal } from './ui/Modal'
 import { PageHeader } from './ui/PageHeader'
 
+// The apex workspace shows every tab; ai.* and bot.* only show their own.
 const AI_MODELS_TABS = [
   { to: '/ai-models', label: 'Providers & Keys' },
+  { to: '/ai-models/browse', label: 'Browse Models' },
   { to: '/ai-models/bots', label: 'Bot Assignments' },
-]
+  { to: '/ai-models/agents', label: 'Agent Assignments' },
+].filter((tab) => isAiModelsTabVisible(APP_MODE, tab.to))
+
+const AI_MODELS_DESCRIPTION = {
+  [APP_MODE_AI]: "Connect any AI provider's API key and choose which model runs each AI Trading agent.",
+  [APP_MODE_BOT]: "Connect any AI provider's API key — five power a live trading bot, the rest are ready for later.",
+}
 
 // The five bots that actually call a provider today (see docs/LLM_TRADING_BOTS.md).
 // Every other AI_PROVIDERS entry can still hold a key here for a future bot.
@@ -165,7 +177,7 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
           <div className="py-8 text-center text-sm text-slate-400">Loading…</div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {AI_PROVIDERS.map((provider) => (
+            {AI_PROVIDERS.filter((provider) => !provider.agentOnly).map((provider) => (
               <ProviderCard
                 key={provider.id}
                 provider={provider}
@@ -322,17 +334,190 @@ function BotAssignments({ settings }) {
   )
 }
 
+// Which provider/model answers each AI Trading agent (the Analyst, Critic and
+// Decision Agent). Stored server-side in server/data/ai-trading/config.json,
+// not in settings.json — see server/ai-trading/store.js.
+function AgentAssignments({ settings }) {
+  const credentials = settings?.aiProviderCredentials || {}
+  const credentialStatus = settings?.aiProviderCredentialStatus || {}
+  const [config, setConfig] = useState(null)
+  const [localLogins, setLocalLogins] = useState(null)
+  const [draft, setDraft] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [feedback, setFeedback] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/ai-trading/config')
+      .then((response) => response.json().then((payload) => ({ response, payload })))
+      .then(({ response, payload }) => {
+        if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
+        if (!cancelled) {
+          setConfig(payload.config)
+          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null })
+          setDraft(payload.config.agents)
+        }
+      })
+      .catch((error) => { if (!cancelled) setFeedback({ ok: false, text: error.message }) })
+    return () => { cancelled = true }
+  }, [])
+
+  const dirty = Boolean(config && draft) && JSON.stringify(config.agents) !== JSON.stringify(draft)
+
+  function update(agentId, patch) {
+    setDraft((current) => ({ ...current, [agentId]: { ...current[agentId], ...patch } }))
+    setFeedback(null)
+  }
+
+  async function save() {
+    setSaving(true)
+    setFeedback(null)
+    try {
+      const response = await fetch('/api/ai-trading/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...config, agents: draft }),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
+      setConfig(payload.config)
+      setDraft(payload.config.agents)
+      setFeedback({ ok: true, text: 'Saved. Applies to the next AI Trading run.' })
+    } catch (error) {
+      setFeedback({ ok: false, text: error instanceof Error ? error.message : 'Unable to save.' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Panel
+      title="AI Trading Agents"
+      action={(
+        <button
+          type="button"
+          disabled={!dirty || saving}
+          onClick={save}
+          className="rounded-full bg-sky-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-40"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      )}
+    >
+      <div className="mb-4 text-xs leading-relaxed text-slate-400">
+        The <Link to="/ai-trading" className="text-sky-300 hover:underline">AI Trading</Link> pipeline has five agents and every one calls a model —
+        pick which provider answers each. The Risk Manager model decides stop, size and leverage; fixed ceilings in code only cap its answer, so it can be stricter
+        but never looser. Keys live on <span className="text-sky-300">Providers &amp; Keys</span> (Codex and Claude need none — they use the server's own login); using a different model for the Critic than for the Analyst
+        makes for a better second opinion.
+      </div>
+      {!draft ? (
+        <div className="py-8 text-center text-sm text-slate-400">{feedback && !feedback.ok ? feedback.text : 'Loading…'}</div>
+      ) : (
+        <div className="grid gap-3">
+          {AI_TRADING_AGENTS.map((agent) => {
+            if (!AI_TRADING_LLM_AGENT_IDS.includes(agent.id)) {
+              return (
+                <div key={agent.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-white">{agent.name}</div>
+                    <div className="mt-0.5 text-xs text-slate-400">{agent.role}</div>
+                  </div>
+                  <Badge tone={agent.kind === 'code' ? 'warn' : 'neutral'}>Statistics · no AI</Badge>
+                </div>
+              )
+            }
+
+            const assignment = draft[agent.id]
+            const provider = getAiProvider(assignment.providerId)
+            // Codex / Claude have no saved key: they work when the server has the SDK and a `codex login` / `claude login`.
+            const loginStatus = localLogins?.[provider?.id]
+            const loginName = provider?.label?.split(' ')[0]
+            const connected = provider
+              ? (provider.localLogin
+                ? isLocalLoginReady(localLogins, provider.id)
+                : Boolean(credentialStatus[provider.id]?.present) || (provider.keyless && Boolean(credentials[provider.id]?.baseUrl)))
+              : false
+            const effectiveModel = assignment.model || (provider?.localLogin ? '' : credentials[provider?.id]?.model || provider?.suggested?.[0] || '')
+            const notConnectedLabel = provider?.localLogin
+              ? (loginStatus && !loginStatus.available ? `${loginName} SDK missing` : 'Not logged in')
+              : 'No key saved'
+
+            return (
+              <div key={agent.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-white">{agent.name}</div>
+                    <div className="mt-0.5 text-xs text-slate-400">{agent.role}</div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {agent.guardrail ? <Badge tone="warn">{agent.guardrail}</Badge> : null}
+                    <Badge tone={connected ? 'up' : 'warn'}>{connected ? 'Connected' : provider ? notConnectedLabel : 'Unassigned'}</Badge>
+                  </div>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <label className="block">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Provider</span>
+                    <select
+                      value={assignment.providerId}
+                      onChange={(event) => update(agent.id, { providerId: event.target.value, model: '' })}
+                      className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
+                    >
+                      <option value="">Unassigned (agent will not run)</option>
+                      {AI_PROVIDERS.map((item) => (
+                        <option key={item.id} value={item.id}>{item.label}{(item.localLogin ? isLocalLoginReady(localLogins, item.id) : credentialStatus[item.id]?.present) ? ' ✓' : ''}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Model id (optional)</span>
+                    <input
+                      value={assignment.model}
+                      disabled={!provider}
+                      onChange={(event) => update(agent.id, { model: event.target.value })}
+                      placeholder={effectiveModel || (provider?.localLogin ? `${loginName} default model` : 'model id')}
+                      list={`agent-model-suggestions-${agent.id}`}
+                      className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none disabled:opacity-40"
+                    />
+                    {provider?.suggested?.length ? (
+                      <datalist id={`agent-model-suggestions-${agent.id}`}>
+                        {provider.suggested.map((modelId) => <option key={modelId} value={modelId} />)}
+                      </datalist>
+                    ) : null}
+                  </label>
+                </div>
+                <div className="mt-2 text-[11px] text-slate-500">
+                  {provider?.localLogin
+                    ? `Runs through this server's ${loginName} login${assignment.model ? ` with ${assignment.model}` : ' with its default model'} — no API key, counted against that ${loginName} account. Each call can take a minute or more.`
+                    : provider ? `Will call ${effectiveModel || 'a model you still need to name'}${assignment.model ? '' : ' (provider default)'}.` : 'Nothing is called until a provider is chosen.'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {feedback && draft ? (
+        <div className={`mt-4 rounded-2xl border px-4 py-3 text-xs ${feedback.ok ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-rose-400/20 bg-rose-400/10 text-rose-200'}`}>
+          {feedback.text}
+        </div>
+      ) : null}
+    </Panel>
+  )
+}
+
 export function AiModelsPage({ settings, onSave, saving, ready }) {
   return (
     <div className="grid gap-6">
       <PageHeader
         title="AI Models"
-        description="Connect any AI provider's API key — five already power a live trading bot, the rest are ready for one added later."
+        description={AI_MODELS_DESCRIPTION[APP_MODE] || "Connect any AI provider's API key — five power a live trading bot, five power AI Trading agents, the rest are ready for later."}
       />
       <AiModelsTabs />
       <Routes>
         <Route path="/" element={<ProvidersAndKeys settings={settings} onSave={onSave} saving={saving} ready={ready} />} />
-        <Route path="bots" element={<BotAssignments settings={settings} />} />
+        {isAiModelsTabVisible(APP_MODE, '/ai-models/browse') ? <Route path="browse" element={<AiModelsBrowser settings={settings} />} /> : null}
+        {isAiModelsTabVisible(APP_MODE, '/ai-models/bots') ? <Route path="bots" element={<BotAssignments settings={settings} />} /> : null}
+        {isAiModelsTabVisible(APP_MODE, '/ai-models/agents') ? <Route path="agents" element={<AgentAssignments settings={settings} />} /> : null}
+        <Route path="*" element={<Navigate to="/ai-models" replace />} />
       </Routes>
     </div>
   )

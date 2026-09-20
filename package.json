@@ -9,6 +9,7 @@
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",
+    "ai-trading:quant-stats": "node scripts/build-ai-trading-quant-stats.js",
     "consolidated:train": "node --max-old-space-size=6144 server/backtest/train-consolidated.js",
     "backtest:statistical-review": "node --max-old-space-size=6144 server/backtest/statistical-review.js",
     "backtest:trend-benchmark": "node --max-old-space-size=6144 server/backtest/trend-benchmark.js",
@@ -19,7 +20,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.70.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.278",
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex-sdk": "^0.151.0",
     "concurrently": "^9.2.1",
     "dotenv": "^16.6.1",
@@ -28,7 +31,8 @@
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^7.18.3"
+    "react-router-dom": "^7.18.3",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.5.0",

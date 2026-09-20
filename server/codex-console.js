@@ -22,7 +22,7 @@ const TURN_TIMEOUT_MS = Number(process.env.CODEX_CONSOLE_TURN_TIMEOUT_MS || 240_
 let codexModulePromise = null
 let running = false
 
-function loadCodexModule() {
+export function loadCodexModule() {
   if (!codexModulePromise) {
     codexModulePromise = import('@openai/codex-sdk').catch((error) => {
       console.error('Codex console: @openai/codex-sdk is not available:', error?.message || error)

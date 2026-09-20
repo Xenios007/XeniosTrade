@@ -41,7 +41,7 @@ export const AI_PROVIDERS = [
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     keyHint: 'AIza…',
     docs: 'https://ai.google.dev/gemini-api/docs/models',
-    suggested: ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro'],
+    suggested: ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-flash-latest'],
     wiredBot: 'Bot Gemini (Wallet 13)',
   }),
   P('xai', 'xAI (Grok)', {
@@ -56,6 +56,22 @@ export const AI_PROVIDERS = [
     docs: 'https://openrouter.ai/models',
     suggested: ['meta-llama/llama-3.3-70b-instruct', 'anthropic/claude-sonnet-5', 'openai/gpt-4o', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-chat'],
     wiredBot: 'Bot OpenRouter (Wallet 15)',
+  }),
+  // AI Trading agents only: runs through the Codex SDK on the server with the machine's own `codex login`, so there is no key
+  // or base URL to save and it never shows on Providers & Keys / Browse Models (`agentOnly`). `localLogin` marks the no-key path.
+  P('codex', 'Codex (this server\'s login)', {
+    keyless: true,
+    agentOnly: true,
+    localLogin: true,
+    keyHint: 'machine login',
+  }),
+  // Same idea as Codex: the Claude Agent SDK on the server with the machine's own `claude login`. Not the pay-per-token
+  // Anthropic API provider above, which needs a saved key.
+  P('claude', 'Claude (this server\'s login)', {
+    keyless: true,
+    agentOnly: true,
+    localLogin: true,
+    keyHint: 'machine login',
   }),
   P('meta', 'Meta (Llama via Together)', {
     baseUrl: 'https://api.together.xyz/v1',
@@ -196,4 +212,10 @@ export function mergeAiProviderCredentialsUpdate(currentMap, requestedMap) {
   }
 
   return normalizeAiProviderCredentials(next)
+}
+
+/** Whether a `localLogin` provider (Codex / Claude) can run: `logins` is the `{ codex, claude }` status the server reports. */
+export function isLocalLoginReady(logins, providerId) {
+  const status = logins?.[providerId]
+  return Boolean(status?.available && status?.loggedIn)
 }

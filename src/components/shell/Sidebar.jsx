@@ -1,10 +1,21 @@
 import { NavLink } from 'react-router-dom'
-import { PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
+import { ArrowUpRight, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
 import { BrandMark } from '../BrandMark'
 import { usePersistentBoolean } from '../../lib/usePersistentBoolean'
-import { NAV_GROUPS } from './navItems'
+import { APP_META, APP_MODE, APP_MODE_AI, APP_MODE_BOT, getModeUrl } from '../../lib/appMode'
+import { getNavGroups } from './navItems'
 
 const SIDEBAR_COLLAPSED_KEY = 'xeniostrade:sidebar:collapsed'
+const NAV_GROUPS = getNavGroups(APP_MODE)
+const BRAND = APP_META[APP_MODE]
+
+// Each workspace links to the other one. Null on the apex/dev hosts, where
+// there is no subdomain to send you to.
+const SIBLING = APP_MODE === APP_MODE_AI
+  ? { label: 'Bot Trading', url: getModeUrl(APP_MODE_BOT, '/dashboard') }
+  : APP_MODE === APP_MODE_BOT
+    ? { label: 'AI Trading', url: getModeUrl(APP_MODE_AI, '/ai-trading') }
+    : null
 
 function NavItem({ to, label, Icon, collapsed, onNavigate }) {
   return (
@@ -59,7 +70,7 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
         {!collapsed ? (
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold tracking-[0.14em] text-white">XeniosTrade</div>
-            <div className="truncate text-[10px] uppercase tracking-[0.24em] text-slate-500">Paper workspace</div>
+            <div className="truncate text-[10px] uppercase tracking-[0.24em] text-slate-500">{BRAND.subtitle}</div>
           </div>
         ) : null}
         {showClose ? (
@@ -97,6 +108,19 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
           </div>
         ))}
       </nav>
+
+      {SIBLING?.url ? (
+        <a
+          href={SIBLING.url}
+          title={collapsed ? `Switch to ${SIBLING.label}` : undefined}
+          className={`mx-3 flex items-center gap-3 rounded-2xl border border-white/10 px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:border-sky-300/30 hover:bg-white/5 hover:text-white ${
+            collapsed ? 'justify-center' : ''
+          }`}
+        >
+          <ArrowUpRight className="h-4 w-4 shrink-0 text-sky-300" />
+          {!collapsed ? <span className="truncate">Switch to {SIBLING.label}</span> : null}
+        </a>
+      ) : null}
 
       <button
         type="button"

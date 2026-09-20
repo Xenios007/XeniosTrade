@@ -10,7 +10,125 @@ every session. Times are UTC. Server logs are UTC+8 (Asia/Manila).
 
 ---
 
-## WHERE WE LEFT OFF  — as of 2026-09-16 (latest)
+## WHERE WE LEFT OFF  — as of 2026-09-20 (latest)
+
+### TEMPORARY: scan widened to 10 symbols + Claude/Codex agent providers — 2026-09-20 (deployed + server restarted)
+
+**Owner request:** waiting for the first AI testnet trade; widen the auto-scan so more setups appear, then **return to the basic symbols after testing**.
+
+**What is temporary (REVERT when testing is done):** `AI_TRADING_TEMP_SYMBOLS` in `src/lib/aiTrading.js` (XRP, DOGE, AVAX, SUI, NEAR, LINK, added on top of the base BTC/ETH/SOL/BNB) and `scan.symbols` in `server/data/ai-trading/config.json` (now those 10). To revert: set `AI_TRADING_TEMP_SYMBOLS = []`, `npm run build`, publish `dist/` to `/var/www/xeniostrade` (assets.old.<ts> procedure), `pm2 restart xeniostrade-api`, and set `scan.symbols` back to `["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]` (or click the chips in AI Settings; the old list was those 4). Verified: a 10-symbol cycle takes ~100 s with the Codex Analyst; `npm test` 176/176.
+
+**Agent setup at this point:** Analyst = Codex login, Flow = openrouter `qwen/qwen3.8-flash`, Critic = google (`gemini-3.5-flash`, Test OK 6.3 s), Risk = openrouter `deepseek/deepseek-v4.1-flash`, Decision = Claude login. Claude provider: `server/ai-trading/claude-agent.js` (Agent SDK; `@anthropic-ai/sdk` upgraded 0.70 -> 0.127 as its peer dep). Scan loop confirmed ticking every 5 min; every run so far is an Analyst HOLD, so Flow/Critic/Risk/Decision/testnet-open have not run live yet.
+
+### Risk Limits page removed + AI Auto-scan every 5 min — 2026-09-20 (code done, frontend PUBLISHED, server NOT restarted)
+
+**Owner requests:** (1) "remove risk limits page ... we leave the risk limits to the ai model" -> the tab, route (`/ai-trading/risk` now redirects) and nav entry are gone; `normalizeAiTradingConfig` always resets `config.risk` to the fixed defaults, so nothing user- or file-supplied can change them. The Risk Manager model decides stop/target/risk/leverage; the code ceilings (1% risk, 5x, 3% stop, R:R >= 1.5, confidence >= 60) were deliberately KEPT as non-editable guardrails (change `DEFAULT_AI_TRADING_CONFIG.risk` in `src/lib/aiTrading.js`). (2) "can it not run every 5 mins and find a trade?" -> **Auto-scan**, see `docs/AI_TRADING.md` -> "Auto-scan". Off by default; Settings -> Auto-scan toggle + symbol chips + per-symbol status.
+
+**Verified:** `npm test` 169/169 (new `test/ai-trading-scan.test.js`), production build, published to /var/www/xeniostrade. **NOT verified:** the scan loop itself (never run; the server hasn't been restarted with it).
+
+**Owner's current goal:** get **one successful AI trade** (testnet) and check how effective it is BEFORE any cost tuning. Cost-per-trade notes per model are in `docs/AI_TRADING_COSTS.md` (estimates; not measured against a live provider). Every real run so far was HOLD.
+
+**Update (same day, after the owner's restart):** the scan loop ran on its own (BTC HOLD from `z-ai/glm-5.2:free`; ETH/SOL/BNB failed instantly with OpenRouter's generic "Provider returned error"). Added `describeProviderError` (`llm.js`, tested) so the upstream host + raw reason (likely a free-tier rate limit; NOT confirmed) show in the scan status — needs one more `pm2 restart` to take effect.
+
+**Codex as an agent provider (owner request):** AI Models -> Agent Assignments now lists "Codex (this server's login)"; see `docs/AI_TRADING.md` -> "Codex as an agent provider". Backend needs `pm2 restart xeniostrade-api`; frontend published. 173/173 tests + one real SDK smoke call (6.8 s).
+
+**NOT done — needs the owner:**
+1. `pm2 restart xeniostrade-api` (drops logins once) — without it neither the fixed-risk change nor the scan exists server-side, and the Settings toggle will save but nothing scans.
+2. **Pick a fast Analyst model** (AI Models -> Agent Assignments). It is on free `nvidia/nemotron-3-ultra-550b-a55b:free`, which took 43.9 s then timed out at the 45 s limit; scanning with it will mostly log Analyst errors. Which providers have keys saved was never checked (the classifier blocked reading credentials).
+3. Turn Auto-scan on in AI Settings, watch the first cycle in the status panel / `pm2 logs`.
+
+### AI workspace: Trade History, Journal, Wallet, Settings + testnet / real-money modes — 2026-09-20 (code done, restarted, frontend NOT published)
+
+**Owner request** (the disconnected last task): "add trading history, journal (calendar), wallet, setting for ai model api, testnet and real money trading mode" to the AI workspace. Decisions (asked): AI gets its **own wallet + ledger** (separate from bots); **real money = manual confirm + arm switch**, never autonomous.
+
+**Built:** see `docs/AI_TRADING.md` -> "Wallets, trading modes and execution". New: `server/ai-trading/execution.js` (pure safety rules), `test/ai-trading-execution.test.js` (11 tests), ledger in `store.js` (`trades.json`), execution/ledger/monitor block + 3 endpoints in `mock-trading-server.js`, `execution` block in `src/lib/aiTrading.js` config, pages in `src/components/aiTrading/` (History, Journal, Wallet, Settings, ExecutionPanel on approved verdicts, top-bar mode badge), ai nav = Trading / Records / Config (`navItems.js` `getAiNavGroups`). `WalletJournalCalendar` and `AgentAssignmentStrip` are now exported for reuse.
+
+**Verified:** `npm test` 165/165; production build; screenshots (desktop + 390px) on a scratch server; scratch-server API run covering all real-money gates (not armed / wrong confirm / no live keys / auto+real refused / stale / drift / one-position cap), paper open -> monitor settle -> journal, manual close, and ONE real Binance **testnet** trade (entry + SL/TP algo orders, monitor left it open, manual close, account back to the bots' 6 positions). Scratch had no live keys and its own data dir; deleted afterwards. **Live `pm2 restart xeniostrade-api` done** (online, no crash loop). Live `server/data/ai-trading/` has no `trades.json` yet.
+**NOT verified:** a live real-money order (never placed); the auto-execute-after-run path against a real LLM-approved run (all real runs so far were HOLD; the hook is unit-covered only through `assertCanExecute`).
+
+**NOT done — needs the owner:**
+1. **Publish the new frontend** — the permission classifier blocked it again. `dist/` is built (`index-DVYTsC06.js`). Run: `cd /home/xenios/app && TS=$(date +%s) && mv /var/www/xeniostrade/assets /var/www/xeniostrade/assets.old.$TS && cp -r dist/assets /var/www/xeniostrade/assets && cp dist/index.html /var/www/xeniostrade/index.html` then hard-refresh. (:3001 already serves the new build.)
+2. **Log in again** on each host (the restart cleared in-memory sessions).
+3. To try it: ai.projxenios.trade -> Settings (defaults: testnet, auto-execute ON, real disarmed, 5 USDT real margin cap) -> run the pipeline. Real money stays disarmed until the owner arms it.
+4. Live Binance keys ARE saved and the real wallet reads the ~10 USDT live balance, so arming real money would place real orders. GO_LIVE_READINESS.md is still NO.
+Carry-overs from earlier today (Google console redirect URI, nginx/cert script, secret rotation) are unchanged below.
+
+### Update: Google-only sign-in on the public hosts — 2026-09-20
+Owner: "remove 'Use the owner password instead' on login, just google login from now on." Homepage, ai. and bot. login screens now show ONLY "Sign in with Google" (verified live: no password input). `PASSWORD_LOGIN_ENABLED` (`appMode.js`) keeps the password form on localhost/127.0.0.1 only, because the OAuth callback is registered for the apex and a local instance would otherwise be locked out. **Server side unchanged:** `POST /api/auth/login` still accepts `APP_LOGIN_PASSWORD` from anyone who calls the API directly — only the UI was removed. Disabling it (e.g. an env flag) is a one-line change if the owner wants Google to be the *only* way in; the trade-off is no fallback if Google/OAuth breaks. Published as bundle `index-CiQth4un.js` (previous assets in `assets.old.1789884814`).
+
+### Public homepage + Google sign-in on projxenios.trade — 2026-09-20 (code done, NOT live yet)
+
+**Owner request:** professional SaaS homepage on `projxenios.trade` (ai./bot. DNS already in Cloudflare) with Google login, using the supplied OAuth client.
+
+**Built:**
+- New `home` mode in `src/lib/appMode.js` for the apex + `www.` (`?app=home` on localhost). `main.jsx` lazy-loads `HomeApp` there, so visitors never download the trading app (homepage chunk ~23 kB). The apex NO LONGER serves the full app: `/dashboard`, `/ai-trading`, etc. redirect to bot./ai.; `localhost` stays `all` for dev.
+- `src/components/home/HomePage.jsx`: hero with a clearly-labelled *illustrative* pipeline run, two workspace cards, platform grid, how-it-works, safeguards, sign-in card (Google + "owner password" fallback), risk disclaimer. Copy is factual only (15 bots, 23 providers, 5 agents, fail-closed, paper-first) — deliberately NO pricing, stats or testimonials (private paper-trading system; see GO_LIVE_READINESS.md). Verified at 390/820/1440px, no horizontal overflow.
+- `server/google-auth.js` (auth-code flow + PKCE + HMAC-signed state cookie + nonce; client secret stays server-side) with routes `GET /api/auth/google/{status,start,callback}` in `mock-trading-server.js`. **Access requires the verified email to be in `GOOGLE_ALLOWED_EMAILS`; an empty list rejects everyone.** Return URLs restricted to projxenios.trade / ai. / bot. (no open redirect). `test/google-auth.test.js` (11 tests); `npm test` 154/154.
+- **One login for all three hosts:** session cookie gets `Domain=.projxenios.trade` (only when the request host is under it, so 127.0.0.1/SSH-tunnel access stays host-only); logout clears both variants; lookup tolerates a stale duplicate cookie. ai./bot. login screens also show "Sign in with Google" (hops to the apex for the callback, then returns).
+- `.env` (gitignored, untracked) now has GOOGLE_CLIENT_ID/SECRET, `GOOGLE_ALLOWED_EMAILS=xeniosgaming87@gmail.com` (ASSUMED to be the owner's Google account — CONFIRM), `GOOGLE_REDIRECT_URI`, `AUTH_COOKIE_DOMAIN=.projxenios.trade`, `AUTH_COOKIE_SECURE=true`. `.env.example` has placeholders.
+
+**NOT done — needs the owner:**
+1. **Google Cloud Console:** Google answers `redirect_uri_mismatch` — add `https://projxenios.trade/api/auth/google/callback` under the OAuth client's *Authorized redirect URIs*. (The client ID itself is valid.) Until then the Google button fails at Google; password login still works.
+2. **Restart the API** to load the routes/.env: `pm2 restart xeniostrade-api` (drops in-memory sessions once). NOT run — live system.
+3. **Publish `dist/`** to `/var/www/xeniostrade` (usual procedure). Blocked by the permission classifier last time; not attempted again.
+4. **ai./bot. still return 526** until `sudo bash deploy/nginx/enable-subdomains.sh` is run (cert expansion).
+5. The client secret was pasted into chat — consider rotating it after go-live and updating `.env`.
+Suggested order: 4 -> 1 -> 2 -> 3.
+Verification note: the real `.env` creds + `google-auth.js` were exercised through a scratch server (not the trading server); the live API was never restarted.
+
+### Split into ai.projxenios.trade and bot.projxenios.trade — 2026-09-20 (code done, NOT live yet)
+
+**Owner request:** "separate bot trading and the new ai trading — ai.projxenios.trade / bot.projxenios.trade — arrange the ui accordingly for each."
+
+**Design:** ONE frontend build + ONE backend (127.0.0.1:3001); the hostname picks the workspace (`src/lib/appMode.js`): `ai.*` -> AI Trading, `bot.*` -> Bot Trading, anything else (apex `projxenios.trade`, localhost) -> `all` = the original full UI, unchanged. Dev preview without DNS: `http://localhost:5173/?app=ai` (or `bot`; only honoured on localhost, remembered in sessionStorage).
+- **ai.\***: nav = AI Trading (Pipeline/Run History/Risk Limits) + AI Models (Providers & Keys, Browse Models, Agent Assignments). TopBar shows "Advisory · no orders" instead of the market picker / paper balance / feed dot. The bot-only streams (Binance kline/trade sockets, signal-analysis + auto-trade polling, auto-trade SSE) are switched off (`IS_AI_APP` guards in `App.jsx`). Bot paths redirect to the bot host.
+- **bot.\***: everything except AI Trading; AI Models shows Providers & Keys + Bot Assignments only. `/ai-trading` redirects to the ai host.
+- Sidebar has a "Switch to ..." link to the sibling workspace (only when on a real subdomain). Login page/`document.title` are per-workspace.
+- Files: `src/lib/appMode.js` (new), `shell/navItems.js` (`getNavGroups(mode)`, mode-aware `resolveInitialPath`; still CRLF), `Sidebar.jsx`, `TopBar.jsx`, `AiModelsPage.jsx`, `App.jsx` (routes/ExternalRedirect/guards), `test/app-mode.test.js` (7 tests). `npm test` 142/142; built and screenshotted all three modes (desktop + 390px) against :3001.
+
+**NOT done — needs the owner (no sudo here, and the live publish was blocked by the permission classifier):**
+1. **nginx + cert.** Both subdomains already resolve to Cloudflare but return **526**: nginx has no server block for them and the origin cert only covers `projxenios.trade`. Run `sudo bash /home/xenios/app/deploy/nginx/enable-subdomains.sh` (adds the names to both `server_name` lines, `certbot --nginx --expand --cert-name projxenios.trade`, reloads nginx; idempotent; backs up the config first). Cloudflare SSL mode is Full (strict) — that's why the cert has to be expanded.
+2. **Publish the build** to `/var/www/xeniostrade` (the usual procedure in the note below). `dist/` is already built with this change, but the public site still serves the previous bundle until it's copied. The apex site keeps the full UI, so publishing is low-risk.
+3. **Login is per host.** The session cookie is host-only (`SameSite=Strict`, no `Domain=`), so ai., bot. and the apex each need their own login. Making it shared would be an auth change (`Domain=.projxenios.trade`) — deliberately not done.
+**Open choice:** the apex `projxenios.trade` still serves the full combined UI. Say if it should redirect to bot. or become a chooser page. `www.` resolves but isn't on the cert either (pre-existing).
+
+### AI Trading page (5-agent advisory pipeline) + AI Models "Agent Assignments" tab — 2026-09-20
+
+**Owner request:** "update ai models page", plus a *separate* page "ai trading" for a 5-agent flow (Market Analyst -> Quant -> Critic -> Risk Manager (code) -> Decision Agent). Explicitly "not another bot". Owner also referenced 3 screenshots at `C:\Users\Rain\Pictures\Screenshots\1-3.png` for the UI — **those were not reachable from this Linux box, so the UI follows the app's existing style, NOT the screenshots.** If the look should change, put the images somewhere on this machine (e.g. `~/Pictures`) and restyle `AiTradingPage.jsx` / `AiTradingRunReport.jsx` / the Agent Assignments tab in `AiModelsPage.jsx`.
+
+**What was built** (full write-up: `docs/AI_TRADING.md`):
+- `/ai-trading` (Pipeline, Run History, Risk Limits) — advisory only: no wallet, no signal model, never places an order.
+- `/ai-models/agents` — provider + model per LLM agent (Analyst, Critic, Decision) using any provider in the AI Models catalog.
+- Backend `server/ai-trading/*` + 4 endpoints in `mock-trading-server.js`; state in `server/data/ai-trading/{config,runs,quant-stats}.json` (NOT in settings.json on purpose).
+- Fail-closed gates; Decision Agent cannot override a veto or flip direction; Risk Manager is plain code with hard-bounded limits.
+
+**Verified:** `npm test` 112/112 (22 new, incl. provider caller vs local fake servers); `pm2 restart xeniostrade-api` clean; live `POST /api/ai-trading/run` on BTCUSDT pulled real Binance data and failed closed (no provider key saved -> HOLD); auth 401 when logged out; both pages screenshotted in headless Chrome with a seeded run (seed removed afterwards).
+
+**NOT verified:** a real LLM round-trip — no provider API key is saved yet, so the Analyst/Critic/Decision prompts have only run against scripted fakes. First thing to do: save a key on AI Models -> Providers & Keys, run BTC, read the three replies.
+
+**Follow-up same day — "Market Analyst: Failed / HTTP 404" (owner had assigned Google/Gemini):** three separate causes, all fixed and verified live with the owner's Gemini key:
+1. `gemini-2.0-flash` (the catalog default) was retired by Google -> 404. Google wraps error bodies in an array (`[{"error":{...}}]`), which my parser missed, hence the bare "HTTP 404". Now parsed; catalog default for Google is `gemini-3.5-flash` (`gemini-2.5-flash` is also closed to new keys; `gemini-flash-latest` was overloaded at test time — overload is per-model and transient, one 503 retry added).
+2. Reasoning models spend hidden thinking tokens out of `max_tokens`: at 1024 Gemini stopped at `finish_reason: length` mid-JSON. Now 4096, and a truncated reply raises a clear "cut off" error.
+3. Real bug in my pipeline: the still-forming candle was included, so the Analyst saw "volume 0.00x". `buildMarketSnapshot` now drops candles with `closeTime > now`.
+Live result: 4/4 symbols ran end-to-end (all HOLD — quiet post-selloff market); Critic (rejected a scripted LONG into a falling knife) and Decision Agent (downgraded to HOLD without quant evidence) each ran once against real Gemini with scripted upstream stages. A genuinely model-originated LONG has not been seen yet.
+**NOT touched, needs an owner decision:** `server/strategy/bot-gemini.js` (Bot Gemini, wallet 13) hardcodes the same dead `gemini-2.0-flash` default, so with a Google key saved it 404s every scan cycle. Fix = set a model on AI Models -> Providers & Keys -> Google, or change the default in that file (which would start real Gemini calls/testnet trades on wallet 13).
+
+**Owner change — "i want an ai model to be the risk manager instead":** Risk Manager is now an LLM agent (4 model-backed agents: Analyst, Critic, Risk Manager, Decision; only Quant is non-AI). Design choice, deliberate: the model proposes stop/target/risk %/leverage or vetoes, but `reviewRiskProposal` -> `runRiskManager` (code) re-runs its numbers through the Risk Limits, so it can be stricter than the limits and never looser (clamped + noted in the report; a plan still breaking a limit is rejected; an errored/malformed/unconfigured Risk Manager = veto, never unchecked sizing). It is skipped (no LLM spend) when Analyst/Quant/Critic already blocked. Old saved configs with no `risk` agent entry inherit the Analyst's provider. Verified: 121/121 tests; real Gemini Risk Manager run twice on live ETH data (scripted Analyst/Critic upstream) — vetoed both a LONG and a SHORT with data-grounded reasons. NOT seen live: a real model *approving* and having its numbers clamped (unit-tested with scripted replies only). Also reworded the AI Models "Data/Code · no model" badge to "Statistics · no AI". Deployed to /var/www/xeniostrade.
+
+**Owner change — "build the market flow agent and replace the quant":** the Quant Agent is gone (as an agent AND as a gate); in its slot is a **Market Flow Agent** (LLM) that judges derivatives positioning + order flow: funding/basis, open interest vs price (code-computed regime label), long/short + top-trader ratios, futures taker flow, book depth, BTC move. Data: `server/ai-trading/flow-data.js`, Binance public futures endpoints, no keys, ~100 ms. Verdict SUPPORTS/NEUTRAL/AGAINST + crowding + flags citing numbers; AGAINST (or flow data unavailable / <2 of 5 sources / no provider) is a hard gate and skips all later paid stages. Metrics are stored beside the verdict for audit. Backtest stats are now one background line for the Risk Manager + Decision Agent and never block; `vetoOnNegativeEv` setting deleted. Old configs: the new `flow` agent inherits the Analyst's provider (owner's = Google). Found+fixed during live test: taker ratio was an average of per-candle ratios (pointed opposite to real flow) -> now volume-weighted; spot candle taker share relabelled. Verified: 130/130 tests; live data 5/5 sources for ETH/SOL; a real Gemini Flow Agent call on live SOL data (gemini-3.1-flash-lite) returned NEUTRAL/crowding MEDIUM with flags citing the real numbers; UI screenshotted; published to /var/www/xeniostrade. Real-Gemini limits hit: `gemini-3.5-flash` free quota ran out during testing (per-model; the per-stage error is shown and fails closed), and every real Analyst call so far returned HOLD, so a full model-originated LONG/SHORT through all five real stages has still never been seen.
+
+**Owner request — "check localhost:5173/models for ui and add 'browse models', include all ai models, openrouter include free models, for testing":** the reference page is on the owner's Windows machine (port 5173 not reachable from here, same as the screenshots), so the UI follows the app's own style — if it should look different, get the reference onto this box. Built **AI Models -> Browse Models** (`/ai-models/browse`): live model lists for every connected provider (their saved key, server-side) + OpenRouter's public catalog always live (446 models, 24 priced at 0 / 22 chat) + suggested models for the rest; search/provider/free/JSON-mode/sort filters, "Free models for testing" shortcut, **Test** (one real call through `callAgentJson`), **Use for agent** (assign to any of the 5 agents), copy id. Endpoints `GET /api/ai-models/browse`, `POST /api/ai-models/test`. See docs/AI_TRADING.md.
+Found live: (1) the owner's **OpenAI slot holds an OpenRouter key** (`sk-or-v1...`, OpenAI rejects it) — OpenRouter therefore shows "not connected" and its Test/Use buttons are disabled until a key is saved under OpenRouter on Providers & Keys. I did NOT move it (editing settings.json credentials is a landmine; the UI does it safely). The page now says so. (2) Ollama/LM Studio wrongly showed connected off the default localhost URL -> fixed (needs a saved URL, like the Providers page). (3) **Security:** provider 401s echo partial keys ("sk-or-v1****e47a") and I was passing that to the browser -> `redactSecrets` now applied to catalog + agent-call errors (so also stored run history). 135/135 tests. Published to /var/www/xeniostrade.
+
+**Heads-up (now historical):** the Quant Agent's evidence (117k backtest trades, all rule-based Bots 1-4) has negative EV overall (~32% win / ~1.6 payoff), so with the default "block on negative EV" nearly every trade is vetoed. Correct per the data; toggle on Risk Limits tab.
+
+**Publish step I missed at first (owner: "ui still not updated"):** `https://projxenios.trade` is served by **nginx from `/var/www/xeniostrade`**, a separate copy — `npm run build` only updates `/home/xenios/app/dist` (port 3001). After every frontend build: move `/var/www/xeniostrade/assets` to `assets.old.<ts>`, then copy `dist/assets` and `dist/index.html` in (works without sudo while those are owned by `xenios`; else `sudo rsync -a --delete /home/xenios/app/dist/ /var/www/xeniostrade/`). Done for this session's build (bundle `index-C2rpgMcF.js`); verify with `curl -sk https://localhost/ | grep -o 'assets/index-[^"]*'`.
+
+**Gotchas added:** `npm run ai-trading:quant-stats` must be re-run after a new backtest (streams the 116 MB file; ~5s). `navItems.js` is CRLF — edit without normalising line endings. Uncommitted.
+
+---
+
+### (previous) 2026-09-16 entries
 
 ### Real Money Wallet balance sync was silently reading the testnet account — bug from the previous session's own safety fix — 2026-09-16
 

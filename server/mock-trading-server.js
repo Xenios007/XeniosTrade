@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import dotenv from 'dotenv'
+import { createGoogleAuthHandlers } from './google-auth.js'
 import {
   getStrategyDerivedMaxLossPerTrade,
   getTradeEffectiveStopLoss,
@@ -68,7 +69,24 @@ import { refreshBotGrokDecisions } from './strategy/bot-grok.js'
 import { refreshBotOpenrouterDecisions } from './strategy/bot-openrouter.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
 import { mergeAiProviderCredentialsUpdate, normalizeAiProviderCredentials } from '../src/lib/aiProviders.js'
-import { setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
+import { getAiProviderCredential, setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
+import { AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN } from '../src/lib/aiTrading.js'
+import { listAllProviderModels, listProviderModels } from './ai-models/catalog.js'
+import { callAgentJson, redactSecrets } from './ai-trading/llm.js'
+import { collectFlowData } from './ai-trading/flow-data.js'
+import { getCodexAgentStatus } from './ai-trading/codex-agent.js'
+import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
+import { runAiTradingPipeline } from './ai-trading/pipeline.js'
+import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
+import { loadQuantStats } from './ai-trading/quant-stats.js'
+import {
+  appendAiTradingRun, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
+  updateAiScanStatus, updateAiTrades,
+} from './ai-trading/store.js'
+import {
+  AI_MODEL_NAME, AI_WALLET_IDS, AI_WALLET_NAMES, AiExecutionError, assertCanExecute, buildAiTradeRecord, isOpenAiTrade,
+  scalePlanToWallet, settlePaperTrade, summarizeAiWallet,
+} from './ai-trading/execution.js'
 
 // One entry per LLM-driven bot (model-11..15). Refreshing a decision is the
 // only async step in an otherwise-synchronous scan/dispatch pipeline - see
@@ -1569,12 +1587,17 @@ function buildCookieHeader(name, value, {
   sameSite = 'Strict',
   secure = process.env.AUTH_COOKIE_SECURE === 'true',
   path: cookiePath = '/',
+  domain = null,
 } = {}) {
   const segments = [
     `${encodeURIComponent(name)}=${encodeURIComponent(value)}`,
     `Path=${cookiePath}`,
     `SameSite=${sameSite}`,
   ]
+
+  if (domain) {
+    segments.push(`Domain=${domain}`)
+  }
 
   if (Number.isFinite(maxAge)) {
     segments.push(`Max-Age=${Math.max(0, Math.floor(maxAge))}`)
@@ -1614,22 +1637,38 @@ function createAuthSession() {
   }
 }
 
+// Every value sent under `name`. Once the session cookie is scoped to the whole
+// domain, a browser can still hold an older host-only copy; both get sent, and
+// the stale one must not shadow the live one.
+function getCookieValues(cookieHeader = '', name) {
+  return String(cookieHeader || '')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith(`${name}=`))
+    .map((entry) => {
+      try {
+        return decodeURIComponent(entry.slice(name.length + 1))
+      } catch {
+        return ''
+      }
+    })
+    .filter(Boolean)
+}
+
 function getAuthSessionFromRequest(request) {
   pruneExpiredAuthSessions()
 
-  const cookies = parseCookies(request.headers.cookie)
-  const token = cookies[AUTH_SESSION_COOKIE_NAME]
+  const token = getCookieValues(request.headers.cookie, AUTH_SESSION_COOKIE_NAME)
+    .find((candidate) => {
+      const candidateSession = authSessions.get(candidate)
+      return candidateSession && candidateSession.expiresAt > Date.now()
+    })
 
   if (!token) {
     return null
   }
 
   const session = authSessions.get(token)
-
-  if (!session || session.expiresAt <= Date.now()) {
-    authSessions.delete(token)
-    return null
-  }
 
   session.expiresAt = Date.now() + AUTH_SESSION_TTL_MS
   authSessions.set(token, session)
@@ -1640,16 +1679,35 @@ function getAuthSessionFromRequest(request) {
   }
 }
 
+// With AUTH_COOKIE_DOMAIN=.example.com the session is shared by example.com,
+// ai.example.com and bot.example.com. Only applied when the request really came
+// in on that domain, so 127.0.0.1 / SSH-tunnel access keeps working host-only.
+function resolveSessionCookieDomain(response) {
+  const configured = String(process.env.AUTH_COOKIE_DOMAIN || '').trim().toLowerCase()
+  const bare = configured.replace(/^\./, '')
+  const host = String(response?.req?.headers?.host || '').toLowerCase().replace(/:\d+$/, '')
+
+  return bare && (host === bare || host.endsWith(`.${bare}`)) ? `.${bare}` : null
+}
+
 function attachAuthSessionCookie(response, token, expiresAt) {
   response.setHeader('Set-Cookie', buildCookieHeader(AUTH_SESSION_COOKIE_NAME, token, {
     maxAge: Math.max(0, Math.floor((expiresAt - Date.now()) / 1000)),
+    domain: resolveSessionCookieDomain(response),
   }))
 }
 
 function clearAuthSessionCookie(response) {
-  response.setHeader('Set-Cookie', buildCookieHeader(AUTH_SESSION_COOKIE_NAME, '', {
-    maxAge: 0,
-  }))
+  const expired = { maxAge: 0 }
+  const domain = resolveSessionCookieDomain(response)
+  // Also expire any older host-only copy so logout really logs out everywhere.
+  const headers = [buildCookieHeader(AUTH_SESSION_COOKIE_NAME, '', expired)]
+
+  if (domain) {
+    headers.push(buildCookieHeader(AUTH_SESSION_COOKIE_NAME, '', { ...expired, domain }))
+  }
+
+  response.setHeader('Set-Cookie', headers)
 }
 
 function requireAuthenticatedSession(request, response, next) {
@@ -1763,11 +1821,24 @@ app.post('/api/auth/login', (request, response) => {
   })
 })
 
-app.post('/api/auth/logout', (request, response) => {
-  const cookies = parseCookies(request.headers.cookie)
-  const token = cookies[AUTH_SESSION_COOKIE_NAME]
+const googleAuth = createGoogleAuthHandlers({
+  buildCookie: buildCookieHeader,
+  parseCookies,
+  issueSession: (response) => {
+    const session = createAuthSession()
+    attachAuthSessionCookie(response, session.token, session.expiresAt)
+  },
+})
 
-  if (token) {
+// Lets the homepage hide the Google button when the server has no credentials.
+app.get('/api/auth/google/status', (_request, response) => {
+  response.json({ enabled: googleAuth.enabled })
+})
+app.get('/api/auth/google/start', googleAuth.start)
+app.get('/api/auth/google/callback', googleAuth.callback)
+
+app.post('/api/auth/logout', (request, response) => {
+  for (const token of getCookieValues(request.headers.cookie, AUTH_SESSION_COOKIE_NAME)) {
     authSessions.delete(token)
   }
 
@@ -10109,6 +10180,524 @@ app.get('/api/signal-model-analysis', async (request, response) => {
   }
 })
 
+// ---- Browse Models (AI Models page) -------------------------------------------
+// Live model lists per provider using the keys held server-side (never returned to the browser), plus
+// OpenRouter's public catalog incl. free models. See server/ai-models/catalog.js.
+app.get('/api/ai-models/browse', async (request, response) => {
+  try {
+    await getSettings() // refreshes the credential mirror the catalog reads
+    const force = request.query.refresh === '1'
+    const providerId = String(request.query.provider || 'all')
+    const providers = providerId === 'all'
+      ? await listAllProviderModels(getAiProviderCredential, { force })
+      : [await listProviderModels(providerId, getAiProviderCredential(providerId), { force })]
+    response.json({ ok: true, providers })
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to list models' })
+  }
+})
+
+// One tiny real call through the same caller the AI Trading agents use, so "works here" means
+// "works in the pipeline" (key valid, model id current, JSON reply parsable, quota available).
+app.post('/api/ai-models/test', async (request, response) => {
+  const providerId = String(request.body?.providerId || '').trim()
+  const model = String(request.body?.model || '').trim().slice(0, 200)
+  if (!providerId || !model) {
+    response.status(400).json({ error: 'providerId and model are required.' })
+    return
+  }
+  const startedAt = Date.now()
+  try {
+    await getSettings()
+    const result = await callAgentJson({
+      providerId,
+      model,
+      timeoutMs: 30_000,
+      systemPrompt: 'You are a connectivity test. Respond with a single JSON object only.',
+      userPrompt: 'Reply with exactly: {"ok":true}',
+    })
+    response.json({ ok: true, ms: Date.now() - startedAt, reply: result.json })
+  } catch (error) {
+    response.json({ ok: false, ms: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+// ---- AI Trading (advisory 5-agent pipeline; see docs/AI_TRADING.md) ---------
+// Not a bot: no wallet, no signal model, never places an order. Everything here
+// reads market data and calls LLM providers; the result is a report.
+const aiTradingRunsInFlight = new Set()
+
+app.get('/api/ai-trading/config', async (_request, response) => {
+  const noLogin = () => ({ available: false, loggedIn: false })
+  const [config, quantStats, scanStatus, codex, claude] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin)])
+  response.json({
+    ok: true,
+    config,
+    scanStatus,
+    codex,
+    claude,
+    backtestStats: quantStats
+      ? { available: true, generatedAt: quantStats.generatedAt, tradeCount: quantStats.tradeCount, source: quantStats.source }
+      : { available: false },
+  })
+})
+
+app.put('/api/ai-trading/config', async (request, response) => {
+  try {
+    const current = await getAiTradingConfig()
+    const body = request.body && typeof request.body === 'object' ? request.body : {}
+    // Older clients send only agents/risk (any `risk` is ignored: it is fixed in code); a missing `execution` must not silently
+    // reset the trading mode or disarm/arm real money — keep what is saved.
+    const next = await saveAiTradingConfig({ ...body, execution: body.execution ?? current.execution, scan: body.scan ?? current.scan })
+    if (next.execution.mode !== current.execution.mode || next.execution.realArmed !== current.execution.realArmed) {
+      console.warn(`[ai-trading] Execution settings changed: mode ${current.execution.mode} -> ${next.execution.mode}, real armed ${current.execution.realArmed} -> ${next.execution.realArmed}`)
+    }
+    response.json({ ok: true, config: next })
+  } catch (error) {
+    response.status(500).json({ error: error instanceof Error ? error.message : 'Unable to save AI Trading config' })
+  }
+})
+
+app.get('/api/ai-trading/runs', async (_request, response) => {
+  response.json({ ok: true, runs: await getAiTradingRuns() })
+})
+
+// One pipeline run for a symbol, including testnet auto-execution. Shared by the Analyze button and the auto-scan
+// loop; the caller owns the in-flight guard and decides whether to persist the run.
+async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
+  // Refresh the provider-credential mirror the LLM caller reads.
+  await getSettings()
+  const [config, quantStats] = await Promise.all([getAiTradingConfig(), loadQuantStats()])
+  const run = await runAiTradingPipeline({
+    symbol,
+    config,
+    backtestStats: quantStats,
+    callAgent: callAgentJson,
+    // Derivatives positioning / order flow for the Market Flow Agent (public futures data, no keys). The
+    // order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
+    getFlowData: async (target, snapshot) => {
+      const [depth, btcKlines] = await Promise.all([
+        fetchFuturesDepth(target, 20).catch(() => null),
+        target === 'BTCUSDT' ? null : fetchKlines('BTCUSDT', '5m', 60).catch(() => null),
+      ])
+      const closedOnly = (candles) => candles.filter((candle) => !(candle.closeTime > Date.now()))
+      return collectFlowData({
+        symbol: target,
+        baseUrl: futuresLiveBaseUrl,
+        fetchJson: (url, cacheKey) => fetchJson(url, { retries: 1, timeoutMs: 9_000, cacheKey, cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS }),
+        entry: snapshot.entryCandles,
+        orderBook: depth,
+        btcCandles: btcKlines ? closedOnly(toCandleData(btcKlines)) : null,
+      })
+    },
+    getMarketInputs: async (target) => {
+      const [bias, higher, entry, marketContext] = await Promise.all([
+        fetchKlines(target, '1h', 120),
+        fetchKlines(target, '15m', 120),
+        fetchKlines(target, '5m', 120),
+        fetchSignalMarketContext(target),
+      ])
+      return { bias: toCandleData(bias), higher: toCandleData(higher), entry: toCandleData(entry), marketContext }
+    },
+  })
+  run.trigger = trigger
+  // Testnet auto-execution. Real money is never automatic (assertCanExecute refuses auto + real).
+  if (run.final?.approved && config.execution.mode === 'testnet' && config.execution.autoExecuteTestnet) {
+    try {
+      const trade = await openAiTrade({ run, mode: 'testnet', auto: true })
+      run.execution = { status: 'opened', mode: 'testnet', tradeId: trade.id, at: Date.now(), auto: true }
+    } catch (error) {
+      run.execution = { status: 'failed', mode: 'testnet', error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
+    }
+  }
+  return run
+}
+
+app.post('/api/ai-trading/run', async (request, response) => {
+  const symbol = String(request.body?.symbol || '').trim().toUpperCase()
+  if (!AI_TRADING_SYMBOL_PATTERN.test(symbol)) {
+    response.status(400).json({ error: 'A USDT symbol such as BTCUSDT is required.' })
+    return
+  }
+  if (aiTradingRunsInFlight.has(symbol)) {
+    response.status(409).json({ error: `A pipeline run for ${symbol} is already in progress.` })
+    return
+  }
+
+  aiTradingRunsInFlight.add(symbol)
+  try {
+    const run = await performAiTradingRun(symbol, { trigger: 'manual' })
+    await appendAiTradingRun(run)
+    response.json({ ok: true, run })
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : 'AI Trading pipeline failed' })
+  } finally {
+    aiTradingRunsInFlight.delete(symbol)
+  }
+})
+
+// Auto-scan: every 5 min, when switched on in AI Settings, run the pipeline for each enabled symbol in turn.
+// Testnet auto-execute applies exactly as for a manual run; real money is never opened here. One cycle at a time:
+// a tick that arrives while the previous cycle is still running is dropped, not queued.
+let aiScanCycleRunning = false
+
+async function runAiScanCycle() {
+  if (aiScanCycleRunning) return
+  aiScanCycleRunning = true
+  let statusTouched = false
+  try {
+    let config = await getAiTradingConfig()
+    if (!config.scan.enabled) return
+
+    const startedAt = Date.now()
+    statusTouched = true
+    await updateAiScanStatus((status) => ({ ...status, running: true, lastStartedAt: startedAt, lastError: null }))
+    const { toRun, skipped } = planScanCycle({
+      symbols: config.scan.symbols,
+      trades: await getAiTrades(),
+      mode: config.execution.mode,
+      inFlight: aiTradingRunsInFlight,
+    })
+    const results = {}
+    const stamp = Date.now()
+    for (const item of skipped) results[item.symbol] = { at: stamp, outcome: 'skipped', detail: item.reason }
+
+    let cycleError = null
+    for (const symbol of toRun) {
+      config = await getAiTradingConfig()
+      if (!config.scan.enabled) break // switched off mid-cycle
+      if (aiTradingRunsInFlight.has(symbol)) continue
+      aiTradingRunsInFlight.add(symbol)
+      try {
+        const run = await performAiTradingRun(symbol, { trigger: 'scan' })
+        if (shouldPersistScanRun(run)) await appendAiTradingRun(run)
+        results[symbol] = summarizeScanResult(run)
+        if (run.execution?.status === 'opened') {
+          console.log(`[ai-trading] Auto-scan opened ${run.final.action} ${symbol} on ${run.execution.mode}`)
+        }
+      } catch (error) {
+        cycleError = error instanceof Error ? error.message : String(error)
+        results[symbol] = { at: Date.now(), outcome: 'error', detail: redactSecrets(cycleError).slice(0, 240) }
+        console.warn(`[ai-trading] Auto-scan failed for ${symbol}: ${redactSecrets(cycleError)}`)
+      } finally {
+        aiTradingRunsInFlight.delete(symbol)
+      }
+    }
+    await updateAiScanStatus((status) => ({
+      ...status,
+      running: false,
+      lastFinishedAt: Date.now(),
+      lastError: cycleError ? redactSecrets(cycleError).slice(0, 240) : null,
+      results: { ...status.results, ...results },
+    }))
+  } finally {
+    aiScanCycleRunning = false
+    // Never leave the status stuck on "running" if a step above threw.
+    if (statusTouched) await updateAiScanStatus((status) => (status.running ? { ...status, running: false } : status)).catch(() => {})
+  }
+}
+
+// ---- AI Trading wallets: execution, ledger, monitor -------------------------
+// Approved pipeline runs can be opened on the AI's own testnet / real-money wallets. The pure safety
+// rules live in ai-trading/execution.js (unit-tested); this block does the exchange and disk I/O.
+// Real money: manual only, armed only, symbol typed back as confirmation, margin hard-capped.
+const aiExecutionsInFlight = new Set()
+const AI_EXCHANGE_CACHE_MS = 15_000
+const aiExchangeSummaryCache = { testnet: null, real: null }
+
+function getAiEnvironment(mode) {
+  return mode === 'real' ? REAL_MONEY_WALLET_ENVIRONMENT : TESTNET_WALLET_ENVIRONMENT
+}
+
+function summarizeExchangeSnapshot(snapshot, mode) {
+  const positions = Array.isArray(snapshot?.positions) ? snapshot.positions : []
+  return {
+    configured: true,
+    walletBalance: Number(snapshot?.totalWalletBalance ?? 0),
+    availableBalance: Number(snapshot?.availableBalance ?? 0),
+    unrealizedProfit: Number(snapshot?.totalUnrealizedProfit ?? 0),
+    openPositions: positions.filter((position) => Math.abs(Number(position?.positionAmt || 0)) > 1e-8).length,
+    provider: mode === 'real' ? 'BINANCE_FUTURES_LIVE' : 'BINANCE_FUTURES_TESTNET',
+    syncedAt: Date.now(),
+    error: null,
+  }
+}
+
+// Read-only account balance for the wallet cards. Never places anything, so it is not gated by arming
+// (same reasoning as the bots' real-money balance sync). Cached so page polling stays cheap.
+async function getAiExchangeSummary(mode, settings, { force = false } = {}) {
+  const { apiKey, secretKey } = getEffectiveCredentials(settings, getAiEnvironment(mode))
+  if (!apiKey || !secretKey) {
+    return { configured: false, walletBalance: null, availableBalance: null, error: null }
+  }
+  const cached = aiExchangeSummaryCache[mode]
+  if (!force && cached && Date.now() - cached.syncedAt < AI_EXCHANGE_CACHE_MS) {
+    return cached
+  }
+  try {
+    const snapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl: getFuturesBaseUrl(getAiEnvironment(mode)) })
+    aiExchangeSummaryCache[mode] = summarizeExchangeSnapshot(snapshot, mode)
+  } catch (error) {
+    aiExchangeSummaryCache[mode] = {
+      configured: true,
+      walletBalance: null,
+      availableBalance: null,
+      syncedAt: Date.now(),
+      error: redactSecrets(error instanceof Error ? error.message : String(error)),
+    }
+  }
+  return aiExchangeSummaryCache[mode]
+}
+
+async function openAiTrade({ run, mode, confirm = '', auto = false }) {
+  if (!run) {
+    throw new AiExecutionError('Run not found.', 404)
+  }
+  if (aiExecutionsInFlight.has(run.id)) {
+    throw new AiExecutionError('This run is already being executed.')
+  }
+  aiExecutionsInFlight.add(run.id)
+  try {
+    const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+    const ticker = await fetchTickerPrice(run.symbol).catch(() => null)
+    const { plan } = assertCanExecute({ run, mode, config, trades, livePrice: Number(ticker?.price), confirm, auto })
+
+    const environment = getAiEnvironment(mode)
+    const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
+    const hasKeys = Boolean(apiKey && secretKey)
+    if (mode === 'real' && !hasKeys) {
+      throw new AiExecutionError('Live Binance API keys are not configured, so a real money trade cannot be placed.')
+    }
+
+    let availableUsdt
+    if (hasKeys) {
+      const snapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl: getFuturesBaseUrl(environment) })
+      // One-way position mode: a second position on the symbol would net against the first (e.g. a bot's).
+      if (Math.abs(getExchangePositionAmount(snapshot, run.symbol)) > 1e-8) {
+        throw new AiExecutionError(`${run.symbol} already has an open position on this ${mode} Binance account (possibly opened by a bot). The AI will not trade on top of it.`)
+      }
+      availableUsdt = Number(snapshot.availableBalance)
+    } else {
+      availableUsdt = summarizeAiWallet({ mode, trades, config }).ledger.availableBalance
+    }
+
+    const scaled = scalePlanToWallet({ plan, mode, config, availableUsdt })
+    const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), run.symbol)
+    if (!symbolInfo) {
+      throw new AiExecutionError(`No futures symbol rules found for ${run.symbol}.`, 400)
+    }
+    let quantity
+    try {
+      quantity = buildFuturesQuantity(symbolInfo, scaled.notional, plan.entryPrice)
+    } catch (error) {
+      throw new AiExecutionError(`${error instanceof Error ? error.message : error} — the position is too small for the wallet's margin limit.`)
+    }
+
+    const marginMode = 'ISOLATED' // the Risk Manager's liquidation-distance check assumes isolated margin
+    const rawExecution = await createExchangeTradeExecution({
+      symbol: run.symbol,
+      side: toAiExchangeSide(plan.side),
+      quantity,
+      symbolInfo,
+      stopLoss: plan.stopLoss,
+      takeProfit: plan.takeProfit,
+      entryPrice: plan.entryPrice,
+      leverage: plan.leverage,
+      marginMode,
+    }, settings, { forceBinance: true, environment })
+    if (mode === 'real' && rawExecution.mode !== 'binance-futures-live') {
+      throw new AiExecutionError('Binance live execution was not confirmed; nothing was recorded as a real money trade.', 502)
+    }
+    const execution = { quantity, entryPrice: plan.entryPrice, notional: quantity * plan.entryPrice, ...rawExecution }
+
+    const record = buildAiTradeRecord({
+      run, plan, mode, scaled, execution, marginMode, leverage: plan.leverage, dateKey: manilaDateKey(),
+    })
+    await updateAiTrades((current) => (current.some((trade) => trade.aiRunId === run.id) ? undefined : [record, ...current]))
+    aiExchangeSummaryCache[mode] = null
+    console.log(`[ai-trading] Opened ${mode} ${record.side} ${record.symbol} qty ${record.quantity} @ ${record.entryPrice} via ${record.mode} (run ${run.id})`)
+    return record
+  } finally {
+    aiExecutionsInFlight.delete(run.id)
+  }
+}
+
+function toAiExchangeSide(side) {
+  return side === 'LONG' ? 'BUY' : 'SELL'
+}
+
+async function closeAiTradeNow(tradeId) {
+  const settings = await getSettings()
+  const trade = (await getAiTrades()).find((item) => item.id === tradeId)
+  if (!trade) {
+    throw new AiExecutionError('Trade not found.', 404)
+  }
+  if (!isOpenAiTrade(trade)) {
+    throw new AiExecutionError('Trade is already closed.')
+  }
+
+  let closed
+  if (isBinanceExecutedTrade(trade)) {
+    const environment = getAiEnvironment(trade.aiTradingMode)
+    const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
+    const baseUrl = getFuturesBaseUrl(environment)
+    if (!apiKey || !secretKey) {
+      throw new AiExecutionError('Binance API keys are required to close this trade.')
+    }
+    const snapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl })
+    const openAmount = Math.abs(getExchangePositionAmount(snapshot, trade.symbol))
+    await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey, baseUrl })
+    let closeResult = null
+    if (openAmount > 1e-8) {
+      closeResult = await closeExchangePositionImmediately({ symbol: trade.symbol, side: trade.side, quantity: openAmount, apiKey, secretKey, baseUrl })
+    }
+    const fill = await resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl }).catch(() => null)
+    let exitPrice = Number(closeResult?.exitPrice || fill?.exitPrice || 0)
+    if (!(exitPrice > 0)) {
+      exitPrice = Number((await fetchTickerPrice(trade.symbol))?.price || 0)
+    }
+    closed = closeTradeRecord({
+      trade, exitPrice, status: 'CLOSED_MANUAL', result: 'MANUAL', closedAt: Number(closeResult?.closedAt || fill?.closedAt || Date.now()),
+    })
+  } else {
+    closed = closeTradeRecord({
+      trade, exitPrice: Number((await fetchTickerPrice(trade.symbol))?.price || 0), status: 'CLOSED_MANUAL', result: 'MANUAL',
+    })
+  }
+
+  await updateAiTrades((current) => current.map((item) => (item.id === tradeId && isOpenAiTrade(item) ? closed : item)))
+  aiExchangeSummaryCache[trade.aiTradingMode] = null
+  return closed
+}
+
+// Settles open AI trades: exchange trades through the same reconcile the bots use (stop/target fills,
+// manual closes on Binance), local-paper trades against the live price. No-op while nothing is open.
+let aiMonitorRunning = false
+async function monitorAiTrades() {
+  if (aiMonitorRunning) return
+  aiMonitorRunning = true
+  try {
+    const open = (await getAiTrades()).filter(isOpenAiTrade)
+    if (open.length === 0) return
+    const settings = await getSettings()
+    const latestPrices = new Map()
+    const snapshots = new Map()
+    const changes = new Map()
+
+    for (const trade of open) {
+      try {
+        let next = trade
+        if (isBinanceExecutedTrade(trade)) {
+          const environment = getAiEnvironment(trade.aiTradingMode)
+          const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
+          if (!apiKey || !secretKey) continue
+          const baseUrl = getFuturesBaseUrl(environment)
+          if (!snapshots.has(trade.aiTradingMode)) {
+            snapshots.set(trade.aiTradingMode, await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl }))
+          }
+          next = await reconcileExchangeTradeState(trade, snapshots.get(trade.aiTradingMode), { apiKey, secretKey, baseUrl }, latestPrices)
+        } else {
+          const settle = settlePaperTrade(trade, Number((await fetchTickerPrice(trade.symbol))?.price))
+          if (settle) next = closeTradeRecord({ trade, ...settle })
+        }
+        if (next !== trade && next.status !== 'OPEN') {
+          changes.set(trade.id, next)
+          console.log(`[ai-trading] ${trade.aiTradingMode} ${trade.symbol} ${trade.side} closed ${next.result} pnl ${next.pnl}`)
+        }
+      } catch (error) {
+        console.warn(`[ai-trading] Could not reconcile ${trade.id}:`, error instanceof Error ? error.message : error)
+      }
+    }
+
+    if (changes.size > 0) {
+      await updateAiTrades((current) => current.map((item) => (changes.has(item.id) && isOpenAiTrade(item) ? changes.get(item.id) : item)))
+      aiExchangeSummaryCache.testnet = null
+      aiExchangeSummaryCache.real = null
+    }
+  } finally {
+    aiMonitorRunning = false
+  }
+}
+
+function sendAiExecutionError(response, error) {
+  if (error instanceof AiExecutionError) {
+    response.status(error.status).json({ error: error.message })
+    return
+  }
+  response.status(502).json({ error: redactSecrets(error instanceof Error ? error.message : 'AI Trading request failed') })
+}
+
+const AI_WALLET_TONES = { testnet: 'sky', real: 'amber' }
+
+async function buildAiLedgerView({ force = false } = {}) {
+  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+  const livePrices = await getLivePriceMapForTrades(trades.filter(isOpenAiTrade))
+  const [testnetExchange, realExchange] = await Promise.all([
+    getAiExchangeSummary('testnet', settings, { force }),
+    getAiExchangeSummary('real', settings, { force }),
+  ])
+  const exchangeByMode = { testnet: testnetExchange, real: realExchange }
+  const wallets = ['testnet', 'real'].map((mode) => summarizeAiWallet({ mode, trades, config, livePrices, exchange: exchangeByMode[mode] }))
+  const journalWallets = wallets.map((wallet) => {
+    const walletTrades = trades.filter((trade) => trade.walletId === wallet.id)
+    const items = buildJournalItems(walletTrades)
+    return {
+      walletId: wallet.id,
+      walletName: wallet.name,
+      walletColorKey: AI_WALLET_TONES[wallet.mode],
+      assignedSignalModelName: `${AI_MODEL_NAME} · ${wallet.mode === 'real' ? 'Real money' : 'Testnet'}`,
+      items,
+      summary: buildJournalSummary(walletTrades, items),
+      startingBalance: wallet.startingBalance,
+    }
+  })
+  return {
+    ok: true,
+    config: config.execution,
+    trades,
+    wallets,
+    livePrices,
+    journal: {
+      wallets: journalWallets,
+      availableMonths: Array.from(new Set(journalWallets.flatMap((wallet) => wallet.items.map((item) => String(item.date).slice(0, 7))))).sort((left, right) => right.localeCompare(left)),
+    },
+    credentials: {
+      testnet: hasExchangeCredentials(settings, TESTNET_WALLET_ENVIRONMENT),
+      real: hasExchangeCredentials(settings, REAL_MONEY_WALLET_ENVIRONMENT),
+    },
+  }
+}
+
+app.get('/api/ai-trading/ledger', async (request, response) => {
+  try {
+    response.json(await buildAiLedgerView({ force: request.query.sync === '1' }))
+  } catch (error) {
+    sendAiExecutionError(response, error)
+  }
+})
+
+app.post('/api/ai-trading/execute', async (request, response) => {
+  try {
+    const body = request.body && typeof request.body === 'object' ? request.body : {}
+    const runs = await getAiTradingRuns()
+    const run = runs.find((item) => item.id === String(body.runId || ''))
+    const mode = body.mode || (await getAiTradingConfig()).execution.mode
+    const trade = await openAiTrade({ run, mode, confirm: body.confirm })
+    await patchAiTradingRun(run.id, { execution: { status: 'opened', mode, tradeId: trade.id, at: Date.now(), auto: false } })
+    response.json({ ok: true, trade })
+  } catch (error) {
+    sendAiExecutionError(response, error)
+  }
+})
+
+app.post('/api/ai-trading/trades/:tradeId/close', async (request, response) => {
+  try {
+    response.json({ ok: true, trade: await closeAiTradeNow(String(request.params.tradeId || '')) })
+  } catch (error) {
+    sendAiExecutionError(response, error)
+  }
+})
+
 app.get('/api/trade-history', async (_request, response) => {
   const items = await getTradeHistory()
   response.json({
@@ -10892,6 +11481,20 @@ setInterval(() => {
     console.error('Failed to update open trades:', error)
   })
 }, 10_000)
+
+setInterval(() => {
+  monitorAiTrades().catch((error) => {
+    console.error('Failed to monitor AI Trading positions:', error)
+  })
+}, 15_000)
+
+if (IS_MAIN_MODULE) {
+  setInterval(() => {
+    runAiScanCycle().catch((error) => {
+      console.error('Failed to run AI Trading auto-scan:', error)
+    })
+  }, AI_SCAN_INTERVAL_MS)
+}
 
 setInterval(() => {
   runAutoTrader('SCHEDULED').catch((error) => {

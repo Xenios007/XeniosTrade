@@ -3,13 +3,30 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { LoaderCircle, LockKeyhole } from 'lucide-react'
 import { AppShell } from './components/shell/AppShell'
 import { BrandMark } from './components/BrandMark'
+import { GoogleSignInButton } from './components/GoogleSignInButton'
 import { CodexConsole } from './components/CodexConsole'
 import { DashboardKpis } from './components/DashboardKpis'
 import { PageHeader } from './components/ui/PageHeader'
 import { SubNavTabs } from './components/ui/SubNavTabs'
 import { useToast } from './components/ui/Toast'
 import { DEFAULT_PATH, resolveInitialPath } from './components/shell/navItems'
+import {
+  APP_META,
+  APP_MODE,
+  APP_MODE_AI,
+  APP_MODE_BOT,
+  IS_AI_APP,
+  PASSWORD_LOGIN_ENABLED,
+  SECTIONS_BY_MODE,
+  getGoogleLoginUrl,
+  getModeUrl,
+} from './lib/appMode'
 import { AiModelsPage } from './components/AiModelsPage'
+import { AiTradingPage } from './components/AiTradingPage'
+import { AiJournalPage } from './components/aiTrading/AiJournalPage'
+import { AiSettingsPage } from './components/aiTrading/AiSettingsPage'
+import { AiTradeHistoryPage } from './components/aiTrading/AiTradeHistoryPage'
+import { AiWalletPage } from './components/aiTrading/AiWalletPage'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
 import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
 import { BotStatusGrid } from './components/BotStatusGrid'
@@ -297,6 +314,31 @@ function normalizeMarkets(markets, currentMarkets = []) {
   })
 }
 
+// Old bookmarks and in-app links can point at a page that now lives on the
+// other workspace's subdomain; hand the browser over instead of a blank page.
+function ExternalRedirect({ to, label }) {
+  useEffect(() => {
+    if (to) {
+      window.location.replace(to)
+    }
+  }, [to])
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-sm text-slate-300">
+      {to ? (
+        <>Opening <a href={to} className="text-sky-300 hover:underline">{label}</a>…</>
+      ) : (
+        <>{label} lives on its own workspace, which isn't available on this address.</>
+      )}
+    </div>
+  )
+}
+
+// Which workspace's pages this location serves ('all' serves everything).
+const BOT_ROUTE_SECTIONS = SECTIONS_BY_MODE[APP_MODE_BOT].filter((section) => section !== 'ai-models')
+const showsBotPages = APP_MODE !== APP_MODE_AI
+const showsAiPages = APP_MODE !== APP_MODE_BOT
+
 export default function App() {
   const chartReconnectTimeoutRef = useRef(null)
   const marketTradeReconnectTimeoutRef = useRef(null)
@@ -308,8 +350,18 @@ export default function App() {
   const [authStatusMessage, setAuthStatusMessage] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [googleEnabled, setGoogleEnabled] = useState(false)
   const location = useLocation()
   const { error: notifyError } = useToast()
+
+  useEffect(() => {
+    document.title = APP_META[APP_MODE].title
+
+    fetch('/api/auth/google/status')
+      .then((response) => (response.ok ? response.json() : {}))
+      .then((payload) => setGoogleEnabled(Boolean(payload.enabled)))
+      .catch(() => {})
+  }, [])
   const [initialPath] = useState(() => {
     try {
       return resolveInitialPath(window.localStorage.getItem(CURRENT_PAGE_STORAGE_KEY))
@@ -559,7 +611,7 @@ export default function App() {
   }, [error, notifyError])
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       return undefined
     }
 
@@ -604,7 +656,7 @@ export default function App() {
   }, [authState])
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       return undefined
     }
 
@@ -634,7 +686,7 @@ export default function App() {
   }, [authState])
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       return undefined
     }
 
@@ -738,7 +790,7 @@ export default function App() {
   )
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       return undefined
     }
 
@@ -827,7 +879,7 @@ export default function App() {
   const chartPatternResult = useMemo(() => detectChartPatterns(chartData), [chartData])
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       setSignalModelAnalyses({})
       return undefined
     }
@@ -1027,7 +1079,7 @@ export default function App() {
   }, [markets, trackedTradeSymbols, authState])
 
   useEffect(() => {
-    if (authState !== AUTH_STATE_AUTHENTICATED) {
+    if (authState !== AUTH_STATE_AUTHENTICATED || IS_AI_APP) {
       return undefined
     }
 
@@ -1723,8 +1775,8 @@ export default function App() {
               <div className="flex items-center gap-4">
                 <BrandMark />
                 <div>
-                  <p className="text-2xl font-semibold tracking-[0.08em] text-white">XeniosTrade</p>
-                  <p className="mt-1 text-[11px] uppercase tracking-[0.26em] text-slate-400">Private trading workspace</p>
+                  <p className="text-2xl font-semibold tracking-[0.08em] text-white">{APP_META[APP_MODE].title}</p>
+                  <p className="mt-1 text-[11px] uppercase tracking-[0.26em] text-slate-400">{APP_META[APP_MODE].loginHeading}</p>
                 </div>
               </div>
 
@@ -1758,10 +1810,36 @@ export default function App() {
               <div className="text-sm font-medium uppercase tracking-[0.24em] text-sky-200/70">Owner Login</div>
               <h2 className="mt-3 text-2xl font-semibold text-white">Unlock the workspace</h2>
               <p className="mt-3 text-sm leading-6 text-slate-400">
-                Enter the private password configured on the server to continue.
+                {PASSWORD_LOGIN_ENABLED
+                  ? 'Enter the private password configured on the server to continue.'
+                  : 'Sign in with the Google account approved for this workspace.'}
               </p>
 
-              <form className="mt-8 grid gap-4" onSubmit={handleLoginSubmit}>
+              {googleEnabled ? (
+                <div className="mt-8 grid gap-4">
+                  <GoogleSignInButton href={getGoogleLoginUrl(window.location.href)} label="Sign in with Google" className="w-full" />
+                  {PASSWORD_LOGIN_ENABLED ? (
+                    <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.2em] text-slate-500">
+                      <span className="h-px flex-1 bg-white/10" />
+                      or use the password
+                      <span className="h-px flex-1 bg-white/10" />
+                    </div>
+                  ) : null}
+                </div>
+              ) : !PASSWORD_LOGIN_ENABLED ? (
+                <div className="mt-8 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                  Google sign-in isn’t available right now. Please try again shortly.
+                </div>
+              ) : null}
+
+              {!PASSWORD_LOGIN_ENABLED && authStatusMessage ? (
+                <div className="mt-4 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                  {authStatusMessage}
+                </div>
+              ) : null}
+
+              {PASSWORD_LOGIN_ENABLED ? (
+              <form className={`${googleEnabled ? 'mt-6' : 'mt-8'} grid gap-4`} onSubmit={handleLoginSubmit}>
                 <label className="grid gap-2">
                   <span className="text-[11px] font-medium uppercase tracking-[0.2em] text-slate-400">Password</span>
                   <input
@@ -1794,6 +1872,7 @@ export default function App() {
                   {loggingIn ? 'Unlocking...' : 'Login'}
                 </button>
               </form>
+              ) : null}
             </section>
           </section>
         </main>
@@ -1814,16 +1893,44 @@ export default function App() {
     >
       <Routes>
         <Route path="/" element={<Navigate to={initialPath} replace />} />
-        <Route path="/dashboard/*" element={renderDashboard()} />
-        <Route path="/mock-trading/*" element={renderMockTrading()} />
-        <Route path="/ai-training/*" element={renderLearningBot()} />
-        <Route path="/bot-10" element={<ConsolidatedBotPage />} />
-        <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
-        <Route path="/wallets" element={renderWallets()} />
+        {showsBotPages ? (
+          <>
+            <Route path="/dashboard/*" element={renderDashboard()} />
+            <Route path="/mock-trading/*" element={renderMockTrading()} />
+            <Route path="/ai-training/*" element={renderLearningBot()} />
+            <Route path="/bot-10" element={<ConsolidatedBotPage />} />
+            <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
+            <Route path="/wallets" element={renderWallets()} />
+            <Route path="/journal/*" element={renderJournal()} />
+            <Route path="/trade-history/*" element={renderTradeHistory()} />
+            <Route path="/settings/*" element={renderSettings()} />
+          </>
+        ) : (
+          // ai.*: the bot pages live on bot.* now.
+          [...BOT_ROUTE_SECTIONS, 'bot-10', 'consolidated-bot'].map((section) => (
+            <Route
+              key={section}
+              path={`/${section}/*`}
+              element={<ExternalRedirect to={getModeUrl(APP_MODE_BOT, location.pathname + location.search)} label="Bot Trading" />}
+            />
+          ))
+        )}
         <Route path="/ai-models/*" element={renderAiModels()} />
-        <Route path="/journal/*" element={renderJournal()} />
-        <Route path="/trade-history/*" element={renderTradeHistory()} />
-        <Route path="/settings/*" element={renderSettings()} />
+        {showsAiPages ? (
+          <>
+            <Route path="/ai-trading/*" element={<AiTradingPage settings={settings} />} />
+            <Route path="/ai-history/*" element={<AiTradeHistoryPage />} />
+            <Route path="/ai-journal" element={<AiJournalPage />} />
+            <Route path="/ai-wallet" element={<AiWalletPage />} />
+            <Route path="/ai-settings" element={<AiSettingsPage settings={settings} />} />
+          </>
+        ) : (
+          // bot.*: AI Trading lives on ai.* now.
+          <Route
+            path="/ai-trading/*"
+            element={<ExternalRedirect to={getModeUrl(APP_MODE_AI, location.pathname + location.search)} label="AI Trading" />}
+          />
+        )}
         <Route path="*" element={<Navigate to={initialPath} replace />} />
       </Routes>
     </AppShell>
