@@ -10342,11 +10342,22 @@ async function getAiTradeConstraints(symbol, snapshot) {
   const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), symbol)
   if (!symbolInfo || !(Number(snapshot?.price) > 0)) return null
   const round = (value) => Math.round(value * 100) / 100
+  // Open AI positions in this wallet, for the Risk Manager's portfolio-exposure judgement.
+  const openPositions = trades
+    .filter((trade) => isOpenAiTrade(trade) && trade.aiTradingMode === mode)
+    .map((trade) => ({
+      symbol: trade.symbol,
+      side: trade.side === 'BUY' ? 'LONG' : 'SHORT',
+      notionalUsdt: round(Number(trade.notional) || 0),
+      leverage: Number(trade.leverage) || 1,
+      maxLossUsdt: round(Number(trade.maxLossPerTrade) || 0),
+    }))
   return {
     mode,
     minOrderUsdt: round(getMinOrderUsdt(symbolInfo, snapshot.price)),
     marginCapUsdt: round(marginCapFor({ mode, availableUsdt, realMaxMarginUsdt: config.execution.realMaxMarginUsdt })),
     availableUsdt: round(availableUsdt),
+    openPositions,
   }
 }
 

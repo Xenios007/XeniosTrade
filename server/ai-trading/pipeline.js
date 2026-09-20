@@ -25,6 +25,7 @@ import { indicatorBundle } from '../strategy/shared-signals.js'
 import { describeFlow } from './flow-data.js'
 import { lookupQuantEdge } from './quant-stats.js'
 import { fitPlanToExchangeMinimum } from './exchange-fit.js'
+import { RISK_MANAGER_SYSTEM_PROMPT, riskManagerPipelineNotes } from './risk-manager-prompt.js'
 
 export const MIN_ENTRY_BARS = 90
 export const MIN_BIAS_BARS = 40
@@ -430,6 +431,21 @@ export function riskLimitsFor(config) {
   }
 }
 
+/** The wallet's balance and open AI positions, so the Risk Manager can weigh portfolio exposure (empty when unknown). */
+function portfolioLines({ constraints }) {
+  if (!constraints) return []
+  const lines = []
+  if (Number.isFinite(Number(constraints.availableUsdt))) lines.push(`- Wallet available balance: ${fx(constraints.availableUsdt)} USDT.`)
+  if (Array.isArray(constraints.openPositions)) {
+    lines.push(constraints.openPositions.length
+      ? `- Open AI positions in this wallet (portfolio exposure to weigh, including correlation): ${constraints.openPositions
+        .map((position) => `${position.symbol} ${position.side} ${fx(position.notionalUsdt)} USDT notional at ${position.leverage}x${Number.isFinite(Number(position.maxLossUsdt)) ? `, max loss ${fx(position.maxLossUsdt)} USDT` : ''}`)
+        .join('; ')}.`
+      : '- Open AI positions in this wallet: none.')
+  }
+  return lines
+}
+
 /** What the Risk Manager is told about the exchange minimum order and the margin it may use (empty when unknown). */
 function constraintLines({ constraints, baseline, limits, symbol }) {
   if (!(constraints?.minOrderUsdt > 0)) return []
@@ -466,7 +482,8 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
     limits,
   })
   return {
-    systemPrompt: `${testMode ? TEST_MODE_RISK_PREAMBLE : SYSTEM_PREAMBLE} You are the Risk Manager, and the final AI approver for entry: there is no separate Decision Agent after you. Your job is to decide whether this trade should be opened at all and with what confidence, then protect capital: size it, set its stop and target, or veto it. You alone decide the risk for this trade — nobody sets it by hand. Fixed ceilings are enforced in code after you answer (numbers beyond them are clamped, and a plan that still breaks them is rejected), so choose the size that the setup deserves inside them and prefer less risk when unsure.`,
+    // The role text is the project owner's Risk Manager prompt (risk-manager-prompt.js); the notes after it say how this pipeline uses the answer.
+    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode })}`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -486,6 +503,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
+      ...portfolioLines({ constraints }),
       '',
       'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
       ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : []),

@@ -1117,3 +1117,67 @@ test('exchange minimum: without constraints (lookup missing or failing) nothing 
   assert.equal(result.constraints, undefined)
   assert.doesNotMatch(baseline.prompts.risk, /Exchange minimum order/)
 })
+
+// ---- Risk Manager role prompt ------------------------------------------------------------------------------------------
+
+async function captureCalls(cfg, constraints) {
+  const fake = fakeAgents()
+  const seen = {}
+  const spy = async (call) => {
+    const role = /You are the Market Analyst\./.test(call.systemPrompt) ? 'analyst' : /Market Flow Agent\./.test(call.systemPrompt) ? 'flow' : /You are the Critic\./.test(call.systemPrompt) ? 'critic' : 'risk'
+    seen[role] = call
+    return fake.callAgent(call)
+  }
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: cfg, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    ...(constraints ? { getTradeConstraints: async () => constraints } : {}), callAgent: spy, backtestStats: positiveStats,
+  })
+  return { seen, result }
+}
+
+test('risk manager: gets the full role prompt plus the pipeline notes; the other agents do not', async () => {
+  const { RISK_MANAGER_SYSTEM_PROMPT } = await import('../server/ai-trading/risk-manager-prompt.js')
+  const { seen } = await captureCalls(config)
+  const system = seen.risk.systemPrompt
+  assert.ok(system.includes(RISK_MANAGER_SYSTEM_PROMPT.trim()), 'the owner-written role text is included verbatim')
+  assert.match(system, /You are the Risk Manager AI for XeniosTrade/)
+  assert.match(system, /You are NOT a deterministic risk calculator/)
+  assert.match(system, /Return STRICT JSON only/)
+  // the notes reconcile the role text with what the code really does
+  assert.match(system, /HOW THIS PIPELINE USES YOUR ANSWER/)
+  assert.match(system, /finalConfidence is the `confidence` field/)
+  assert.match(system, /There is no quantity field/)
+  assert.doesNotMatch(system, /TEST MODE/, 'no test-mode wording in a normal run')
+  // it is still the requested reply shape, and the ceilings/evidence stay in the user message
+  assert.match(seen.risk.userPrompt, /Reply with exactly: \{"decision":"APPROVE\|REDUCE\|VETO"/)
+  assert.match(seen.risk.userPrompt, /Fixed ceilings/)
+  for (const role of ['analyst', 'flow', 'critic']) {
+    assert.doesNotMatch(seen[role].systemPrompt, /Risk Manager AI for XeniosTrade/, `${role} must not get the Risk Manager role text`)
+  }
+})
+
+test('risk manager: in test mode the test-mode preamble leads and the notes say the test-mode instruction wins over VETO conditions', async () => {
+  const { seen } = await captureCalls(normalizeAiTradingConfig({ scan: { testMode: true } }))
+  const system = seen.risk.systemPrompt
+  assert.match(system, /^You are one agent in a four-stage[\s\S]*TEST MODE/)
+  assert.match(system, /You are the Risk Manager AI for XeniosTrade/)
+  assert.match(system, /the TEST MODE instruction wins/)
+  assert.match(seen.risk.userPrompt, /TEST MODE: VETO only if the trade is clearly unacceptable/)
+})
+
+test('risk manager: is shown the wallet balance and the open positions (portfolio exposure), or that there are none', async () => {
+  const base = { mode: 'real', minOrderUsdt: 5, marginCapUsdt: 9.99, availableUsdt: 40 }
+  const withPositions = await captureCalls(config, {
+    ...base,
+    openPositions: [{ symbol: 'ETHUSDT', side: 'LONG', notionalUsdt: 21.42, leverage: 3, maxLossUsdt: 0.2 }, { symbol: 'SOLUSDT', side: 'LONG', notionalUsdt: 10, leverage: 1, maxLossUsdt: 0.1 }],
+  })
+  assert.match(withPositions.seen.risk.userPrompt, /Wallet available balance: 40\.00 USDT/)
+  assert.match(withPositions.seen.risk.userPrompt, /Open AI positions in this wallet \(portfolio exposure to weigh, including correlation\): ETHUSDT LONG 21\.42 USDT notional at 3x, max loss 0\.20 USDT; SOLUSDT LONG 10\.00 USDT notional at 1x/)
+
+  const none = await captureCalls(config, { ...base, openPositions: [] })
+  assert.match(none.seen.risk.userPrompt, /Open AI positions in this wallet: none\./)
+
+  // no constraints at all (lookup unavailable) adds nothing
+  const missing = await captureCalls(config)
+  assert.doesNotMatch(missing.seen.risk.userPrompt, /Open AI positions|Wallet available balance/)
+})
