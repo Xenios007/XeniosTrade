@@ -57,16 +57,6 @@ export const AI_TRADING_AGENTS = [
 /** The agents that decide whether a trade should exist, in order. The Risk Manager is the final entry approver (there is no Decision Agent). */
 export const AI_TRADING_ENTRY_STAGE_IDS = ['analyst', 'flow', 'critic', 'risk']
 
-/** Names for every stage id a stored run can contain, including the retired Decision Agent that older runs still show. */
-export const AI_TRADING_STAGE_NAMES = {
-  analyst: 'Market Analyst',
-  flow: 'Market Flow Agent',
-  critic: 'Critic Agent',
-  risk: 'Risk Manager',
-  decision: 'Decision Agent (retired)',
-  quant: 'Quant Agent (retired)',
-}
-
 // The Position Manager re-reviews every open AI trade this often. It is an AI review cycle, not a trading rule: it only
 // decides when the model is asked again, never what the model decides.
 export const AI_POSITION_MANAGER_INTERVAL_MS = 5 * 60_000
@@ -133,7 +123,7 @@ export const DEFAULT_AI_TRADING_SCAN = {
   enabled: false,
   symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
   // Testnet-only pipeline check: the Analyst stops defaulting to HOLD and takes the direction the data leans toward, so the
-  // whole chain (Flow, Critic, Risk, Decision, testnet open) gets exercised. Every later gate and the risk ceilings are
+  // whole chain (Flow, Critic, Risk, testnet open, then the Position Manager) gets exercised. Every later gate and the risk ceilings are
   // unchanged. Never honoured outside testnet mode; the server switches it off after the first trade it opens.
   testMode: false,
 }

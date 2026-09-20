@@ -10232,7 +10232,7 @@ app.post('/api/ai-models/test', async (request, response) => {
   }
 })
 
-// ---- AI Trading (advisory 5-agent pipeline; see docs/AI_TRADING.md) ---------
+// ---- AI Trading (4-agent entry pipeline + Position Manager; see docs/AI_TRADING.md) ---------
 // Not a bot: no wallet, no signal model, never places an order. Everything here
 // reads market data and calls LLM providers; the result is a report.
 const aiTradingRunsInFlight = new Set()

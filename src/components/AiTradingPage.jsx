@@ -6,6 +6,7 @@ import {
   AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS,
 } from '../lib/aiTrading'
 import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
+import { useAiLedger } from '../lib/aiTradingApi'
 import { formatDateTime } from '../lib/formatters'
 import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
 import { Panel } from './Panel'
@@ -64,7 +65,7 @@ export function AgentAssignmentStrip({ config, settings, localLogins }) {
   )
 }
 
-function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted }) {
+function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted, trades }) {
   const [symbol, setSymbol] = useState(AI_TRADING_SYMBOLS[0])
   const [custom, setCustom] = useState('')
   const target = custom.trim() ? custom.trim().toUpperCase() : symbol
@@ -121,7 +122,7 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
         </div>
       </Panel>
 
-      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} /> : (
+      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} trades={trades} /> : (
         <Panel title="Pipeline">
           <PipelineFlow run={null} running={false} />
         </Panel>
@@ -138,7 +139,7 @@ function scanStatusLine(scanStatus, enabled) {
   return enabled === false ? 'Auto-scan is off.' : 'No scan has run yet.'
 }
 
-function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry }) {
+function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry, trades }) {
   const [openId, setOpenId] = useState(null)
   const [filter, setFilter] = useState('all')
   const [shown, setShown] = useState(HISTORY_PAGE_SIZE)
@@ -228,7 +229,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
                   <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
                 </button>
-                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} /></div> : null}
+                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} /></div> : null}
               </div>
             )
           })}
@@ -273,6 +274,8 @@ export function AiTradingPage({ settings }) {
   const [runs, setRuns] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
   const [scanLog, setScanLog] = useState([])
+  const { ledger } = useAiLedger({ pollMs: 15_000 })
+  const trades = ledger?.trades || []
   const [runsError, setRunsError] = useState('')
   const [scanStatus, setScanStatus] = useState(null)
   const [running, setRunning] = useState(false)
@@ -343,13 +346,13 @@ export function AiTradingPage({ settings }) {
       <Routes>
         <Route
           path="/"
-          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} />}
+          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} trades={trades} />}
         />
         <Route
           path="history"
           element={(
             <div className="grid gap-6">
-              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} />
+              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} />
               <BacktestContext backtestStats={backtestStats} />
             </div>
           )}

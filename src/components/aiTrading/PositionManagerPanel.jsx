@@ -5,7 +5,7 @@ import { formatDateTime, formatPrice } from '../../lib/formatters'
 import { Panel } from '../Panel'
 import { Badge } from '../ui/Badge'
 
-const DECISION_TONE = {
+export const DECISION_TONE = {
   HOLD: 'neutral',
   MOVE_TO_BREAKEVEN: 'info',
   TIGHTEN_STOP: 'warn',
@@ -15,7 +15,7 @@ const DECISION_TONE = {
   EXIT_NOW: 'down',
 }
 
-const label = (decision) => String(decision || '').replace(/_/g, ' ')
+export const label = (decision) => String(decision || '').replace(/_/g, ' ')
 const num = (value, digits = 2) => (Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : 'n/a')
 
 function ReviewOutcome({ review }) {
