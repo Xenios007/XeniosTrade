@@ -135,3 +135,12 @@ Same shape as Codex: any of the four model-backed agents (e.g. the Position Mana
 
 **Verified:** 200/200 tests (fake exchange not available, so the exchange calls themselves are not unit-tested); one real review on the live testnet XRPUSDT trade: HOLD at thesis 42% (-0.59R) with sensible reasoning, saved and displayed correctly. **NOT yet seen live:** any executed action (stop move, partial, target change, exit) on the exchange.
 
+## Exchange minimum order and the automatic leverage bump (added 2026-09-21)
+
+**Problem:** the margin cap (`realMaxMarginUsdt`, and 90% of the available balance) shrinks a real position, and the largest position that can open is `margin cap x leverage`. On a small wallet that can fall below the exchange's minimum order for the symbol (e.g. ETHUSDT needs ~20-21 USDT), and the order failed with `Calculated quantity is below minNotional`.
+
+**Fix (`server/ai-trading/exchange-fit.js`, shared by the pipeline and the executor):** when the sized position is below the minimum, leverage is raised just enough to reach it (`ceil(minimum x 1.02 / margin cap)`), with three hard limits: the leverage **ceiling** in code (`riskLimitsFor(config).maxLeverage`, 5x; 10x in testnet test mode), **never a position larger than the one the Risk Manager sized**, and the stop must stay **inside 90% of the liquidation distance** at the raised leverage. If any limit blocks it, the trade is refused with the reason (never a silent under-size).
+
+**The Risk Manager can read and act on it:** the Risk Manager's prompt now states the symbol's minimum order, the margin it may use, that leverage will be raised to reach the minimum (up to the ceiling), and what would happen at the Analyst's own numbers. It can size (`riskPercent`, stop, `leverage`) or VETO knowing that. The lookup (`getTradeConstraints`, wired in `mock-trading-server.js`) is optional and never fatal. After the model answers, `reviewRiskProposal` applies the same rule: a reachable trade stays approved with a note ("leverage raised to Nx"), an unreachable one is **vetoed at the Risk Manager stage with the reason** instead of failing at the exchange. The executor (`openAiTrade`) re-applies the rule with live balance and price, sends the raised leverage to the exchange, and records it on the trade (with an `aiScaleNotes` line).
+
+Loss stays bounded: the raised position is never larger than the Risk Manager's own, and the stop is unchanged, so max loss is `position x stop %` (a few tenths of a USDT on a 40 USDT wallet).

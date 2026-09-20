@@ -1060,3 +1060,60 @@ test('test mode: leverage is floored at 10x on testnet only, with the same risk 
   // Off: the model's number is only a ceiling and the plan stays at the sized 1x.
   assert.equal(reviewRiskProposal({ proposal: proposal(0), side: 'LONG', price: 100, atrPct: 0.3, limits: riskLimitsFor(off) }).plan.leverage, 1)
 })
+
+// ---- Exchange minimum order: what the Risk Manager is told, and the early veto ----------------------------------------
+
+test('exchange minimum: the Risk Manager is told the minimum order and margin, and a reachable trade stays approved with a note', async () => {
+  const { reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
+  const fake = fakeAgents()
+  const constraints = { mode: 'real', minOrderUsdt: 21, marginCapUsdt: 9.99, availableUsdt: 40 }
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => constraints, callAgent: fake.callAgent, backtestStats: positiveStats,
+  })
+  assert.match(fake.prompts.risk, /Exchange minimum order for BTCUSDT: 21\.00 USDT/)
+  assert.match(fake.prompts.risk, /Margin you may use on this trade: 9\.99 USDT/)
+  assert.match(fake.prompts.risk, /the code raises leverage to reach it/)
+  assert.equal(result.constraints.minOrderUsdt, 21)
+
+  // review level: an approved plan below the minimum gets a leverage-raise note and stays approved
+  const proposal = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'x' }
+  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, atrPct: 0.3, limits: LIMITS, constraints })
+  assert.equal(reviewed.approved, true)
+  assert.equal(reviewed.exchangeFit.changed, true)
+  assert.ok(reviewed.adjustments.some((note) => /leverage raised to \dx/.test(note)))
+})
+
+test('exchange minimum: an unreachable trade is vetoed by the Risk Manager stage, with the reason, before any order', async () => {
+  const { reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
+  const proposal = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'x' }
+  // an 83 USDT minimum on a 9.99 margin cap needs 9x; the ceiling is 5x
+  const constraints = { mode: 'real', minOrderUsdt: 83, marginCapUsdt: 9.99, availableUsdt: 40 }
+  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, atrPct: 0.3, limits: LIMITS, constraints })
+  assert.equal(reviewed.approved, false)
+  assert.equal(reviewed.plan, null)
+  assert.match(reviewed.vetoReasons[0], /needs \d+x leverage, above the 5x ceiling/)
+
+  // and through the whole pipeline the run is not approved, with that reason on the Risk Manager stage
+  const fake = fakeAgents()
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => constraints, callAgent: fake.callAgent, backtestStats: positiveStats,
+  })
+  assert.equal(result.final.approved, false)
+  assert.match(JSON.stringify(result.stages.find((stage) => stage.id === 'risk')), /ceiling/)
+  assert.match(fake.prompts.risk, /could NOT be placed/)
+})
+
+test('exchange minimum: without constraints (lookup missing or failing) nothing changes for the Risk Manager', async () => {
+  const baseline = fakeAgents()
+  await runAiTradingPipeline({ symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: baseline.callAgent, backtestStats: positiveStats })
+  const failing = fakeAgents()
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => { throw new Error('exchange unreachable') }, callAgent: failing.callAgent, backtestStats: positiveStats,
+  })
+  assert.equal(failing.prompts.risk, baseline.prompts.risk)
+  assert.equal(result.constraints, undefined)
+  assert.doesNotMatch(baseline.prompts.risk, /Exchange minimum order/)
+})

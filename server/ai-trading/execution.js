@@ -12,6 +12,7 @@
 
 import { summarizeAccount } from '../../src/lib/accountMetrics.js'
 import { buildEntryContext } from './position-manager.js'
+import { AVAILABLE_BALANCE_USAGE, marginCapFor } from './exchange-fit.js'
 
 export const AI_TRADE_SOURCE = 'AI_TRADING'
 export const AI_MODEL_ID = 'ai-trading'
@@ -26,7 +27,7 @@ export const MAX_PLAN_AGE_MS = { testnet: 30 * 60_000, real: 10 * 60_000 }
 export const MAX_ENTRY_DRIFT_PCT = { testnet: 1.5, real: 0.5 }
 export const MAX_OPEN_POSITIONS = { testnet: 5, real: 1 }
 // Never commit more than this share of the available balance as margin on one trade.
-export const AVAILABLE_BALANCE_USAGE = 0.9
+export { AVAILABLE_BALANCE_USAGE }
 
 export class AiExecutionError extends Error {
   constructor(message, status = 409) {
@@ -138,10 +139,7 @@ export function scalePlanToWallet({ plan, mode, config, availableUsdt }) {
   if (!(Number(availableUsdt) > 0)) {
     throw new AiExecutionError(`The ${mode} wallet has no available balance to use as margin.`)
   }
-  let marginCap = availableUsdt * AVAILABLE_BALANCE_USAGE
-  if (mode === 'real') {
-    marginCap = Math.min(marginCap, config?.execution?.realMaxMarginUsdt ?? 0)
-  }
+  const marginCap = marginCapFor({ mode, availableUsdt, realMaxMarginUsdt: config?.execution?.realMaxMarginUsdt })
   if (!(marginCap > 0)) {
     throw new AiExecutionError('No margin is allowed for this trade.')
   }
@@ -151,6 +149,7 @@ export function scalePlanToWallet({ plan, mode, config, availableUsdt }) {
   }
   return {
     scale,
+    marginCap,
     notes,
     notional: plan.notionalUsdt * scale,
     margin: plan.marginUsdt * scale,

@@ -24,6 +24,7 @@ import { AI_TRADING_AGENTS, AI_TRADING_TEST_MODE_MIN_LEVERAGE } from '../../src/
 import { indicatorBundle } from '../strategy/shared-signals.js'
 import { describeFlow } from './flow-data.js'
 import { lookupQuantEdge } from './quant-stats.js'
+import { fitPlanToExchangeMinimum } from './exchange-fit.js'
 
 export const MIN_ENTRY_BARS = 90
 export const MIN_BIAS_BARS = 40
@@ -287,7 +288,7 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
  * may ask for less risk, lower leverage, a wider or tighter stop, but anything beyond a limit is clamped
  * (and noted) and a plan that still breaks a limit is vetoed.
  */
-export function reviewRiskProposal({ proposal, side, price, atrPct, limits }) {
+export function reviewRiskProposal({ proposal, side, price, atrPct, limits, constraints = null }) {
   if (proposal.decision === 'VETO') {
     return {
       approved: false,
@@ -318,7 +319,26 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits }) {
     limits: { ...limits, riskPerTradePct, maxLeverage },
   })
 
-  return { ...result, adjustments: [...notes, ...result.adjustments], limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
+  const reviewed = { ...result, adjustments: [...notes, ...result.adjustments], limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
+
+  // The wallet margin cap can shrink the position below the exchange's minimum order. Leverage can make up the difference (the
+  // executor applies the same rule), so say so here, and veto now, with the reason, when even the ceiling cannot reach it.
+  if (reviewed.approved && reviewed.plan && constraints?.minOrderUsdt > 0) {
+    const fit = fitPlanToExchangeMinimum({
+      planNotional: reviewed.plan.notionalUsdt,
+      planLeverage: reviewed.plan.leverage,
+      marginCap: constraints.marginCapUsdt,
+      minOrderUsdt: constraints.minOrderUsdt,
+      maxLeverage: limits.maxLeverage,
+      stopLossPct: reviewed.plan.stopLossPct,
+    })
+    reviewed.exchangeFit = fit
+    if (!fit.ok) return { ...reviewed, approved: false, plan: null, vetoReasons: [fit.reason] }
+    if (fit.changed) {
+      reviewed.adjustments.push(`Exchange minimum order ${fx(fit.minOrderUsdt)} USDT: leverage raised to ${fit.leverage}x (position ${fx(fit.notional)} USDT, margin ${fx(fit.margin)} USDT).`)
+    }
+  }
+  return reviewed
 }
 
 // ------------------------------------------------------------------- prompts
@@ -410,7 +430,32 @@ export function riskLimitsFor(config) {
   }
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false }) {
+/** What the Risk Manager is told about the exchange minimum order and the margin it may use (empty when unknown). */
+function constraintLines({ constraints, baseline, limits, symbol }) {
+  if (!(constraints?.minOrderUsdt > 0)) return []
+  const lines = [
+    `- Exchange minimum order for ${symbol}: ${fx(constraints.minOrderUsdt)} USDT of position size. Margin you may use on this trade: ${fx(constraints.marginCapUsdt)} USDT${constraints.mode === 'real' ? ' (the real-money margin cap / available balance)' : ''}.`,
+    `- If your sized position is below that minimum, the code raises leverage to reach it: only as far as needed, up to the ${limits.maxLeverage}x ceiling, never beyond the position you sized, and only while your stop stays safely inside the liquidation distance. If that is impossible the trade is vetoed. Choose riskPercent, stop and leverage knowing the position has to clear the minimum.`,
+  ]
+  if (baseline.approved && baseline.plan) {
+    const fit = fitPlanToExchangeMinimum({
+      planNotional: baseline.plan.notionalUsdt,
+      planLeverage: baseline.plan.leverage,
+      marginCap: constraints.marginCapUsdt,
+      minOrderUsdt: constraints.minOrderUsdt,
+      maxLeverage: limits.maxLeverage,
+      stopLossPct: baseline.plan.stopLossPct,
+    })
+    lines.push(fit.ok
+      ? (fit.changed
+        ? `- At the Analyst's numbers the order would be raised to ${fx(fit.notional)} USDT at ${fit.leverage}x leverage (${fx(fit.margin)} USDT margin).`
+        : `- At the Analyst's numbers the order already clears the minimum (${fit.leverage}x leverage).`)
+      : `- At the Analyst's numbers this trade could NOT be placed: ${fit.reason}`)
+  }
+  return lines
+}
+
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, constraints = null }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
     side: analyst.action,
@@ -437,6 +482,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
         : `- Leverage at most ${limits.maxLeverage}x`,
       `- Stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%`,
       `- Reward:risk at least ${limits.minRewardRisk}`,
+      ...constraintLines({ constraints, baseline, limits, symbol: snapshot.symbol }),
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
@@ -522,10 +568,11 @@ export function evaluateGates({ analyst, flow, critic, risk, config }) {
  * @param {object} args.config       normalized AI Trading config (agent assignments + fixed risk ceilings)
  * @param {(symbol: string) => Promise<{ entry: object[], bias: object[], higher?: object[], marketContext?: object }>} args.getMarketInputs
  * @param {(call: { providerId: string, model: string, systemPrompt: string, userPrompt: string }) => Promise<{ json: object, providerId: string, model: string }>} args.callAgent
- * @param {(symbol: string, snapshot: object) => Promise<{ metrics: object, sources: object }>} args.getFlowData  derivatives/order-flow evidence (flow-data.js); throwing fails the Market Flow stage closed
+ * @param {(symbol: string, snapshot: object) => Promise<{ metrics: object, sources: object }>} args.getFlowData  derivatives/order-flow evidence (flow-data.js); throwing fails the Market Flow stage closed
+ * @param {(symbol: string, snapshot: object) => Promise<{ mode: string, minOrderUsdt: number, marginCapUsdt: number, availableUsdt: number } | null>} [args.getTradeConstraints]  exchange minimum order and the margin the wallet allows; lets the Risk Manager size for them
  * @param {object|null} args.backtestStats  aggregated backtest table (loadQuantStats) — background context only
  */
-export async function runAiTradingPipeline({ symbol, config, getMarketInputs, getFlowData, callAgent, backtestStats, now = Date.now }) {
+export async function runAiTradingPipeline({ symbol, config, getMarketInputs, getFlowData, getTradeConstraints, callAgent, backtestStats, now = Date.now }) {
   const startedAt = now()
   const run = {
     id: `ai-trading-${symbol}-${startedAt}`,
@@ -558,6 +605,16 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     const message = error instanceof Error ? error.message : String(error)
     run.stages.push(...['analyst', 'flow', 'critic', 'risk'].map((id) => skipped(id, 'Market data unavailable.')))
     return hold(`Market data unavailable: ${message}`)
+  }
+
+  // 0b. Exchange constraints (minimum order, margin the wallet allows) so the Risk Manager can size for them. Optional, and never
+  // fatal: without them the Risk Manager just is not told, and the executor still enforces the same rule.
+  let constraints = null
+  if (getTradeConstraints) {
+    constraints = await Promise.resolve()
+      .then(() => getTradeConstraints(symbol, snapshot))
+      .catch(() => null)
+    if (constraints) run.constraints = constraints
   }
 
   // 1. Market Analyst
@@ -649,12 +706,12 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, constraints }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output
   const risk = riskProposal
-    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, atrPct: snapshot.atrPct, limits: riskLimits })
+    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, atrPct: snapshot.atrPct, limits: riskLimits, constraints })
     // No usable Risk Manager answer is a veto: sizing must never fall back to "unchecked".
     : { approved: false, vetoReasons: [`Risk Manager unavailable: ${riskStage.error}`], adjustments: [], plan: null, limits: riskLimits, ai: null }
   risk.backtest = backtest

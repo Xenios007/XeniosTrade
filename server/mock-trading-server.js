@@ -80,7 +80,8 @@ import { collectFlowData } from './ai-trading/flow-data.js'
 import { getCodexAgentStatus } from './ai-trading/codex-agent.js'
 import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
 import { getFingptStatus } from './ai-trading/fingpt-status.js'
-import { buildMarketSnapshot, runAiTradingPipeline } from './ai-trading/pipeline.js'
+import { buildMarketSnapshot, riskLimitsFor, runAiTradingPipeline } from './ai-trading/pipeline.js'
+import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-trading/exchange-fit.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
@@ -10311,6 +10312,44 @@ async function getAiMarketInputs(target) {
   return { bias: toCandleData(bias), higher: toCandleData(higher), entry: toCandleData(entry), marketContext }
 }
 
+// The exchange's smallest order for a symbol at `price` (USDT), from the live exchange rules.
+function getMinOrderUsdt(symbolInfo, price) {
+  const lot = getFilter(symbolInfo, 'MARKET_LOT_SIZE') || getFilter(symbolInfo, 'LOT_SIZE')
+  const notional = getFilter(symbolInfo, 'MIN_NOTIONAL')
+  return minOrderNotional({
+    minNotional: Number(notional?.notional) || 0,
+    minQty: Number(lot?.minQty) || 0,
+    stepSize: Number(lot?.stepSize) || 0,
+    price,
+  })
+}
+
+// What the Risk Manager needs to size a trade the exchange will actually accept: the symbol's minimum order and the margin this
+// wallet may use. Same balance source and cap rule the executor uses (openAiTrade / scalePlanToWallet). Never fatal: the pipeline
+// treats a failure as "no constraints" and the executor still enforces the rule.
+async function getAiTradeConstraints(symbol, snapshot) {
+  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+  const mode = config.execution.mode
+  const environment = getAiEnvironment(mode)
+  const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
+  let availableUsdt
+  if (apiKey && secretKey) {
+    const account = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl: getFuturesBaseUrl(environment) })
+    availableUsdt = Number(account.availableBalance)
+  } else {
+    availableUsdt = summarizeAiWallet({ mode, trades, config }).ledger.availableBalance
+  }
+  const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), symbol)
+  if (!symbolInfo || !(Number(snapshot?.price) > 0)) return null
+  const round = (value) => Math.round(value * 100) / 100
+  return {
+    mode,
+    minOrderUsdt: round(getMinOrderUsdt(symbolInfo, snapshot.price)),
+    marginCapUsdt: round(marginCapFor({ mode, availableUsdt, realMaxMarginUsdt: config.execution.realMaxMarginUsdt })),
+    availableUsdt: round(availableUsdt),
+  }
+}
+
 async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
   // Refresh the provider-credential mirror the LLM caller reads.
   await getSettings()
@@ -10324,6 +10363,7 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     // order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
     getFlowData: getAiFlowData,
     getMarketInputs: getAiMarketInputs,
+    getTradeConstraints: getAiTradeConstraints,
   })
   run.trigger = trigger
   // Auto-execution. Testnet: when autoExecuteTestnet is on. Real money: only when armed AND autoExecuteReal is on (both reset
@@ -10521,11 +10561,38 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
     if (!symbolInfo) {
       throw new AiExecutionError(`No futures symbol rules found for ${run.symbol}.`, 400)
     }
+    // The margin cap can leave the position under the exchange's minimum order. Raise leverage just enough to reach it (the rule the
+    // Risk Manager was shown), or refuse with the reason. Never above the leverage ceiling or the position the Risk Manager sized.
+    const fit = fitPlanToExchangeMinimum({
+      planNotional: plan.notionalUsdt,
+      planLeverage: plan.leverage,
+      marginCap: scaled.marginCap,
+      minOrderUsdt: getMinOrderUsdt(symbolInfo, plan.entryPrice),
+      maxLeverage: riskLimitsFor(config).maxLeverage,
+      stopLossPct: plan.stopLossPct,
+    })
+    if (!fit.ok) {
+      throw new AiExecutionError(fit.reason)
+    }
+    let tradeLeverage = plan.leverage
+    let sizing = scaled
+    if (fit.changed) {
+      const ratio = fit.notional / plan.notionalUsdt
+      tradeLeverage = fit.leverage
+      sizing = {
+        ...scaled,
+        notional: fit.notional,
+        margin: fit.margin,
+        maxLoss: plan.maxLossUsdt * ratio,
+        quantityHint: plan.quantity * ratio,
+        notes: [...scaled.notes, `Raised to the exchange minimum order (${fit.minOrderUsdt.toFixed(2)} USDT): leverage ${plan.leverage}x -> ${fit.leverage}x, margin ${fit.margin.toFixed(2)} USDT.`],
+      }
+    }
     let quantity
     try {
-      quantity = buildFuturesQuantity(symbolInfo, scaled.notional, plan.entryPrice)
+      quantity = buildFuturesQuantity(symbolInfo, sizing.notional, plan.entryPrice)
     } catch (error) {
-      throw new AiExecutionError(`${error instanceof Error ? error.message : error} — the position is too small for the wallet's margin limit.`)
+      throw new AiExecutionError(`${error instanceof Error ? error.message : error} — the position is ${sizing.notional.toFixed(2)} USDT (${sizing.margin.toFixed(2)} USDT margin at ${tradeLeverage}x) after fitting the ${scaled.marginCap.toFixed(2)} USDT margin cap.`)
     }
 
     const marginMode = 'ISOLATED' // the Risk Manager's liquidation-distance check assumes isolated margin
@@ -10537,7 +10604,7 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
       stopLoss: plan.stopLoss,
       takeProfit: plan.takeProfit,
       entryPrice: plan.entryPrice,
-      leverage: plan.leverage,
+      leverage: tradeLeverage,
       marginMode,
     }, settings, { forceBinance: true, environment })
     if (mode === 'real' && rawExecution.mode !== 'binance-futures-live') {
@@ -10546,7 +10613,7 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
     const execution = { quantity, entryPrice: plan.entryPrice, notional: quantity * plan.entryPrice, ...rawExecution }
 
     const record = buildAiTradeRecord({
-      run, plan, mode, scaled, execution, marginMode, leverage: plan.leverage, dateKey: manilaDateKey(),
+      run, plan, mode, scaled: sizing, execution, marginMode, leverage: tradeLeverage, dateKey: manilaDateKey(),
     })
     await updateAiTrades((current) => (current.some((trade) => trade.aiRunId === run.id) ? undefined : [record, ...current]))
     aiExchangeSummaryCache[mode] = null
