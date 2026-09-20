@@ -4,13 +4,14 @@ import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
 import { Badge } from './ui/Badge'
 import { Panel } from './Panel'
 import { ExecutionPanel } from './aiTrading/ExecutionPanel'
+import { DECISION_TONE, label as decisionLabel } from './aiTrading/PositionManagerPanel'
 import { StatCard } from './ui/StatCard'
 
 const KIND_LABEL = { ai: 'AI', data: 'Data', code: 'Code' }
 const KIND_TONE = { ai: 'info', data: 'neutral', code: 'warn' }
 
-const STATUS_TONE = { ok: 'up', skipped: 'neutral', error: 'down', unconfigured: 'warn', pending: 'info' }
-const STATUS_LABEL = { ok: 'Done', skipped: 'Skipped', error: 'Failed', unconfigured: 'No provider', pending: 'Running' }
+const STATUS_TONE = { ok: 'up', skipped: 'neutral', error: 'down', unconfigured: 'warn', pending: 'info', watching: 'info', closed: 'neutral', waiting: 'neutral' }
+const STATUS_LABEL = { ok: 'Done', skipped: 'Skipped', error: 'Failed', unconfigured: 'No provider', pending: 'Running', watching: 'Watching', closed: 'Closed', waiting: 'After entry' }
 
 const ACTION_TONE = { LONG: 'up', SHORT: 'down', HOLD: 'neutral' }
 const VERDICT_TONE = { PASS: 'up', CAUTION: 'warn', REJECT: 'down', SUPPORTS: 'up', NEUTRAL: 'neutral', AGAINST: 'down' }
@@ -33,7 +34,39 @@ function Reasoning({ children }) {
   return children ? <p className="text-xs leading-relaxed text-slate-300">{children}</p> : null
 }
 
+/** The 5th step: the AI that manages the trade this run opened. It reads the trade record, not a run stage. */
+function ManagerDetails({ stage }) {
+  const { trade } = stage
+  if (!trade) return <p className="text-xs leading-relaxed text-slate-500">{stage.summary}</p>
+  const reviews = trade.managerReviews || []
+  const latest = reviews[0]
+  const isOpen = trade.status === 'OPEN'
+  const stopMoved = trade.initialStopLoss != null && Number(trade.initialStopLoss) !== Number(trade.stopLoss)
+  const targetMoved = trade.initialTakeProfit != null && Number(trade.initialTakeProfit) !== Number(trade.takeProfit ?? -1)
+
+  return (
+    <div className="grid gap-2">
+      <Row label="Trade">{isOpen ? 'Open' : trade.closedBy === 'position-manager' ? 'Closed by the Position Manager' : 'Closed'}</Row>
+      <Row label="Stop">{formatPrice(trade.stopLoss, 4)}{stopMoved ? ` (was ${formatPrice(trade.initialStopLoss, 4)})` : ''}</Row>
+      <Row label="Target">{trade.takeProfit == null ? 'open-ended' : formatPrice(trade.takeProfit, 4)}{targetMoved && trade.initialTakeProfit ? ` (was ${formatPrice(trade.initialTakeProfit, 4)})` : ''}</Row>
+      {latest ? (
+        <>
+          <Row label="Latest call"><Badge tone={DECISION_TONE[latest.decision] || 'neutral'}>{decisionLabel(latest.decision)}</Badge></Row>
+          <Row label="Thesis confidence">{latest.thesisConfidence}%{trade.entryContext?.entryConfidence != null ? ` (entry ${trade.entryContext.entryConfidence}%)` : ''}</Row>
+          {latest.rMultiple != null ? <Row label="Result at review">{num(latest.rMultiple)}R</Row> : null}
+          <Reasoning>{latest.reason}</Reasoning>
+          <p className="text-[11px] text-slate-500">{reviews.length} review{reviews.length > 1 ? 's' : ''} · full timeline on Trade History</p>
+        </>
+      ) : (
+        <p className="text-xs leading-relaxed text-slate-500">{isOpen ? 'No review yet — the first one runs about 5 minutes after entry.' : 'This trade was never reviewed.'}</p>
+      )}
+      {trade.managerLastError ? <p className="text-xs text-amber-200">Last review failed: {trade.managerLastError}</p> : null}
+    </div>
+  )
+}
+
 function StageDetails({ stage }) {
+  if (stage.id === 'manager') return <ManagerDetails stage={stage} />
   const output = stage.output
 
   if (stage.status === 'error' || stage.status === 'unconfigured') {
@@ -111,9 +144,10 @@ function StageDetails({ stage }) {
       return (
         <div className="grid gap-2">
           <Row label="Result">
-            <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? 'Approved' : 'Veto'}</Badge>
+            <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? (output.reduced ? 'Reduced' : 'Approved') : 'Veto'}</Badge>
           </Row>
-          {output.ai && output.ai.decision === 'APPROVE' ? (
+          {output.ai?.confidence != null ? <Row label="Entry confidence">{output.ai.confidence}%</Row> : null}
+          {output.ai && ['APPROVE', 'REDUCE'].includes(output.ai.decision) ? (
             <Row label="Model asked for">
               {num(output.ai.stopLossPercent)}% stop · {num(output.ai.takeProfitPercent)}% target · {num(output.ai.riskPercent)}% risk · {num(output.ai.leverage, 0)}x
             </Row>
@@ -139,14 +173,6 @@ function StageDetails({ stage }) {
           ) : null}
           {output.vetoReasons.map((reason) => <p key={reason} className="text-xs leading-relaxed text-rose-200">{reason}</p>)}
           {output.adjustments.map((note) => <p key={note} className="text-[11px] leading-relaxed text-amber-200">Limit applied: {note}</p>)}
-        </div>
-      )
-    case 'decision':
-      return (
-        <div className="grid gap-2">
-          <Row label="Decision"><Badge tone={ACTION_TONE[output.decision]}>{output.decision}</Badge></Row>
-          <Row label="Confidence">{output.confidence}%</Row>
-          <Reasoning>{output.reasoning}</Reasoning>
         </div>
       )
     default:
@@ -186,6 +212,9 @@ function StageCard({ agent, stage, running }) {
 }
 
 const DOT_TONE = {
+  watching: 'bg-sky-400',
+  closed: 'bg-slate-500',
+  waiting: 'bg-slate-600',
   ok: 'bg-emerald-400',
   skipped: 'bg-slate-600',
   error: 'bg-rose-400',
@@ -208,41 +237,58 @@ function FlowNode({ label, tone = 'neutral', dot }) {
   )
 }
 
-/** Market Data -> 5 agents -> Trade / No Trade, then one detail card per stage. Pass `run={null}` for the idle diagram. */
-export function PipelineFlow({ run, running }) {
-  const finalTone = !run || running ? 'neutral' : run.final.approved ? (run.final.action === 'LONG' ? 'up' : 'down') : 'neutral'
-  const finalLabel = !run || running ? 'Trade / No Trade' : run.final.approved ? `Trade ${run.final.action}` : 'No Trade'
+/** Market Data -> 4 entry agents -> Trade / No Trade, then one detail card per stage. Pass `run={null}` for the idle diagram. */
+// The 5th step. It is not a stage of the run: it manages the trade this run opened, so its state comes from that trade.
+function managerStageFor(run, trade) {
+  if (trade) return { id: 'manager', status: trade.status === 'OPEN' ? 'watching' : 'closed', trade }
+  if (!run) return { id: 'manager', status: 'waiting', summary: 'Starts once a trade is open, then re-reads it every 5 minutes.' }
+  if (run.execution?.status === 'opened') return { id: 'manager', status: 'watching', summary: 'Trade opened. The first review runs about 5 minutes after entry.' }
+  if (run.final?.approved) return { id: 'manager', status: 'waiting', summary: 'Approved, but the trade has not been opened yet. The Position Manager starts once it is.' }
+  return { id: 'manager', status: 'skipped', summary: 'No trade was opened, so there is nothing to manage.' }
+}
+
+/**
+ * Market Data -> Analyst -> Flow -> Critic -> Risk Manager -> Position Manager, then one detail card per step. Pass `run={null}`
+ * for the idle diagram, and the run's `trade` (from the AI ledger) to show how the Position Manager is handling it. Older saved
+ * runs may carry a retired Decision (or Quant) stage; it is not displayed.
+ */
+export function PipelineFlow({ run, running, trade = null }) {
+  const stageFor = (agent) => (agent.id === 'manager' ? managerStageFor(run, trade) : run?.stages.find((item) => item.id === agent.id))
+  // While a run is in progress the first four steps show as running; the Position Manager only starts after entry.
+  const isRunning = (agent) => running && agent.id !== 'manager'
 
   return (
     <div className="grid gap-5">
       <div className="flex flex-wrap items-center gap-2">
         <FlowNode label="Market Data" />
         {AI_TRADING_AGENTS.map((agent) => {
-          const stage = run?.stages.find((item) => item.id === agent.id)
+          const stage = stageFor(agent)
           return (
             <div key={agent.id} className="flex items-center gap-2">
               <ArrowRight className="h-4 w-4 text-slate-600" />
-              <FlowNode label={agent.name} dot={DOT_TONE[running ? 'pending' : stage?.status || 'skipped']} />
+              <FlowNode label={agent.name} dot={DOT_TONE[isRunning(agent) ? 'pending' : stage?.status || 'skipped']} />
             </div>
           )
         })}
-        <ArrowRight className="h-4 w-4 text-slate-600" />
-        <FlowNode label={finalLabel} tone={finalTone} />
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
         {AI_TRADING_AGENTS.map((agent) => (
-          <StageCard key={agent.id} agent={agent} stage={run?.stages.find((stage) => stage.id === agent.id)} running={running} />
+          <StageCard key={agent.id} agent={agent} stage={stageFor(agent)} running={isRunning(agent)} />
         ))}
       </div>
     </div>
   )
 }
 
+// Gates a run can carry today; older runs also have a retired 'decision' gate that is not shown.
+const SHOWN_GATE_IDS = ['analyst', 'flow', 'critic', 'risk']
+
 function Gates({ gates }) {
-  if (!gates?.length) return null
+  const shown = (gates || []).filter((gate) => SHOWN_GATE_IDS.includes(gate.id))
+  if (!shown.length) return null
   return (
     <ul className="grid gap-2 sm:grid-cols-2">
-      {gates.map((gate) => (
+      {shown.map((gate) => (
         <li key={gate.id} className="flex items-start gap-2.5 rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2.5">
           <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${gate.passed ? 'bg-emerald-400/15 text-emerald-300' : 'bg-rose-400/15 text-rose-300'}`}>
             {gate.passed ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
@@ -300,12 +346,13 @@ function Verdict({ run, execution, onExecuted }) {
   )
 }
 
-export function AiTradingRunReport({ run, running = false, execution = null, onExecuted = null }) {
+export function AiTradingRunReport({ run, running = false, execution = null, onExecuted = null, trades = [] }) {
+  const trade = run?.execution?.tradeId ? trades.find((item) => item.id === run.execution.tradeId) || null : null
   return (
     <div className="grid gap-6">
       {run && !running ? <Verdict run={run} execution={execution} onExecuted={onExecuted} /> : null}
       <Panel title="Pipeline">
-        <PipelineFlow run={running ? null : run} running={running} />
+        <PipelineFlow run={running ? null : run} running={running} trade={running ? null : trade} />
       </Panel>
     </div>
   )

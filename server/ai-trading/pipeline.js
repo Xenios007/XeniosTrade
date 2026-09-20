@@ -1,18 +1,19 @@
-// AI Trading pipeline — five agents, one verdict:
+// AI Trading entry pipeline — four agents decide whether a trade should exist (a fifth, the Position Manager, manages it after entry;
+// see position-manager.js):
 //
-//   Market data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager -> Decision Agent -> Trade / No Trade
+//   Market data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager (final entry approver) -> Trade / No Trade
 //
 // This is advisory only. Nothing here talks to an exchange, a wallet or the
 // auto-trade loop; the result is a report. Design rules:
 //
-//  - All five agents call an LLM. The Market Flow Agent reads derivatives
+//  - All four entry agents call an LLM. The Market Flow Agent reads derivatives
 //    positioning and order flow (flow-data.js) that the Analyst cannot see.
-//    Backtest statistics are background context for the Risk Manager and
-//    Decision Agent only — no longer an agent and no longer a gate.
+//    Backtest statistics are background context for the Risk Manager only —
+//    no longer an agent and no longer a gate.
 //  - Fail closed. A stage that errors or has no provider yields HOLD, never a trade.
-//  - The Decision Agent can confirm or downgrade, never override. Approval
-//    requires every deterministic gate (see evaluateGates) to pass first, and
-//    the LLM is not even asked when a gate has already blocked the trade.
+//  - There is no separate Decision Agent: the Risk Manager is the final AI for entry
+//    (APPROVE / REDUCE / VETO plus a confidence). Approval requires every deterministic
+//    gate (see evaluateGates) to pass, and later LLMs are not asked once a gate blocked the trade.
 //  - The Risk Manager (an LLM) owns stop / size / leverage; the Analyst only
 //    proposes stop and target percentages. Whatever the Risk Manager answers is
 //    then clamped by deterministic code to the fixed risk ceilings
@@ -69,7 +70,7 @@ export function buildMarketSnapshot({ symbol, entry: rawEntry, bias: rawBias, hi
   }
 }
 
-function describeMarket(snapshot) {
+export function describeMarket(snapshot) {
   const b = snapshot.indicators
   const pct = (value) => `${(value * 100).toFixed(3)}%`
   return [
@@ -86,6 +87,31 @@ function describeMarket(snapshot) {
     `Last 10 closed 5M candles (o/h/l/c/vol, oldest to newest):`,
     ...snapshot.recentCandles.map((c) => `  ${c.o}/${c.h}/${c.l}/${c.c}/${fx(c.v, 1)}`),
   ].join('\n')
+}
+
+/**
+ * The market state at the moment of entry, compact and stored on the run so the Position Manager can show the model what
+ * has changed since. Numbers only; nothing here interprets them.
+ */
+export function summarizeEntrySnapshot(snapshot, at = Date.now()) {
+  const b = snapshot.indicators
+  return {
+    at,
+    price: snapshot.price,
+    regime: b.regime,
+    trendScore: round(b.trendScore, 3),
+    adx1h: round(b.adx1h, 1),
+    rsi: round(b.rsi, 1),
+    rsiSlope: round(b.rsiSlope, 3),
+    zscore: round(b.zscore, 2),
+    vwapDistPct: round(b.vwapDist * 100, 3),
+    atrPct: round(snapshot.atrPct, 3),
+    atrState: b.atrExpanding ? 'expanding' : b.atrCompressed ? 'compressed' : 'steady',
+    bbPosition: round(b.bb.position, 2),
+    relVol: round(b.relVol, 2),
+    rangePos: round(b.rangePos, 2),
+    fundingRatePct: snapshot.fundingRate == null ? null : round(snapshot.fundingRate * 100, 4),
+  }
 }
 
 // ------------------------------------------------------------------- parsing
@@ -152,15 +178,9 @@ export function parseFlowOutput(json) {
   return { verdict, crowding: ['LOW', 'MEDIUM', 'HIGH'].includes(crowding) ? crowding : null, flags, reasoning: asText(json?.reasoning) }
 }
 
-export function parseDecisionOutput(json) {
-  const decision = String(json?.decision || '').toUpperCase().replace('WAIT', 'HOLD')
-  if (!['LONG', 'SHORT', 'HOLD'].includes(decision)) throw new Error(`Decision Agent returned an invalid decision: ${json?.decision}`)
-  return { decision, confidence: requireConfidence(json?.confidence, 'Decision Agent'), reasoning: asText(json?.reasoning) }
-}
-
 export function parseRiskProposal(json) {
   const decision = String(json?.decision || '').toUpperCase().replace('REJECT', 'VETO')
-  if (!['APPROVE', 'VETO'].includes(decision)) throw new Error(`Risk Manager returned an invalid decision: ${json?.decision}`)
+  if (!['APPROVE', 'REDUCE', 'VETO'].includes(decision)) throw new Error(`Risk Manager returned an invalid decision: ${json?.decision}`)
   const number = (value) => (value == null || value === '' ? Number.NaN : Number(value))
   const proposal = {
     decision,
@@ -168,12 +188,14 @@ export function parseRiskProposal(json) {
     takeProfitPercent: number(json?.takeProfitPercent),
     riskPercent: number(json?.riskPercent),
     leverage: number(json?.leverage),
+    // The Risk Manager is the final entry approver, so its confidence is the entry confidence (gated in evaluateGates).
+    confidence: decision === 'VETO' && (json?.confidence == null || json?.confidence === '') ? null : requireConfidence(json?.confidence, 'Risk Manager'),
     concerns: asTextList(json?.concerns),
     reasoning: asText(json?.reasoning),
   }
-  if (decision === 'APPROVE') {
+  if (decision !== 'VETO') {
     for (const key of ['stopLossPercent', 'takeProfitPercent', 'riskPercent', 'leverage']) {
-      if (!(proposal[key] > 0)) throw new Error(`Risk Manager approved the trade without a positive ${key}.`)
+      if (!(proposal[key] > 0)) throw new Error(`Risk Manager ${decision === 'REDUCE' ? 'reduced' : 'approved'} the trade without a positive ${key}.`)
     }
   }
   return proposal
@@ -296,20 +318,24 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits }) {
     limits: { ...limits, riskPerTradePct, maxLeverage },
   })
 
-  return { ...result, adjustments: [...notes, ...result.adjustments], limits, ai: proposal }
+  return { ...result, adjustments: [...notes, ...result.adjustments], limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
 }
 
 // ------------------------------------------------------------------- prompts
 
-const SYSTEM_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). Be rigorous and skeptical: HOLD / rejecting is a good outcome when the edge is not clear. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const SYSTEM_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). Be rigorous and skeptical: HOLD / rejecting is a good outcome when the edge is not clear. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 
-// Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes; Flow, Critic, Risk and Decision keep their
+// Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes here; Flow keeps its
 // full skepticism and the code ceilings still cap every number, so this only lets a modest lean reach them.
-const TEST_MODE_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). TEST MODE (testnet, fake money): the goal right now is to exercise the whole pipeline, so do NOT default to HOLD. Later stages will still vet and can reject the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const TEST_MODE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): the goal right now is to exercise the whole pipeline, so do NOT default to HOLD. Later stages will still vet and can reject the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 // Test mode also relaxes the Critic, or its ordinary objections (late entry, modest volume) block every run before the Risk
-// Manager and Decision Agent are ever reached. It still lists every real objection; REJECT is kept for a clearly bad trade.
-const TEST_MODE_CRITIC_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline. The Risk Manager and Decision Agent still vet the trade after you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+// Manager is ever reached. It still lists every real objection; REJECT is kept for a clearly bad trade.
+const TEST_MODE_CRITIC_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline. The Risk Manager still vets the trade after you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 const TEST_MODE_CRITIC_INSTRUCTION = 'TEST MODE: still list every real objection with an honest severity, but use REJECT only for a serious flaw that makes the trade clearly bad (for example it fights strong trend or flow evidence, or the data is broken). Ordinary weaknesses such as a late entry, modest volume or a stretched but plausible range position are CAUTION.'
+// Risk Manager in test mode: without this it vetoes almost every modest setup (negative backtest
+// background, a Critic CAUTION), so the run never reaches the testnet order. The code ceilings and gates after them are unchanged.
+const TEST_MODE_RISK_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline through to a testnet order. Fixed ceilings and gates are enforced in code around you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const TEST_MODE_RISK_INSTRUCTION = 'TEST MODE: VETO only if the trade is clearly unacceptable or you cannot form any plan inside the fixed ceilings. A weak edge, the negative backtest background, a Critic CAUTION or crowded flow are reasons to size SMALL (for example a low riskPercent and 1-2x leverage), not to veto. Choose a stop at or beyond the ATR floor and a target that gives at least the required reward:risk. Report the confidence you actually hold that the trade should be taken.'
 const TEST_MODE_INSTRUCTION = 'TEST MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it, and propose a realistic stop and target.'
 
 function analystPrompts(snapshot, testMode = false) {
@@ -325,7 +351,7 @@ function analystPrompts(snapshot, testMode = false) {
   }
 }
 
-function flowSummary(flow) {
+export function flowSummary(flow) {
   return `${flow.verdict}${flow.crowding ? `, crowding ${flow.crowding}` : ''}. ${flow.flags.map((item) => `[${item.severity}] ${item.issue}`).join(' ') || 'No flags.'} ${flow.reasoning}`.trim()
 }
 
@@ -384,7 +410,7 @@ export function riskLimitsFor(config) {
   }
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
     side: analyst.action,
@@ -395,7 +421,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits }) {
     limits,
   })
   return {
-    systemPrompt: `${SYSTEM_PREAMBLE} You are the Risk Manager. Your job is to protect capital: size the trade, set its stop and target, or veto it. You alone decide the risk for this trade — nobody sets it by hand. Fixed ceilings are enforced in code after you answer (numbers beyond them are clamped, and a plan that still breaks them is rejected), so choose the size that the setup deserves inside them and prefer less risk when unsure.`,
+    systemPrompt: `${testMode ? TEST_MODE_RISK_PREAMBLE : SYSTEM_PREAMBLE} You are the Risk Manager, and the final AI approver for entry: there is no separate Decision Agent after you. Your job is to decide whether this trade should be opened at all and with what confidence, then protect capital: size it, set its stop and target, or veto it. You alone decide the risk for this trade — nobody sets it by hand. Fixed ceilings are enforced in code after you answer (numbers beyond them are clamped, and a plan that still breaks them is rejected), so choose the size that the setup deserves inside them and prefer less risk when unsure.`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -415,25 +441,10 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits }) {
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
       '',
-      'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
-      'Reply with exactly: {"decision":"APPROVE|VETO","stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
-    ].join('\n'),
-  }
-}
-
-function decisionPrompts({ snapshot, analyst, flow, backtest, critic, risk, minConfidence }) {
-  return {
-    systemPrompt: `${SYSTEM_PREAMBLE} You are the Decision Agent. You may confirm the Analyst's direction or downgrade to HOLD; you can never choose the opposite direction and you cannot override the Risk Manager.`,
-    userPrompt: [
-      `Symbol ${snapshot.symbol}, current close ${snapshot.price}.`,
-      `Market Analyst: ${analyst.action}, ${analyst.confidence}% confidence. ${analyst.reasoning}`,
-      `Market Flow Agent: ${flowSummary(flow)}`,
-      backtestLine(backtest),
-      `Critic: ${critic.verdict}. ${critic.objections.map((item) => `[${item.severity}] ${item.issue}`).join(' ') || 'No objections raised.'} ${critic.reasoning}`,
-      `Risk Manager: approved. Stop ${risk.plan.stopLossPct}%, target ${risk.plan.takeProfitPct}% (R:R ${risk.plan.rewardRisk}), ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT (${risk.plan.riskPctOfEquity}% of equity). ${risk.ai?.reasoning || ''}`,
-      '',
-      `Weigh all four. Approve (LONG/SHORT matching the Analyst) only if the combined case is strong; otherwise HOLD. Approval needs confidence of at least ${minConfidence}.`,
-      'Reply with exactly: {"decision":"LONG|SHORT|HOLD","confidence":0-100,"reasoning":"2-4 sentences weighing the agents"}',
+      'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
+      ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : []),
+      `confidence (0-100) is your final confidence that this trade should be taken; opening needs at least ${limits.minConfidence}. A VETO may omit it.`,
+      'Reply with exactly: {"decision":"APPROVE|REDUCE|VETO","confidence":0-100,"stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
     ].join('\n'),
   }
 }
@@ -474,10 +485,10 @@ async function runLlmStage({ id, agentConfig, callAgent, prompts, parse }) {
 // -------------------------------------------------------------------- gates
 
 /**
- * Every condition that must hold for a trade to be approved. The Decision
- * Agent's opinion is one gate among several, and the only non-deterministic one.
+ * Every condition that must hold for a trade to be approved. The Risk Manager's answer is the final AI judgment; the code
+ * gates around it (and its clamped plan) are deterministic.
  */
-export function evaluateGates({ analyst, flow, critic, risk, decision, config }) {
+export function evaluateGates({ analyst, flow, critic, risk, config }) {
   const gate = (id, label, passed, detail) => ({ id, label, passed: Boolean(passed), detail })
   const directional = analyst && analyst.action !== 'HOLD'
 
@@ -490,8 +501,16 @@ export function evaluateGates({ analyst, flow, critic, risk, decision, config })
       flow ? `${flow.verdict}${flow.crowding ? `, crowding ${flow.crowding}` : ''}${flow.flags.length ? ` — ${flow.flags.length} flag(s)` : ''}.` : 'Market Flow stage did not run or complete.',
     ),
     gate('critic', 'Critic does not reject', critic && critic.verdict !== 'REJECT', critic ? `${critic.verdict}${critic.objections.length ? ` — ${critic.objections.length} objection(s)` : ''}.` : 'Critic stage did not complete.'),
-    gate('risk', 'Risk Manager approves sizing', risk?.approved, risk ? (risk.approved ? `${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.` : risk.vetoReasons.join(' ')) : 'Risk stage did not run.'),
-    gate('decision', 'Decision Agent confirms with enough confidence', decision && decision.decision === analyst?.action && decision.confidence >= config.risk.minConfidence, decision ? `${decision.decision} at ${decision.confidence}% (needs the Analyst's side and >= ${config.risk.minConfidence}%).` : 'Decision Agent did not run.'),
+    gate(
+      'risk',
+      'Risk Manager approves the entry with enough confidence',
+      risk?.approved && risk.ai && risk.ai.confidence >= config.risk.minConfidence,
+      risk
+        ? (risk.approved
+          ? `${risk.reduced ? 'Reduced' : 'Approved'} at ${risk.ai?.confidence ?? 'n/a'}% confidence (needs >= ${config.risk.minConfidence}%), ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.`
+          : risk.vetoReasons.join(' '))
+        : 'Risk stage did not run.',
+    ),
   ]
 }
 
@@ -534,9 +553,10 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     const inputs = await getMarketInputs(symbol)
     snapshot = buildMarketSnapshot({ symbol, ...inputs })
     run.price = snapshot.price
+    run.entrySnapshot = summarizeEntrySnapshot(snapshot, now())
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    run.stages.push(...['analyst', 'flow', 'critic', 'risk', 'decision'].map((id) => skipped(id, 'Market data unavailable.')))
+    run.stages.push(...['analyst', 'flow', 'critic', 'risk'].map((id) => skipped(id, 'Market data unavailable.')))
     return hold(`Market data unavailable: ${message}`)
   }
 
@@ -553,15 +573,15 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   run.stages.push(analystStage)
 
   if (!analyst) {
-    run.stages.push(...['flow', 'critic', 'risk', 'decision'].map((id) => skipped(id, 'Market Analyst did not return a usable call.')))
+    run.stages.push(...['flow', 'critic', 'risk'].map((id) => skipped(id, 'Market Analyst did not return a usable call.')))
     return hold(`Market Analyst failed: ${analystStage.error}`)
   }
   if (analyst.action === 'HOLD') {
-    run.stages.push(...['flow', 'critic', 'risk', 'decision'].map((id) => skipped(id, 'Market Analyst returned HOLD — nothing to vet.')))
+    run.stages.push(...['flow', 'critic', 'risk'].map((id) => skipped(id, 'Market Analyst returned HOLD — nothing to vet.')))
     return hold(analyst.reasoning || 'Market Analyst returned HOLD.', evaluateGates({ analyst, config }))
   }
 
-  // Background context for the Risk Manager and Decision Agent; not a stage, not a gate.
+  // Background context for the Risk Manager; not a stage, not a gate.
   const backtest = lookupQuantEdge(backtestStats, {
     symbol,
     side: analyst.action,
@@ -603,9 +623,9 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   if (flow) flowStage.summary = `${flow.verdict}${flow.crowding ? ` · crowding ${flow.crowding}` : ''} · ${flow.flags.length} flag(s)`
   run.stages.push(flowStage)
 
-  const flowGates = evaluateGates({ analyst, flow, critic: null, risk: null, decision: null, config })
+  const flowGates = evaluateGates({ analyst, flow, critic: null, risk: null, config })
   const flowBlockers = flowGates.filter((item) => ['analyst', 'flow'].includes(item.id) && !item.passed)
-  if (flowBlockers.length) return skipRest(flowBlockers, ['critic', 'risk', 'decision'], flowGates)
+  if (flowBlockers.length) return skipRest(flowBlockers, ['critic', 'risk'], flowGates)
 
   // 3. Critic
   const criticStage = await runLlmStage({
@@ -619,9 +639,9 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   if (critic) criticStage.summary = `${critic.verdict} · ${critic.objections.length} objection(s)`
   run.stages.push(criticStage)
 
-  const earlyBlockers = evaluateGates({ analyst, flow, critic, risk: null, decision: null, config })
+  const earlyBlockers = evaluateGates({ analyst, flow, critic, risk: null, config })
     .filter((item) => ['analyst', 'flow', 'critic'].includes(item.id) && !item.passed)
-  if (earlyBlockers.length) return skipRest(earlyBlockers, ['risk', 'decision'], evaluateGates({ analyst, flow, critic, risk: null, decision: null, config }))
+  if (earlyBlockers.length) return skipRest(earlyBlockers, ['risk'], evaluateGates({ analyst, flow, critic, risk: null, config }))
 
   // 4. Risk Manager (LLM proposes; code clamps to the configured limits)
   const riskLimits = riskLimitsFor(config)
@@ -629,7 +649,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output
@@ -644,38 +664,20 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     : riskStage.summary
   run.stages.push(riskStage)
 
-  // 5. Decision Agent — only consulted when no gate has already blocked the trade.
-  const preGates = evaluateGates({ analyst, flow, critic, risk, decision: null, config })
-  const blockers = preGates.filter((item) => item.id !== 'decision' && !item.passed)
-  if (blockers.length) {
-    run.stages.push({ ...baseStage('decision'), status: 'skipped', summary: 'Not consulted — a gate already blocked this trade.' })
-    return hold(`Blocked before the Decision Agent — failed: ${blockers.map((item) => item.label).join('; ')}.`, preGates)
-  }
-
-  const decisionStage = await runLlmStage({
-    id: 'decision',
-    agentConfig: config.agents.decision,
-    callAgent,
-    prompts: decisionPrompts({ snapshot, analyst, flow, backtest, critic, risk, minConfidence: config.risk.minConfidence }),
-    parse: parseDecisionOutput,
-  })
-  const decision = decisionStage.output
-  if (decision) decisionStage.summary = `${decision.decision} · ${decision.confidence}%`
-  run.stages.push(decisionStage)
-
-  const gates = evaluateGates({ analyst, flow, critic, risk, decision, config })
+  // The Risk Manager is the final entry approver: every gate (including its own confidence) decides the verdict.
+  const gates = evaluateGates({ analyst, flow, critic, risk, config })
   const approved = gates.every((item) => item.passed)
 
   if (!approved) {
     const failed = gates.find((item) => !item.passed)
-    return hold(decision?.reasoning || decisionStage.error || `Blocked: ${failed?.label}.`, gates)
+    return hold(risk.approved ? failed?.detail || `Blocked: ${failed?.label}.` : risk.vetoReasons[0] || `Blocked: ${failed?.label}.`, gates)
   }
 
   return finish({
     action: analyst.action,
     approved: true,
-    confidence: decision.confidence,
-    reason: decision.reasoning,
+    confidence: risk.ai.confidence,
+    reason: risk.ai.reasoning,
     gates,
     trade: risk.plan,
   })

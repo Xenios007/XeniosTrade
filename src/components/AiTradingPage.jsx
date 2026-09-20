@@ -6,6 +6,7 @@ import {
   AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS,
 } from '../lib/aiTrading'
 import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
+import { useAiLedger } from '../lib/aiTradingApi'
 import { formatDateTime } from '../lib/formatters'
 import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
 import { Panel } from './Panel'
@@ -64,7 +65,7 @@ export function AgentAssignmentStrip({ config, settings, localLogins }) {
   )
 }
 
-function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted }) {
+function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted, trades }) {
   const [symbol, setSymbol] = useState(AI_TRADING_SYMBOLS[0])
   const [custom, setCustom] = useState('')
   const target = custom.trim() ? custom.trim().toUpperCase() : symbol
@@ -112,7 +113,7 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
           </div>
           <AgentAssignmentStrip config={config} settings={settings} localLogins={localLogins} />
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Up to five LLM calls per run (Analyst, Market Flow, Critic, Risk Manager, Decision) — fewer when an earlier stage already ends it. Provider and model per agent are set on the{' '}
+            Up to four LLM calls per run (Analyst, Market Flow, Critic, Risk Manager) — fewer when an earlier stage already ends it. Once a trade is open, the Position Manager re-reviews it every 5 minutes (one call per open trade). Provider and model per agent are set on the{' '}
             <Link to="/ai-models/agents" className="text-sky-300 hover:underline">AI Models</Link> page. Nothing is ordered unless an approved run is opened on an AI wallet.
           </p>
           {error ? (
@@ -121,7 +122,7 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
         </div>
       </Panel>
 
-      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} /> : (
+      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} trades={trades} /> : (
         <Panel title="Pipeline">
           <PipelineFlow run={null} running={false} />
         </Panel>
@@ -138,7 +139,7 @@ function scanStatusLine(scanStatus, enabled) {
   return enabled === false ? 'Auto-scan is off.' : 'No scan has run yet.'
 }
 
-function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry }) {
+function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry, trades }) {
   const [openId, setOpenId] = useState(null)
   const [filter, setFilter] = useState('all')
   const [shown, setShown] = useState(HISTORY_PAGE_SIZE)
@@ -228,7 +229,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
                   <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
                 </button>
-                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} /></div> : null}
+                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} /></div> : null}
               </div>
             )
           })}
@@ -254,7 +255,7 @@ function BacktestContext({ backtestStats }) {
         {backtestStats?.available ? (
           <>
             {backtestStats.tradeCount.toLocaleString()} backtest trades from <span className="text-slate-200">{backtestStats.source}</span>, aggregated{' '}
-            {formatDateTime(backtestStats.generatedAt)}. They are shown to the Risk Manager and Decision Agent as background only — they are trades from the
+            {formatDateTime(backtestStats.generatedAt)}. They are shown to the Risk Manager as background only — they are trades from the
             rule-based Bots 1–4, so "similar" means same symbol, direction and stop distance, not the same setup, and they never block a trade on their own.
             Rebuild after a new backtest with <code className="text-sky-300">npm run ai-trading:quant-stats</code>.
           </>
@@ -273,6 +274,8 @@ export function AiTradingPage({ settings }) {
   const [runs, setRuns] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
   const [scanLog, setScanLog] = useState([])
+  const { ledger } = useAiLedger({ pollMs: 15_000 })
+  const trades = ledger?.trades || []
   const [runsError, setRunsError] = useState('')
   const [scanStatus, setScanStatus] = useState(null)
   const [running, setRunning] = useState(false)
@@ -337,19 +340,19 @@ export function AiTradingPage({ settings }) {
     <div className="grid gap-6">
       <PageHeader
         title="AI Trading"
-        description="Five AI agents vet one trade idea: the Analyst proposes, Market Flow checks positioning and order flow, the Critic attacks, the Risk Manager sizes, the Decision Agent approves or holds. Approved trades can be opened on the AI testnet or real-money wallet — the pipeline itself never orders."
+        description="Four AI agents decide whether a trade should exist: the Analyst proposes, Market Flow checks positioning and order flow, the Critic attacks, and the Risk Manager gives the final approval with its confidence, size, stop and target. A fifth, the Position Manager, then watches the open trade. Approved trades can be opened on the AI testnet or real-money wallet — the pipeline itself never orders."
       />
       <SubNavTabs tabs={TABS} />
       <Routes>
         <Route
           path="/"
-          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} />}
+          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} trades={trades} />}
         />
         <Route
           path="history"
           element={(
             <div className="grid gap-6">
-              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} />
+              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} />
               <BacktestContext backtestStats={backtestStats} />
             </div>
           )}

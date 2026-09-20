@@ -372,7 +372,7 @@ function BotAssignments({ settings }) {
 }
 
 // Which provider/model answers each AI Trading agent (the Analyst, Critic and
-// Decision Agent). Stored server-side in server/data/ai-trading/config.json,
+// Position Manager). Stored server-side in server/data/ai-trading/config.json,
 // not in settings.json — see server/ai-trading/store.js.
 function AgentAssignments({ settings }) {
   const credentials = settings?.aiProviderCredentials || {}
@@ -442,8 +442,8 @@ function AgentAssignments({ settings }) {
       )}
     >
       <div className="mb-4 text-xs leading-relaxed text-slate-400">
-        The <Link to="/ai-trading" className="text-sky-300 hover:underline">AI Trading</Link> pipeline has five agents and every one calls a model —
-        pick which provider answers each. The Risk Manager model decides stop, size and leverage; fixed ceilings in code only cap its answer, so it can be stricter
+        The <Link to="/ai-trading" className="text-sky-300 hover:underline">AI Trading</Link> pipeline has five AI agents and every one calls a model —
+        four decide the entry (Analyst, Flow, Critic, Risk Manager) and the Position Manager manages the open trade. Pick which provider answers each. The Risk Manager model decides stop, size and leverage; fixed ceilings in code only cap its answer, so it can be stricter
         but never looser. Keys live on <span className="text-sky-300">Providers &amp; Keys</span> (Codex and Claude need none — they use the server's own login); using a different model for the Critic than for the Analyst
         makes for a better second opinion.
       </div>

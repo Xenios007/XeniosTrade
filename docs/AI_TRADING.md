@@ -1,9 +1,10 @@
-# AI Trading (5-agent pipeline)
+# AI Trading (4-agent entry pipeline + Position Manager)
 
 An on-demand pipeline that vets one trade idea and returns Trade / No Trade with an audit trail per stage. It is **not a bot**: no signal model, no auto-trade loop, and **the pipeline itself never places an order**. An *approved* run can then be opened on the AI's own testnet / real-money wallet (see "Wallets, trading modes and execution" below). UI: `/ai-trading` (Pipeline, Run History; there is no Risk Limits page — risk is decided by the Risk Manager model); provider/model per agent: `/ai-models/agents`. On the public site this lives at **ai.projxenios.trade**; the bots live at **bot.projxenios.trade** (same build and backend, hostname-selected — see `src/lib/appMode.js`, `deploy/nginx/enable-subdomains.sh`).
 
 ```
-Market Data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager -> Decision Agent -> Trade / No Trade
+Market Data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager (final entry approver) -> Trade / No Trade
+                                                                                    \-> Position Manager (after entry, repeated AI review)
 ```
 
 | Agent | Kind | What it does |
@@ -12,15 +13,15 @@ Market Data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager -> 
 | Market Flow Agent | LLM | Judges derivatives positioning and order flow the chart can't show: funding and mark/index basis, open interest vs price (with a code-computed regime label: new longs / short covering / new shorts / long liquidation), long/short account and top-trader ratios, futures taker flow, order book depth, and BTC's move for alts. Returns SUPPORTS / NEUTRAL / AGAINST, a crowding level, and flags that cite the numbers. |
 | Critic | LLM | Adversarial: only looks for reasons to reject. PASS / CAUTION / REJECT. |
 | Risk Manager | LLM + **code limits** | The model chooses stop, target, risk % and leverage (or vetoes). Code then re-runs its numbers through fixed ceilings (`AI_TRADING_RISK_LIMITS` defaults in `src/lib/aiTrading.js`, not user-editable): risk and leverage are capped, stops are widened to the ATR floor / tightened to the max, reward:risk and liquidation distance are checked, and a plan that still breaks a limit is rejected. The model can only be stricter than the ceilings, never looser. |
-| Decision Agent | LLM | Confirms the Analyst's direction or downgrades to HOLD. Never flips direction. |
+| Position Manager | LLM | Works AFTER entry, not as a pipeline stage: re-reads every open AI trade each 5 min and decides HOLD / MOVE_TO_BREAKEVEN / TIGHTEN_STOP / LET_PROFIT_RUN / EXTEND_TAKE_PROFIT / PARTIAL_TAKE_PROFIT / EXIT_NOW. See "Position Manager" below. |
 
 ## Safety rules (enforced in `server/ai-trading/pipeline.js`)
 
 - **Fail closed.** A stage that errors, times out, returns malformed JSON, or has no provider key means HOLD. A missing Critic verdict is never a pass.
-- **Approval requires every gate** (`evaluateGates`): directional Analyst, Market Flow not AGAINST, Critic not REJECT, Risk Manager approval, Decision Agent agrees on direction with confidence >= the configured minimum.
-- **The Decision Agent is only called if the deterministic gates already pass**, so an LLM can never talk its way past a veto (and no tokens are spent on trades that were already blocked).
+- **Approval requires every gate** (`evaluateGates`): directional Analyst, Market Flow not AGAINST, Critic not REJECT, and the Risk Manager approving (APPROVE or REDUCE) **with a confidence >= the configured minimum (60)**. There is no separate Decision Agent: the Risk Manager is the final AI for entry and the code gate checks its own confidence number.
+- **Later LLMs are only called if the deterministic gates before them pass**, so an LLM can never talk its way past a veto (and no tokens are spent on trades that were already blocked).
 - The Analyst only *proposes* stop/target percentages; the Risk Manager owns stop, size and leverage, and `reviewRiskProposal` -> `runRiskManager` (plain code) has the last word on every number. No usable Risk Manager answer (error, malformed, missing key) is a veto, never unchecked sizing. The ceilings are fixed in `src/lib/aiTrading.js`: `normalizeAiTradingConfig` resets `config.risk` to them on every read/save and ignores any `risk` a client or hand-edited file supplies (the Risk Limits page was removed 2026-09-20 so the model, not the user, decides risk). Change them in code if you want a different ceiling; real-money margin is separately capped by `realMaxMarginUsdt`.
-- Paid LLM stages are skipped once a gate has already blocked the trade: everything after an Analyst HOLD, the Critic/Risk/Decision after a Flow AGAINST (or flow data unavailable), the Risk/Decision after a Critic REJECT, the Decision Agent after a Risk veto.
+- Paid LLM stages are skipped once a gate has already blocked the trade: everything after an Analyst HOLD, the Critic/Risk after a Flow AGAINST (or flow data unavailable), and the Risk Manager after a Critic REJECT.
 
 ## Wallets, trading modes and execution
 
@@ -43,7 +44,7 @@ Fail-closed: at least 2 of the 5 derivatives sources must respond, otherwise the
 
 ## Backtest context (formerly the Quant Agent)
 
-The Quant Agent was removed as an agent and as a gate. Its backtest statistics (117k trades from the rule-based Bots 1-4, aggregated by `npm run ai-trading:quant-stats` because `backtest-history.json` is ~116 MB and can't be parsed in the pm2 process) are now one background line in the Risk Manager's and Decision Agent's prompts, and a note on the Risk card. They never block a trade. Limitation: "similar" means same symbol, direction and stop distance, not the same setup, and the history overall has negative expected value (~32% win / ~1.6 payoff). The module is still `server/ai-trading/quant-stats.js`.
+The Quant Agent was removed as an agent and as a gate. Its backtest statistics (117k trades from the rule-based Bots 1-4, aggregated by `npm run ai-trading:quant-stats` because `backtest-history.json` is ~116 MB and can't be parsed in the pm2 process) are now one background line in the Risk Manager's prompt, and a note on the Risk card. They never block a trade. Limitation: "similar" means same symbol, direction and stop distance, not the same setup, and the history overall has negative expected value (~32% win / ~1.6 payoff). The module is still `server/ai-trading/quant-stats.js`.
 
 ## Files
 
@@ -68,13 +69,13 @@ The Quant Agent was removed as an agent and as a gate. Its backtest statistics (
 `server/ai-models/catalog.js` + `src/components/AiModelsBrowser.jsx`. Lists what each provider can run: **connected providers are asked for their live model list with the saved key** (server-side; keys are never returned), **OpenRouter is always listed live** from its public catalog (no key needed to browse; ~446 models with context, pricing, JSON-mode/reasoning/vision flags and ~22 free chat models), and everything else shows the static suggestions, labelled "suggested". Azure/Bedrock/Vertex have no list endpoint. Lists are cached 10 min per key+URL (Refresh forces it). Search, provider, free-only, JSON-mode, sort, and a "Free models for testing" shortcut.
 
 - **Test** (`POST /api/ai-models/test`) sends one tiny request through the same `callAgentJson` the agents use, so "works" means key valid + model id current + a parsable JSON reply + quota left. Many free models don't advertise JSON mode — Test before assigning.
-- **Use for agent** assigns provider+model to any of the five agents (same config as Agent Assignments).
+- **Use for agent** assigns provider+model to any of the five AI roles (same config as Agent Assignments).
 - Free OpenRouter models still need an OpenRouter API key (a free account key works) and are rate-limited.
 - Provider error text is passed through `redactSecrets` (providers echo partial keys in 401s); a key saved under the wrong provider gets a hint ("looks like an OpenRouter key").
 
 ## Cost
 
-Up to five LLM calls per run (Analyst, Market Flow, Critic, Risk Manager, Decision); an Analyst HOLD costs one, a Flow AGAINST two, a Critic reject three, a Risk veto four. Note free-tier provider quotas (Gemini's ran out mid-testing) — a quota error is reported per stage and fails closed. Runs are manual unless **Auto-scan** is on (below).
+Up to four LLM calls per run (Analyst, Market Flow, Critic, Risk Manager); an Analyst HOLD costs one, a Flow AGAINST two, a Critic reject three, a Risk veto four. Note free-tier provider quotas (Gemini's ran out mid-testing) — a quota error is reported per stage and fails closed. Runs are manual unless **Auto-scan** is on (below).
 
 ## Auto-scan (added 2026-09-20)
 
@@ -99,18 +100,38 @@ Any of the four model-backed agents can be assigned **Codex (this server's login
 
 ## Claude as an agent provider (added 2026-09-20)
 
-Same shape as Codex: any of the four model-backed agents (e.g. the Decision Agent) can be assigned **Claude (this server's login)** on AI Models -> Agent Assignments. It runs through `@anthropic-ai/claude-agent-sdk` (`server/ai-trading/claude-agent.js`) with the machine's own `claude login` (`~/.claude/.credentials.json`, or `CLAUDE_CODE_OAUTH_TOKEN`): no key is saved in the app, and the provider is `agentOnly`. It is separate from the `Anthropic` provider, which is the pay-per-token API and needs a saved key. The model id is optional (blank = Claude's default).
+Same shape as Codex: any of the four model-backed agents (e.g. the Position Manager) can be assigned **Claude (this server's login)** on AI Models -> Agent Assignments. It runs through `@anthropic-ai/claude-agent-sdk` (`server/ai-trading/claude-agent.js`) with the machine's own `claude login` (`~/.claude/.credentials.json`, or `CLAUDE_CODE_OAUTH_TOKEN`): no key is saved in the app, and the provider is `agentOnly`. It is separate from the `Anthropic` provider, which is the pay-per-token API and needs a saved key. The model id is optional (blank = Claude's default).
 
 - **Isolation:** no tools at all (`tools: []`), no settings / CLAUDE.md / MCP / skills (`settingSources: []`, `strictMcpConfig`), an empty scratch dir (`<tmpdir>/xeniostrade-claude-agent`), no saved session, and `maxTurns: 2`. `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are removed from the subprocess env so it is always the login, never a silent API charge.
 - **Timeout / concurrency:** 150 s per call with a real abort (`CLAUDE_AGENT_TIMEOUT_MS`); at most 2 runs at once.
 - **Cost:** no per-token bill; usage counts against that Claude account's subscription limits.
 - **Status:** `GET /api/ai-trading/config` returns `claude: { available, loggedIn }` next to `codex` (existence check only, the credential is never read).
 - **Dependencies:** the Agent SDK peer-requires `@anthropic-ai/sdk >= 0.93` and `zod ^4`, so `@anthropic-ai/sdk` went 0.70 -> 0.127 (used by `bot-claude.js` and the Anthropic provider in `llm.js`), plus `zod` and `@modelcontextprotocol/sdk` as explicit deps.
-- Verified: unit tests with a fake SDK, and one real call through `callAgentJson` on this machine (~3 s). NOT yet seen: a real Decision prompt through Claude end to end.
+- Verified: unit tests with a fake SDK, and one real call through `callAgentJson` on this machine (~3 s). The Decision prompt no longer exists; Claude now runs Flow and the Position Manager.
 
 ## Test mode and the Critic's stop rule (added 2026-09-20)
 
-**Test mode** (`config.scan.testMode`, AI Settings -> Auto-scan, testnet only) is a one-shot pipeline check for when the market is quiet and the Analyst keeps saying HOLD. While on: the **Analyst** stops defaulting to HOLD and takes the direction the data leans toward (modest confidence, HOLD only if truly balanced), and the **Critic** uses REJECT only for a clearly bad trade (ordinary weaknesses are CAUTION). Flow, Risk Manager, Decision Agent, the gates and the risk ceilings are unchanged. Never honoured in real-money mode (`normalizeAiTradingConfig`); the server switches it off after the first testnet trade it opens; runs and scan-log rows made under it are marked "Test mode". First live use: the Analyst returned LONG for 4 of 4 symbols and the un-relaxed Critic rejected all four (late entry, declining volume, crowding, "stop too tight").
+**Test mode** (`config.scan.testMode`, AI Settings -> Auto-scan, testnet only) is a one-shot pipeline check for when the market is quiet and the Analyst keeps saying HOLD. While on: the **Analyst** stops defaulting to HOLD and takes the direction the data leans toward (modest confidence, HOLD only if truly balanced), the **Critic** uses REJECT only for a clearly bad trade (ordinary weaknesses are CAUTION), the **Risk Manager** vetoes only a clearly unacceptable trade (a weak edge / negative backtest background means a small size, not a veto) (the Risk Manager's answer is now also the final entry approval, since the Decision Agent was retired). Extended to the Risk Manager after the first live cycles showed it vetoing every modest setup. Flow, the code gates (`evaluateGates`, min decision confidence), the Risk Manager's fixed ceilings (clamps, ATR-floor stop, reward:risk), the position cap and the never-real-money rule are unchanged (a test pins that a permissive Risk Manager is still clamped). Never honoured in real-money mode (`normalizeAiTradingConfig`); the server switches it off after the first testnet trade it opens; runs and scan-log rows made under it are marked "Test mode". First live use: the Analyst returned LONG for 4 of 4 symbols and the un-relaxed Critic rejected all four (late entry, declining volume, crowding, "stop too tight").
 
 **Critic and the Analyst's stop/target (permanent):** the Critic is now told the Analyst's stop and target are provisional (the Risk Manager sets the final stop, size and leverage), so it must not REJECT just because the proposed stop looks tight. It still attacks the setup itself.
+
+## Position Manager (added 2026-09-20; replaces the Decision Agent)
+
+**Why:** every AI role used to sit BEFORE a trade, so once a position was open nothing with judgment watched it. The fifth AI role is now the **Position Manager** (Claude by default), and the old Decision Agent is retired: the Risk Manager (Codex) is the final AI for entry and returns **APPROVE / REDUCE / VETO plus a confidence** (the code gate needs >= `minConfidence`, 60). A saved `decision` assignment is inherited by `manager` on first read (`normalizeAiTradingConfig`). Older runs still render their Decision stage.
+
+**Where:** not a pipeline stage. `runPositionManagerCycle` (server/mock-trading-server.js) checks once a minute; every open AI trade is reviewed every `AI_POSITION_MANAGER_INTERVAL_MS` (5 min, first review 5 min after entry). One call per open trade per review (<= 5 open on testnet, 1 real). `POST /api/ai-trading/trades/:id/review` and the "Review now" button run one on demand.
+
+**What the model gets** (`server/ai-trading/position-manager.js`): the original thesis (Analyst, Flow, Critic, Risk outputs and entry confidence, stored on the trade as `entryContext` so it survives the 50-run history), trade state (entry, price, initial/current stop and target, unrealized PnL, R multiple, MFE/MAE from 5M candles since entry, elapsed time, distances to stop/target, % of the position still open), the current market snapshot and derivatives flow, **what changed since entry** (entry-time snapshot vs now, `run.entrySnapshot`), and its own previous reviews (decision, thesis confidence, reason, expected next scenario, invalidation, and whether each was executed).
+
+**What it can decide:** HOLD, MOVE_TO_BREAKEVEN, TIGHTEN_STOP, LET_PROFIT_RUN (remove the target, protect with a stop), EXTEND_TAKE_PROFIT, PARTIAL_TAKE_PROFIT (the model chooses the %), EXIT_NOW. Each review returns the decision, a thesis confidence (separate from entry confidence), suggested stop/target/partial %, reason, what changed, expected next scenario and invalidation. Stored newest-first on the trade (`managerReviews`, last 60) and shown on Trade History -> Position Manager.
+
+**No trading rules in code.** R multiple, distance to stop/target, drawdown and market changes are prompt inputs only; there is no "breakeven at +1R", no "exit at -0.5R", no "extend at 80% of target" (a test pins that the prompt contains none). The only code checks are safety invariants that keep the order valid and stop the model from adding risk (`planPositionAction`): a stop can only move toward profit and must sit on the protective side of the price; a target can only be extended further out or removed; a partial is 1-99% and size is never added; anything invalid is rejected as a whole, recorded ("NOT executed: ..."), and the trade keeps its current orders. A randomized test asserts no executable plan ever widens a stop or pulls a target in.
+
+**Execution:** Binance trades: a new stop/target is created first, then the old order is cancelled (a rejected replacement leaves the position protected); a partial close is a reduce-only market order followed by re-sizing the protective orders to the remainder; EXIT_NOW is the same close as the manual button (`closedBy: 'position-manager'`). The monitor skips a trade while it is being changed. Partial closes bank their PnL on the record (`partialRealizedPnl`) and the final close adds it; fills of partial-close orders are excluded when resolving the final exit price. Paper trades edit the record. An open-ended trade has `takeProfit: null` (paper settlement guards it).
+
+**Real money:** reviews always run, but the Position Manager only *acts* on testnet unless `execution.positionManagerActsOnReal` is switched on (AI Settings, off by default), because real entries are manual-only. On a real position with it off, decisions are logged as "advisory only".
+
+**A failed or unparsable review changes nothing** (the exchange-side stop and target stay); it is retried on the normal cadence and shown as "Last review failed".
+
+**Verified:** 200/200 tests (fake exchange not available, so the exchange calls themselves are not unit-tested); one real review on the live testnet XRPUSDT trade: HOLD at thesis 42% (-0.59R) with sensible reasoning, saved and displayed correctly. **NOT yet seen live:** any executed action (stop move, partial, target change, exit) on the exchange.
 

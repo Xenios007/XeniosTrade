@@ -203,8 +203,8 @@ export function AiSettingsPage({ settings }) {
               <span>
                 Test mode <Badge tone="warn">Testnet only</Badge>
                 <span className="mt-0.5 block text-xs text-slate-500">
-                  Pipeline check: the Market Analyst stops defaulting to HOLD and takes the direction the data leans toward, and the Critic only rejects a clearly bad trade, so a
-                  trade can reach the Risk Manager and Decision Agent. Flow, Risk, Decision and the risk ceilings are unchanged and can still reject it. Switches itself off after the first trade opens.
+                  Pipeline check: the Market Analyst stops defaulting to HOLD and takes the direction the data leans toward, and the Critic and Risk Manager only stop a clearly bad trade (a weak
+                  edge means a small size, not a veto). Flow, the code gates and the fixed risk ceilings are unchanged and can still block it. Switches itself off after the first trade opens.
                 </span>
               </span>
               <Toggle
@@ -291,6 +291,22 @@ export function AiSettingsPage({ settings }) {
               The system's own readiness review still says it is not ready for real money — treat this as a small live experiment.
             </p>
           </div>
+
+          <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+            <span>
+              Position Manager acts on real-money positions
+              <span className="mt-0.5 block text-xs text-slate-500">
+                The Position Manager always reviews open real-money trades, but by default it only advises. Switched on, it may move the stop toward profit, take a partial,
+                change the target, or close the position on the live account by itself. It can never add risk. Off by default.
+              </span>
+            </span>
+            <Toggle
+              checked={Boolean(execution.positionManagerActsOnReal)}
+              disabled={busy}
+              label="Position Manager acts on real money"
+              onChange={(value) => saveExecution({ positionManagerActsOnReal: value }, value ? 'The Position Manager may now act on real-money positions.' : 'The Position Manager only advises on real-money positions.')}
+            />
+          </label>
 
           <div className="flex flex-wrap items-end gap-3">
             <label className="grid gap-1 text-xs text-slate-400">

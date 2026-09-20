@@ -44,12 +44,24 @@ export const AI_TRADING_AGENTS = [
     output: 'Sized trade plan or veto',
   },
   {
-    id: 'decision',
-    name: 'Decision Agent',
+    id: 'manager',
+    name: 'Position Manager',
     kind: 'ai',
-    role: 'Combines the other agents and approves LONG/SHORT or returns HOLD.',
-    output: 'Trade / No Trade',
+    // Works AFTER entry, not as a pipeline stage: it re-reads an open trade every few minutes and decides how to manage it.
+    phase: 'after-entry',
+    role: 'Watches an open position like a trader who inherited it: holds, moves to breakeven, tightens the stop, lets a winner run or extends the target, takes a partial profit, or exits early.',
+    output: 'HOLD / MOVE_TO_BREAKEVEN / TIGHTEN_STOP / LET_PROFIT_RUN / EXTEND_TAKE_PROFIT / PARTIAL_TAKE_PROFIT / EXIT_NOW',
   },
+]
+
+/** The agents that decide whether a trade should exist, in order. The Risk Manager is the final entry approver (there is no Decision Agent). */
+export const AI_TRADING_ENTRY_STAGE_IDS = ['analyst', 'flow', 'critic', 'risk']
+
+// The Position Manager re-reviews every open AI trade this often. It is an AI review cycle, not a trading rule: it only
+// decides when the model is asked again, never what the model decides.
+export const AI_POSITION_MANAGER_INTERVAL_MS = 5 * 60_000
+export const AI_POSITION_MANAGER_DECISIONS = [
+  'HOLD', 'MOVE_TO_BREAKEVEN', 'TIGHTEN_STOP', 'LET_PROFIT_RUN', 'EXTEND_TAKE_PROFIT', 'PARTIAL_TAKE_PROFIT', 'EXIT_NOW',
 ]
 
 /** The agents that call an LLM and therefore need a provider assignment. */
@@ -77,7 +89,7 @@ export const AI_TRADING_RISK_LIMITS = {
   maxStopLossPct: { min: 0.3, max: 5, step: 0.1, label: 'Max stop distance (%)' },
   minStopAtrMultiple: { min: 0, max: 3, step: 0.1, label: 'Min stop distance (x ATR)' },
   minRewardRisk: { min: 1, max: 5, step: 0.1, label: 'Min reward : risk' },
-  minConfidence: { min: 50, max: 95, step: 1, label: 'Min decision confidence (%)' },
+  minConfidence: { min: 50, max: 95, step: 1, label: 'Min entry confidence (%)' },
 }
 
 export const AI_TRADING_MODES = ['testnet', 'real']
@@ -100,6 +112,9 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   autoExecuteTestnet: true,
   // Real-money arm switch. Only honoured while mode === 'real'; switching mode disarms it.
   realArmed: false,
+  // The Position Manager always reviews open trades. It only ACTS (moves stops, takes partials, exits) on testnet unless this is
+  // switched on for real-money positions; real-money entries are manual, so their management is opt-in too.
+  positionManagerActsOnReal: false,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -113,7 +128,7 @@ export const DEFAULT_AI_TRADING_SCAN = {
   enabled: false,
   symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
   // Testnet-only pipeline check: the Analyst stops defaulting to HOLD and takes the direction the data leans toward, so the
-  // whole chain (Flow, Critic, Risk, Decision, testnet open) gets exercised. Every later gate and the risk ceilings are
+  // whole chain (Flow, Critic, Risk, testnet open, then the Position Manager) gets exercised. Every later gate and the risk ceilings are
   // unchanged. Never honoured outside testnet mode; the server switches it off after the first trade it opens.
   testMode: false,
 }
@@ -124,7 +139,7 @@ export const DEFAULT_AI_TRADING_CONFIG = {
     flow: { providerId: 'anthropic', model: '' },
     critic: { providerId: 'anthropic', model: '' },
     risk: { providerId: 'anthropic', model: '' },
-    decision: { providerId: 'anthropic', model: '' },
+    manager: { providerId: 'anthropic', model: '' },
   },
   risk: {
     accountEquityUsdt: 1000,
@@ -148,7 +163,9 @@ function clampNumber(value, { min, max }, fallback) {
 /** Validates/cleans a config from disk or a request body; anything invalid falls back to the default. */
 export function normalizeAiTradingConfig(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
-  const agentsSource = source.agents && typeof source.agents === 'object' ? source.agents : {}
+  const rawAgents = source.agents && typeof source.agents === 'object' ? source.agents : {}
+  // The Position Manager took over the retired Decision Agent's assignment (same provider/model) on first read.
+  const agentsSource = { ...rawAgents, manager: rawAgents.manager ?? rawAgents.decision }
 
   const agents = {}
   for (const agentId of AI_TRADING_LLM_AGENT_IDS) {
@@ -180,6 +197,7 @@ export function normalizeAiTradingConfig(raw) {
       : DEFAULT_AI_TRADING_EXECUTION.autoExecuteTestnet,
     // Arming needs an explicit `true` AND real mode; anything else (missing, "true", 1) stays disarmed.
     realArmed: mode === 'real' && executionSource.realArmed === true,
+    positionManagerActsOnReal: executionSource.positionManagerActsOnReal === true,
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,
