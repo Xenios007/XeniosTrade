@@ -82,6 +82,11 @@ export const AI_TRADING_RISK_LIMITS = {
 
 export const AI_TRADING_MODES = ['testnet', 'real']
 
+// Test mode (testnet only, see DEFAULT_AI_TRADING_SCAN.testMode) also floors leverage here, so the fake-money trades it
+// opens exercise a high-leverage position. It raises the ceiling to at least this too; sizing (risk per trade) is unchanged,
+// so only the margin gets smaller. Outside test mode the normal ceilings apply and this is never used.
+export const AI_TRADING_TEST_MODE_MIN_LEVERAGE = 10
+
 // Bounds for the execution settings. `realMaxMarginUsdt` is a hard per-trade
 // margin ceiling on the live account, applied after the Risk Manager sized the plan.
 export const AI_TRADING_EXECUTION_LIMITS = {

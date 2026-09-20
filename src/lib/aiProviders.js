@@ -84,10 +84,12 @@ export const AI_PROVIDERS = [
     baseUrl: 'http://127.0.0.1:8011/v1',
     baseUrlEditable: true,
     baseUrlHint: 'http://127.0.0.1:8011/v1',
-    keyless: true,
+    // Optional key: only needed when the model is reached over a Cloudflare tunnel (e.g. from the VPS), where the local
+    // server requires its bearer token (server/local-llm/api-key.txt). Direct localhost calls need none.
+    keyOptional: true,
     localLogin: true,
     localServer: true,
-    keyHint: 'local server',
+    keyHint: 'token, only for a tunnel / remote URL',
     suggested: ['fingpt-llama3-8b'],
     wiredBot: 'AI Trading agents (local model)',
     timeoutMs: 420_000,

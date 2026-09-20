@@ -19,7 +19,7 @@
 //    (reviewRiskProposal / runRiskManager), so the model can be stricter than
 //    the limits but never looser.
 
-import { AI_TRADING_AGENTS } from '../../src/lib/aiTrading.js'
+import { AI_TRADING_AGENTS, AI_TRADING_TEST_MODE_MIN_LEVERAGE } from '../../src/lib/aiTrading.js'
 import { indicatorBundle } from '../strategy/shared-signals.js'
 import { describeFlow } from './flow-data.js'
 import { lookupQuantEdge } from './quant-stats.js'
@@ -193,6 +193,8 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
   const {
     accountEquityUsdt, riskPerTradePct, maxLeverage, maxStopLossPct, minStopAtrMultiple, minRewardRisk,
   } = limits
+  // Only test mode sets a floor (see riskLimitsFor); everywhere else leverage may be as low as 1x.
+  const minLeverage = Math.min(Math.max(Math.floor(limits.minLeverage) || 1, 1), maxLeverage)
 
   if (!(price > 0) || !(stopLossPct > 0) || !(takeProfitPct > 0)) {
     return { approved: false, vetoReasons: ['Missing a valid price, stop-loss or take-profit to size against.'], adjustments, plan: null, limits }
@@ -227,7 +229,11 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
     adjustments.push(`Position capped at ${maxLeverage}x leverage (${fx(maxNotional, 0)} USDT notional); risk reduced below target.`)
   }
 
-  const leverage = clamp(Math.ceil(notional / accountEquityUsdt), 1, maxLeverage)
+  const sizedLeverage = clamp(Math.ceil(notional / accountEquityUsdt), 1, maxLeverage)
+  const leverage = Math.max(sizedLeverage, minLeverage)
+  if (leverage > sizedLeverage) {
+    adjustments.push(`Test mode: leverage set to the ${minLeverage}x minimum (position size is unchanged, so the margin is notional / ${minLeverage}).`)
+  }
   const liquidationDistancePct = (100 / leverage) * 0.9
   if (stopPct >= liquidationDistancePct) {
     vetoReasons.push(`Stop distance ${fx(stopPct)}% is not safely inside the ~${fx(liquidationDistancePct)}% liquidation distance at ${leverage}x.`)
@@ -276,7 +282,7 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits }) {
   if (proposal.riskPercent > limits.riskPerTradePct) {
     notes.push(`Risk Manager asked to risk ${fx(proposal.riskPercent)}% of equity; capped at the ${fx(limits.riskPerTradePct)}% limit.`)
   }
-  const maxLeverage = Math.min(Math.max(Math.floor(proposal.leverage), 1), limits.maxLeverage)
+  const maxLeverage = Math.min(Math.max(Math.floor(proposal.leverage), Math.floor(limits.minLeverage) || 1, 1), limits.maxLeverage)
   if (proposal.leverage > limits.maxLeverage) {
     notes.push(`Risk Manager asked for ${fx(proposal.leverage, 0)}x leverage; capped at the ${limits.maxLeverage}x limit.`)
   }
@@ -367,6 +373,17 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
   }
 }
 
+/** The configured ceilings, plus the leverage floor (and a ceiling to match) while testnet test mode is on. */
+export function riskLimitsFor(config) {
+  const limits = config.risk
+  if (config.scan?.testMode !== true || config.execution?.mode !== 'testnet') return limits
+  return {
+    ...limits,
+    minLeverage: AI_TRADING_TEST_MODE_MIN_LEVERAGE,
+    maxLeverage: Math.max(limits.maxLeverage, AI_TRADING_TEST_MODE_MIN_LEVERAGE),
+  }
+}
+
 function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
@@ -389,7 +406,9 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits }) {
       '',
       'Fixed ceilings (enforced in code; the choice within them is yours):',
       `- Account equity ${limits.accountEquityUsdt} USDT; risk per trade at most ${limits.riskPerTradePct}% of equity`,
-      `- Leverage at most ${limits.maxLeverage}x`,
+      limits.minLeverage > 1
+        ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
+        : `- Leverage at most ${limits.maxLeverage}x`,
       `- Stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%`,
       `- Reward:risk at least ${limits.minRewardRisk}`,
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
@@ -605,18 +624,19 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   if (earlyBlockers.length) return skipRest(earlyBlockers, ['risk', 'decision'], evaluateGates({ analyst, flow, critic, risk: null, decision: null, config }))
 
   // 4. Risk Manager (LLM proposes; code clamps to the configured limits)
+  const riskLimits = riskLimitsFor(config)
   const riskStage = await runLlmStage({
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: config.risk }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output
   const risk = riskProposal
-    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, atrPct: snapshot.atrPct, limits: config.risk })
+    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, atrPct: snapshot.atrPct, limits: riskLimits })
     // No usable Risk Manager answer is a veto: sizing must never fall back to "unchecked".
-    : { approved: false, vetoReasons: [`Risk Manager unavailable: ${riskStage.error}`], adjustments: [], plan: null, limits: config.risk, ai: null }
+    : { approved: false, vetoReasons: [`Risk Manager unavailable: ${riskStage.error}`], adjustments: [], plan: null, limits: riskLimits, ai: null }
   risk.backtest = backtest
   riskStage.output = risk
   riskStage.summary = riskProposal

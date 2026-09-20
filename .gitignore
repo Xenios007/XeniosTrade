@@ -62,3 +62,4 @@ server/data/
 server/local-llm/.venv/
 server/local-llm/.offload/
 server/local-llm/*.log
+server/local-llm/api-key.txt

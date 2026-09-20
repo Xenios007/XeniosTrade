@@ -13,7 +13,11 @@ Env (all optional):
     FINGPT_GPU_MEM_GIB     default 5.0   VRAM budget for weights; the rest of the model goes to RAM
     FINGPT_CPU_MEM_GIB     default 18
     FINGPT_MAX_NEW_TOKENS  default 700   hard cap per reply (the client asks for far more)
+    FINGPT_API_KEY         bearer token required for requests that arrive through the Cloudflare tunnel (they carry a
+                           Cf-Connecting-Ip header). Falls back to server/local-llm/api-key.txt. Direct local calls
+                           (no Cf header) never need it; with no key configured, tunnel traffic is refused.
 """
+import hmac
 import json
 import os
 import re
@@ -23,7 +27,8 @@ import uuid
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StoppingCriteria, StoppingCriteriaList
 
@@ -34,6 +39,20 @@ CPU_MEM_GIB = float(os.environ.get("FINGPT_CPU_MEM_GIB", "18"))
 MAX_NEW_TOKENS = int(os.environ.get("FINGPT_MAX_NEW_TOKENS", "700"))
 PORT = int(os.environ.get("FINGPT_PORT", "8011"))
 MODEL_ID = "fingpt-llama3-8b"
+
+
+def load_api_key():
+    key = os.environ.get("FINGPT_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "api-key.txt"), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+API_KEY = load_api_key()
 
 state = {"model": None, "tokenizer": None, "status": "loading", "error": "", "loaded_at": None}
 generate_lock = threading.Lock()
@@ -327,6 +346,18 @@ def build_prompt(messages):
 
 
 app = FastAPI(title="FinGPT local")
+
+
+@app.middleware("http")
+async def require_key_through_tunnel(request: Request, call_next):
+    """Cloudflare adds Cf-Connecting-Ip to everything it proxies (and overwrites a client-supplied one), so its
+    presence means the request came from the internet. Those need the bearer token; /health stays open (status only)."""
+    if request.url.path.startswith("/v1") and request.headers.get("cf-connecting-ip"):
+        supplied = request.headers.get("authorization", "")
+        expected = f"Bearer {API_KEY}"
+        if not API_KEY or not hmac.compare_digest(supplied.encode(), expected.encode()):
+            return JSONResponse({"error": {"message": "Unauthorized."}}, status_code=401)
+    return await call_next(request)
 
 
 @app.on_event("startup")

@@ -947,7 +947,9 @@ test('test mode: changes only the Analyst and Critic prompts; Flow / Risk / Deci
   assert.match(seen.test.analyst, /TEST MODE/)
   assert.doesNotMatch(seen.test.analyst, /HOLD \/ rejecting is a good outcome/)
   for (const role of ['flow', 'risk', 'decision']) {
-    assert.equal(seen.test[role], seen.normal[role], `${role} prompt must not change in test mode`)
+    // The Risk prompt's one difference is the leverage ceiling line and the sizing lines that quote it (Risk and Decision prompts) (test mode floors leverage); everything else must match.
+    const withoutLeverageLine = (text) => text.split('\n').filter((line) => !/^- Leverage at |^For reference, the plain rule-based sizing|^Risk Manager: approved/.test(line)).join('\n')
+    assert.equal(withoutLeverageLine(seen.test[role]), withoutLeverageLine(seen.normal[role]), `${role} prompt must not change in test mode`)
     assert.doesNotMatch(seen.test[role], /TEST MODE/)
   }
   assert.match(seen.test.critic, /TEST MODE[\s\S]*REJECT only for a serious flaw/)
@@ -993,4 +995,38 @@ test('custom slots: the API key is optional, no Authorization header is sent wit
   assert.match(resolveProviderCall('custom').reason, /base URL/)
   // A hosted provider still needs its key.
   assert.match(resolveProviderCall('openai').reason, /API key/)
+})
+
+// ---- Test-mode minimum leverage ---------------------------------------------------------------------------------------
+
+test('test mode: leverage is floored at 10x on testnet only, with the same risk and a smaller margin', async () => {
+  const { riskLimitsFor, reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
+
+  const off = normalizeAiTradingConfig(null)
+  const on = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const real = normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { testMode: true } })
+  assert.equal(riskLimitsFor(off).minLeverage, undefined)
+  assert.equal(riskLimitsFor(off).maxLeverage, LIMITS.maxLeverage)
+  assert.equal(riskLimitsFor(real).minLeverage, undefined, 'never in real-money mode')
+  assert.equal(riskLimitsFor(on).minLeverage, 10)
+  assert.equal(riskLimitsFor(on).maxLeverage, 10)
+
+  const base = { side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2 }
+  const normal = runRiskManager({ ...base, limits: riskLimitsFor(off) })
+  const floored = runRiskManager({ ...base, limits: riskLimitsFor(on) })
+  assert.equal(normal.plan.leverage, 1)
+  assert.equal(floored.plan.leverage, 10)
+  assert.equal(floored.plan.notionalUsdt, normal.plan.notionalUsdt, 'position size unchanged')
+  assert.equal(floored.plan.maxLossUsdt, normal.plan.maxLossUsdt, 'risk unchanged')
+  assert.equal(floored.plan.marginUsdt, normal.plan.marginUsdt / 10)
+  assert.ok(floored.adjustments.some((note) => /minimum/.test(note)))
+
+  // A model that answers leverage 0 (or asks for less) still ends up at the floor; one that asks for more is capped at the ceiling.
+  const proposal = (leverage) => ({ decision: 'APPROVE', stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage, concerns: [], reasoning: 'x' })
+  for (const [asked, expected] of [[0, 10], [3, 10], [10, 10], [50, 10]]) {
+    const result = reviewRiskProposal({ proposal: proposal(asked), side: 'LONG', price: 100, atrPct: 0.3, limits: riskLimitsFor(on) })
+    assert.equal(result.plan.leverage, expected, `asked ${asked}x`)
+  }
+  // Off: the model's number is only a ceiling and the plan stays at the sized 1x.
+  assert.equal(reviewRiskProposal({ proposal: proposal(0), side: 'LONG', price: 100, atrPct: 0.3, limits: riskLimitsFor(off) }).plan.leverage, 1)
 })
