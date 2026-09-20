@@ -318,6 +318,23 @@ export function AiSettingsPage({ settings }) {
 
           <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
             <span>
+              Fixed 10x leverage (real money)
+              <span className="mt-0.5 block text-xs text-slate-500">
+                The Risk Manager's leverage is fixed at 10x and the rest follows from it: margin, position size (up to margin cap x 10), the loss at the stop, and the liquidation distance
+                (about 10% from entry, so stops must stay inside ~9%). The Risk Manager is told those numbers. A bigger position for the same margin means bigger wins and losses:
+                the most a trade can lose is roughly the margin cap x 10 x the stop distance, so lower the margin cap above to bound it. Off = leverage follows from risk and stop (usually 1-3x).
+              </span>
+            </span>
+            <Toggle
+              checked={Number(execution.realFixedLeverage) >= 1}
+              disabled={busy}
+              label="Fixed 10x leverage on real money"
+              onChange={(value) => saveExecution({ realFixedLeverage: value ? 10 : 0 }, value ? 'Real money leverage is fixed at 10x.' : 'Real money leverage follows from risk and stop again.')}
+            />
+          </label>
+
+          <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+            <span>
               Position Manager acts on real-money positions
               <span className="mt-0.5 block text-xs text-slate-500">
                 The Position Manager always reviews open real-money trades, but by default it only advises. Switched on, it may move the stop toward profit, take a partial,

@@ -1214,3 +1214,104 @@ test('risk evidence: the Risk Manager gets funding from the flow data and the me
   })
   assert.doesNotMatch(bare.prompts.risk, /Measured evidence/)
 })
+
+// ---- Real money: fixed leverage --------------------------------------------------------------------------------------------
+
+test('fixed leverage: honoured on real money only, bounded, and separate from test mode', async () => {
+  const { riskLimitsFor } = await import('../server/ai-trading/pipeline.js')
+  const real = (execution, scan) => normalizeAiTradingConfig({ execution: { mode: 'real', ...execution }, scan })
+
+  assert.equal(normalizeAiTradingConfig(null).execution.realFixedLeverage, 0, 'off by default')
+  assert.equal(real({ realFixedLeverage: 10 }).execution.realFixedLeverage, 10)
+  assert.equal(real({ realFixedLeverage: 99 }).execution.realFixedLeverage, 10, 'bounded at 10x')
+  assert.equal(real({ realFixedLeverage: -3 }).execution.realFixedLeverage, 0)
+  assert.equal(real({ realFixedLeverage: 'x' }).execution.realFixedLeverage, 0)
+  assert.equal(real({ realFixedLeverage: 2.6 }).execution.realFixedLeverage, 3)
+
+  const fixed = riskLimitsFor(real({ realFixedLeverage: 10 }))
+  assert.equal(fixed.minLeverage, 10)
+  assert.equal(fixed.maxLeverage, 10, 'above the normal 5x ceiling: the owner chose it')
+  assert.equal(fixed.fixedLeverage, 10)
+  // testnet ignores it (and keeps test mode's own rule); real without the setting is unchanged
+  const testnet = normalizeAiTradingConfig({ execution: { mode: 'testnet', realFixedLeverage: 10 } })
+  assert.equal(riskLimitsFor(testnet).fixedLeverage, undefined)
+  assert.equal(riskLimitsFor(testnet).maxLeverage, LIMITS.maxLeverage)
+  assert.equal(riskLimitsFor(real({})).fixedLeverage, undefined)
+  assert.equal(riskLimitsFor(real({})).maxLeverage, LIMITS.maxLeverage)
+})
+
+test('fixed leverage: the Risk Manager plan uses exactly that leverage, and margin follows from it', async () => {
+  const { riskLimitsFor, reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
+  const limits = riskLimitsFor(normalizeAiTradingConfig({ execution: { mode: 'real', realFixedLeverage: 10 } }))
+  const base = { side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1.5, takeProfitPct: 3, limits }
+  const plan = runRiskManager(base).plan
+  assert.equal(plan.leverage, 10)
+  assert.equal(plan.marginUsdt, Math.round((plan.notionalUsdt / 10) * 100) / 100)
+  // the position (risk-sized) is the same as without the setting; only the margin behind it changes
+  const normal = runRiskManager({ ...base, limits: LIMITS }).plan
+  assert.equal(plan.notionalUsdt, normal.notionalUsdt)
+  assert.equal(plan.maxLossUsdt, normal.maxLossUsdt)
+  assert.equal(normal.leverage, 1)
+  assert.ok(runRiskManager(base).adjustments.some((note) => /^Fixed leverage: leverage set to the 10x setting/.test(note)))
+
+  // whatever the model returns for leverage, the plan is 10x; asking for more is noted as capped
+  const proposal = (leverage) => ({ decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 3, riskPercent: 1, leverage, concerns: [], reasoning: 'x' })
+  for (const asked of [0, 1, 3, 10, 50]) {
+    assert.equal(reviewRiskProposal({ proposal: proposal(asked), side: 'LONG', price: 100, atrPct: 0.3, limits }).plan.leverage, 10, `asked ${asked}x`)
+  }
+
+  // a stop beyond the ~9% liquidation safety distance at 10x is still refused
+  const wide = runRiskManager({ ...base, stopLossPct: 9.5, takeProfitPct: 20, limits: { ...limits, maxStopLossPct: 12 } })
+  assert.equal(wide.approved, false)
+  assert.match(wide.vetoReasons.join(' '), /liquidation distance at 10x/)
+})
+
+test('fixed leverage: the wallet margin cap still bounds the position (margin cap x leverage), and the loss at the stop follows', async () => {
+  const { scalePlanToWallet } = await import('../server/ai-trading/execution.js')
+  const limits = { ...LIMITS, minLeverage: 10, maxLeverage: 10, fixedLeverage: 10 }
+  const plan = runRiskManager({ side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1.5, takeProfitPct: 3, limits }).plan // ~667 USDT notional at 1% of 1000
+  const config = normalizeAiTradingConfig({ execution: { mode: 'real', realMaxMarginUsdt: 100 } })
+  const scaled = scalePlanToWallet({ plan, mode: 'real', config, availableUsdt: 40 })
+  assert.equal(scaled.marginCap, 36)
+  // (the plan's margin is rounded to cents, so allow a couple of cents of rounding)
+  assert.ok(Math.abs(scaled.notional - 360) < 0.05, `notional ${scaled.notional}`)
+  assert.ok(Math.abs(scaled.margin - 36) < 1e-6)
+  assert.ok(Math.abs(scaled.maxLoss - scaled.notional * 0.015) < 0.01, `max loss ${scaled.maxLoss}`)
+  // at 1x the same wallet is capped at the margin itself, an order of magnitude smaller
+  const oneX = runRiskManager({ side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1.5, takeProfitPct: 3, limits: LIMITS }).plan
+  assert.ok(Math.abs(scalePlanToWallet({ plan: oneX, mode: 'real', config, availableUsdt: 40 }).notional - 36) < 0.05)
+})
+
+test('fixed leverage: the Risk Manager is told it, and the numbers that follow from it', async () => {
+  const cfg = normalizeAiTradingConfig({ execution: { mode: 'real', realFixedLeverage: 10 } })
+  const fake = fakeAgents()
+  const seen = {}
+  const spy = async (call) => {
+    const role = /You are the Market Analyst\./.test(call.systemPrompt) ? 'analyst' : /Market Flow Agent\./.test(call.systemPrompt) ? 'flow' : /You are the Critic\./.test(call.systemPrompt) ? 'critic' : 'risk'
+    seen[role] = call
+    return fake.callAgent(call)
+  }
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: cfg, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => ({ mode: 'real', minOrderUsdt: 5, marginCapUsdt: 36, availableUsdt: 40, openPositions: [] }),
+    callAgent: spy, backtestStats: positiveStats,
+  })
+  const user = seen.risk.userPrompt
+  assert.match(user, /- Leverage is fixed at 10x \(the account owner's setting; the code uses exactly that\)/)
+  assert.match(user, /Leverage is FIXED at 10x for this wallet .* so return leverage 10\. Isolated liquidation is about 10\.0% from entry, so any stop must stay inside ~9\.0%/)
+  assert.match(user, /With up to 36\.00 USDT of margin the largest position is 360\.00 USDT \(margin x 10\)/)
+  assert.match(user, /At the Analyst's [\d.]+% stop, a position of about [\d.]+ USDT \([\d.]+ USDT margin\) would lose about [\d.]+ USDT if the stop is hit \([\d.]+% of the wallet's 40\.00 USDT\)/)
+  assert.match(seen.risk.systemPrompt, /Leverage is FIXED at 10x for this wallet by the account owner/)
+  assert.match(seen.risk.systemPrompt, /this fixed setting wins/)
+  assert.doesNotMatch(seen.risk.systemPrompt, /`leverage` is your ceiling/)
+
+  // without the setting nothing about fixed leverage appears
+  const normal = fakeAgents()
+  const seenNormal = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => { if (!/You are the (Market Analyst|Critic)\.|Market Flow Agent\./.test(call.systemPrompt)) seenNormal.risk = call; return normal.callAgent(call) }, backtestStats: positiveStats,
+  })
+  assert.doesNotMatch(seenNormal.risk.userPrompt, /FIXED at|is fixed at/)
+  assert.match(seenNormal.risk.systemPrompt, /`leverage` is your ceiling/)
+})

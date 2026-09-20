@@ -98,6 +98,8 @@ export const AI_TRADING_MODES = ['testnet', 'real']
 // opens exercise a high-leverage position. It raises the ceiling to at least this too; sizing (risk per trade) is unchanged,
 // so only the margin gets smaller. Outside test mode the normal ceilings apply and this is never used.
 export const AI_TRADING_TEST_MODE_MIN_LEVERAGE = 10
+// Highest fixed leverage the real-money setting accepts.
+export const AI_TRADING_REAL_FIXED_LEVERAGE_MAX = 10
 
 // Bounds for the execution settings. `realMaxMarginUsdt` is a hard per-trade
 // margin ceiling on the live account, applied after the Risk Manager sized the plan.
@@ -118,6 +120,9 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   // The Position Manager always reviews open trades. It only ACTS (moves stops, takes partials, exits) on testnet unless this is
   // switched on for real-money positions; real-money entries are manual, so their management is opt-in too.
   positionManagerActsOnReal: false,
+  // Real money only: 0 = leverage follows from risk and stop (the default); N >= 1 = the Risk Manager's leverage is fixed at exactly Nx and the
+  // position, margin and loss all follow from it (see riskLimitsFor). Never applies on testnet.
+  realFixedLeverage: 0,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -204,6 +209,7 @@ export function normalizeAiTradingConfig(raw) {
     // Auto-executing real money needs its own explicit `true`, on top of real mode and being armed.
     autoExecuteReal: realArmed && executionSource.autoExecuteReal === true,
     positionManagerActsOnReal: executionSource.positionManagerActsOnReal === true,
+    realFixedLeverage: Math.min(Math.max(Math.round(Number(executionSource.realFixedLeverage)) || 0, 0), AI_TRADING_REAL_FIXED_LEVERAGE_MAX),
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,

@@ -257,7 +257,7 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
   const sizedLeverage = clamp(Math.ceil(notional / accountEquityUsdt), 1, maxLeverage)
   const leverage = Math.max(sizedLeverage, minLeverage)
   if (leverage > sizedLeverage) {
-    adjustments.push(`Test mode: leverage set to the ${minLeverage}x minimum (position size is unchanged, so the margin is notional / ${minLeverage}).`)
+    adjustments.push(`${limits.fixedLeverage ? 'Fixed leverage' : 'Test mode'}: leverage set to the ${minLeverage}x ${limits.fixedLeverage ? 'setting' : 'minimum'} (position size is unchanged, so the margin is notional / ${minLeverage}).`)
   }
   const liquidationDistancePct = (100 / leverage) * 0.9
   if (stopPct >= liquidationDistancePct) {
@@ -421,15 +421,46 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
   }
 }
 
-/** The configured ceilings, plus the leverage floor (and a ceiling to match) while testnet test mode is on. */
+/**
+ * The configured ceilings, plus:
+ *  - real money with a fixed leverage set (execution.realFixedLeverage >= 1): leverage is exactly that, whatever the ceiling says (the
+ *    account owner's decision); everything else (margin, loss, liquidation) follows from it;
+ *  - testnet test mode: the leverage floor (and a ceiling to match).
+ */
 export function riskLimitsFor(config) {
   const limits = config.risk
+  const fixed = Math.floor(Number(config.execution?.realFixedLeverage))
+  if (config.execution?.mode === 'real' && fixed >= 1) {
+    return { ...limits, minLeverage: fixed, maxLeverage: fixed, fixedLeverage: fixed }
+  }
   if (config.scan?.testMode !== true || config.execution?.mode !== 'testnet') return limits
   return {
     ...limits,
     minLeverage: AI_TRADING_TEST_MODE_MIN_LEVERAGE,
     maxLeverage: Math.max(limits.maxLeverage, AI_TRADING_TEST_MODE_MIN_LEVERAGE),
   }
+}
+
+/** With a fixed leverage, the numbers that follow from it (position, margin, loss at the Analyst's stop, liquidation), so the Risk Manager plans around them. */
+function fixedLeverageLines({ limits, constraints, baseline, analyst }) {
+  const leverage = limits.fixedLeverage
+  if (!(leverage >= 1)) return []
+  const lines = [
+    `- Leverage is FIXED at ${leverage}x for this wallet (the account owner's setting): the code uses exactly ${leverage}x, so return leverage ${leverage}. Isolated liquidation is about ${fx(100 / leverage, 1)}% from entry, so any stop must stay inside ~${fx((100 / leverage) * 0.9, 1)}%.`,
+  ]
+  const cap = constraints?.marginCapUsdt
+  if (cap > 0) {
+    const largest = cap * leverage
+    lines.push(`- With up to ${fx(cap)} USDT of margin the largest position is ${fx(largest)} USDT (margin x ${leverage}); the position actually opened is the smaller of that and the size your riskPercent and stop imply.`)
+    const plan = baseline?.plan
+    if (plan) {
+      const position = Math.min(largest, plan.notionalUsdt)
+      const loss = position * (analyst.stopLossPercent / 100)
+      const wallet = Number(constraints.availableUsdt)
+      lines.push(`- At the Analyst's ${fx(analyst.stopLossPercent)}% stop, a position of about ${fx(position)} USDT (${fx(position / leverage)} USDT margin) would lose about ${fx(loss)} USDT if the stop is hit${wallet > 0 ? ` (${fx((loss / wallet) * 100, 1)}% of the wallet's ${fx(wallet)} USDT)` : ''} and gain about ${fx(position * (analyst.takeProfitPercent / 100))} USDT at its ${fx(analyst.takeProfitPercent)}% target, before fees. Choose your own stop and riskPercent knowing this.`)
+    }
+  }
+  return lines
 }
 
 /** The wallet's balance and open AI positions, so the Risk Manager can weigh portfolio exposure (empty when unknown). */
@@ -484,7 +515,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
   })
   return {
     // The role text is the project owner's Risk Manager prompt (risk-manager-prompt.js); the notes after it say how this pipeline uses the answer.
-    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode })}`,
+    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode, fixedLeverage: limits.fixedLeverage })}`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -495,11 +526,14 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       '',
       'Fixed ceilings (enforced in code; the choice within them is yours):',
       `- Account equity ${limits.accountEquityUsdt} USDT; risk per trade at most ${limits.riskPerTradePct}% of equity`,
-      limits.minLeverage > 1
-        ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
-        : `- Leverage at most ${limits.maxLeverage}x`,
+      limits.fixedLeverage
+        ? `- Leverage is fixed at ${limits.fixedLeverage}x (the account owner's setting; the code uses exactly that)`
+        : limits.minLeverage > 1
+          ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
+          : `- Leverage at most ${limits.maxLeverage}x`,
       `- Stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%`,
       `- Reward:risk at least ${limits.minRewardRisk}`,
+      ...fixedLeverageLines({ limits, constraints, baseline, analyst }),
       ...constraintLines({ constraints, baseline, limits, symbol: snapshot.symbol }),
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
