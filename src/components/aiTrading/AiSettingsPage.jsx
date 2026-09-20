@@ -198,23 +198,29 @@ export function AiSettingsPage({ settings }) {
               onChange={(value) => saveScan({ enabled: value }, value ? 'Auto-scan is on. The first scan runs within 5 minutes.' : 'Auto-scan is off.')}
             />
           </label>
-          {config.execution.mode === 'testnet' ? (
+          {(
             <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
               <span>
-                Test mode <Badge tone="warn">Testnet only</Badge>
+                Test mode <Badge tone={config.execution.mode === 'real' ? 'down' : 'warn'}>{config.execution.mode === 'real' ? 'REAL MONEY' : 'Testnet'}</Badge>
                 <span className="mt-0.5 block text-xs text-slate-500">
                   Pipeline check: the Market Analyst stops defaulting to HOLD and takes the direction the data leans toward, and the Critic and Risk Manager only stop a clearly bad trade (a weak
                   edge means a small size, not a veto). Flow, the code gates and the fixed risk ceilings are unchanged and can still block it. Switches itself off after the first trade opens.
+                  {config.execution.mode === 'real' ? (
+                    <span className="mt-1 block text-amber-200">
+                      Real money: this relaxes the AI vetting for a LIVE order (the margin cap, one-position limit, plan-age and drift checks still apply, and the 10x leverage floor stays testnet-only).
+                      It is switched off again when you change mode.
+                    </span>
+                  ) : null}
                 </span>
               </span>
               <Toggle
                 checked={Boolean(config.scan.testMode)}
                 disabled={busy}
                 label="Test mode"
-                onChange={(value) => saveScan({ testMode: value }, value ? 'Test mode is on: the Analyst will now lean toward a direction. It turns off after the first trade opens.' : 'Test mode is off.')}
+                onChange={(value) => saveScan({ testMode: value }, value ? `Test mode is on${config.execution.mode === 'real' ? ' (REAL MONEY)' : ''}: the Analyst will now lean toward a direction. It turns off after the first trade opens.` : 'Test mode is off.')}
               />
             </label>
-          ) : null}
+          )}
           <div>
             <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Symbols to scan</div>
             <div className="flex flex-wrap gap-2">

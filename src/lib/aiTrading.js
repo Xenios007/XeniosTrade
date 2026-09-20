@@ -94,7 +94,7 @@ export const AI_TRADING_RISK_LIMITS = {
 
 export const AI_TRADING_MODES = ['testnet', 'real']
 
-// Test mode (testnet only, see DEFAULT_AI_TRADING_SCAN.testMode) also floors leverage here, so the fake-money trades it
+// Test mode (see DEFAULT_AI_TRADING_SCAN.testMode) also floors leverage here on testnet only, so the fake-money trades it
 // opens exercise a high-leverage position. It raises the ceiling to at least this too; sizing (risk per trade) is unchanged,
 // so only the margin gets smaller. Outside test mode the normal ceilings apply and this is never used.
 export const AI_TRADING_TEST_MODE_MIN_LEVERAGE = 10
@@ -224,7 +224,8 @@ export function normalizeAiTradingConfig(raw) {
     // Needs an explicit `true`; anything else (missing, "true", 1) stays off.
     enabled: scanSource.enabled === true,
     symbols: scanSymbols.length ? scanSymbols : [...DEFAULT_AI_TRADING_SCAN.symbols],
-    testMode: scanSource.testMode === true && execution.mode === 'testnet',
+    // Honoured in either mode. The server resets it on a mode switch and after the first trade it opens, so it never lingers.
+    testMode: scanSource.testMode === true,
   }
 
   return { agents, risk, execution, scan }

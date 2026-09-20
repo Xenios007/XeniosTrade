@@ -933,11 +933,11 @@ test('runClaudeAgent: not logged in / SDK missing are NOT_CONFIGURED, failures s
 
 // ---- Test mode (testnet-only pipeline check) ----------------------------------------------------------------------
 
-test('test mode: only honoured in testnet mode, off by default, and not settable by accident', () => {
+test('test mode: off by default, needs an explicit true, and honoured in either mode (the server resets it on a mode switch)', () => {
   assert.equal(normalizeAiTradingConfig(null).scan.testMode, false)
   assert.equal(normalizeAiTradingConfig({ scan: { testMode: true } }).scan.testMode, true, 'default mode is testnet')
   assert.equal(normalizeAiTradingConfig({ scan: { testMode: 'true' } }).scan.testMode, false, 'needs an explicit true')
-  assert.equal(normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { testMode: true } }).scan.testMode, false, 'never in real-money mode')
+  assert.equal(normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { testMode: true } }).scan.testMode, true, 'real money is allowed, on purpose')
 })
 
 test('test mode: changes the Analyst, Critic and Risk prompts; Flow wording and the code gates are untouched', async () => {

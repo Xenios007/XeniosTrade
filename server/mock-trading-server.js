@@ -10260,7 +10260,13 @@ app.put('/api/ai-trading/config', async (request, response) => {
     const body = request.body && typeof request.body === 'object' ? request.body : {}
     // Older clients send only agents/risk (any `risk` is ignored: it is fixed in code); a missing `execution` must not silently
     // reset the trading mode or disarm/arm real money — keep what is saved.
-    const next = await saveAiTradingConfig({ ...body, execution: body.execution ?? current.execution, scan: body.scan ?? current.scan })
+    const requestedExecution = body.execution ?? current.execution
+    let requestedScan = body.scan ?? current.scan
+    if (requestedExecution?.mode !== current.execution.mode && requestedScan?.testMode) {
+      // Test mode relaxes the AI vetting; it must be switched on deliberately for the mode it will run in, never carried across.
+      requestedScan = { ...requestedScan, testMode: false }
+    }
+    const next = await saveAiTradingConfig({ ...body, execution: requestedExecution, scan: requestedScan })
     if (next.execution.mode !== current.execution.mode || next.execution.realArmed !== current.execution.realArmed || next.execution.autoExecuteReal !== current.execution.autoExecuteReal) {
       console.warn(`[ai-trading] Execution settings changed: mode ${current.execution.mode} -> ${next.execution.mode}, real armed ${current.execution.realArmed} -> ${next.execution.realArmed}, real auto-execute ${Boolean(current.execution.autoExecuteReal)} -> ${Boolean(next.execution.autoExecuteReal)}`)
     }
@@ -10331,12 +10337,6 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     try {
       const trade = await openAiTrade({ run, mode: autoMode, auto: true })
       run.execution = { status: 'opened', mode: autoMode, tradeId: trade.id, at: Date.now(), auto: true }
-      if (run.testMode) {
-        // Test mode is a one-shot pipeline check: it has done its job once a trade opened, so put the Analyst back to normal.
-        const latest = await getAiTradingConfig()
-        await saveAiTradingConfig({ ...latest, scan: { ...latest.scan, testMode: false } })
-        console.log(`[ai-trading] Test mode opened ${run.final.action} ${run.symbol} on testnet; test mode switched off.`)
-      }
     } catch (error) {
       run.execution = { status: 'failed', mode: autoMode, error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
     }
@@ -10551,6 +10551,17 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
     await updateAiTrades((current) => (current.some((trade) => trade.aiRunId === run.id) ? undefined : [record, ...current]))
     aiExchangeSummaryCache[mode] = null
     console.log(`[ai-trading] Opened ${mode} ${record.side} ${record.symbol} qty ${record.quantity} @ ${record.entryPrice} via ${record.mode} (run ${run.id})`)
+    if (run.testMode) {
+      // Test mode is a one-shot pipeline check (testnet or real money, auto or manual): it has done its job once a trade opened,
+      // so put the Analyst / Critic / Risk Manager back to normal. Never let a failure here undo or hide the trade that opened.
+      try {
+        const latest = await getAiTradingConfig()
+        await saveAiTradingConfig({ ...latest, scan: { ...latest.scan, testMode: false } })
+        console.log(`[ai-trading] Test mode opened ${run.final.action} ${run.symbol} on ${mode}; test mode switched off.`)
+      } catch (error) {
+        console.error('[ai-trading] Could not switch test mode off after the trade opened - turn it off in AI Settings:', error instanceof Error ? error.message : error)
+      }
+    }
     return record
   } finally {
     aiExecutionsInFlight.delete(run.id)
