@@ -1181,3 +1181,36 @@ test('risk manager: is shown the wallet balance and the open positions (portfoli
   const missing = await captureCalls(config)
   assert.doesNotMatch(missing.seen.risk.userPrompt, /Open AI positions|Wallet available balance/)
 })
+
+// ---- Measured evidence reaches the Risk Manager -------------------------------------------------------------------------
+
+test('risk evidence: the Risk Manager gets funding from the flow data and the measured evidence handed in by the server', async () => {
+  const { buildRiskEvidence } = await import('../server/ai-trading/risk-evidence.js')
+  const candles = Array.from({ length: 500 }, (_unused, index) => {
+    const close = 100 * (1 + 0.0004) ** index
+    return { open: close, high: close * 1.001, low: close * 0.999, close, volume: 1, closeTime: 0 }
+  })
+  const evidence = buildRiskEvidence({ candles5m: candles, candles1h: candles.slice(0, 300), depth: { bids: [['99.9', '900']], asks: [['100.1', '900']] }, notionalsUsdt: [30] })
+  const fake = fakeAgents()
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => ({ mode: 'real', minOrderUsdt: 5, marginCapUsdt: 9.99, availableUsdt: 40, openPositions: [], evidence }),
+    callAgent: fake.callAgent, backtestStats: positiveStats,
+  })
+  const prompt = fake.prompts.risk
+  assert.match(prompt, /Measured evidence \(computed from recent market data/)
+  assert.match(prompt, /Volatility context: 5M ATR/)
+  assert.match(prompt, /Typical excursion in the 60 minutes after ANY 5M close, for a LONG/)
+  assert.match(prompt, /Live futures order book/)
+  assert.match(prompt, /Not measured, so unavailable to you: exchange fees/)
+  assert.ok(result.constraints.evidence.excursion.long.mfe.length === 21, 'the quantile tables are kept on the run, not the raw candles')
+
+  // and the evidence block is optional: no evidence and no funding -> no block at all
+  const bare = fakeAgents()
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(),
+    getFlowData: async () => ({ ...FLOW_DATA, metrics: { ...FLOW_DATA.metrics, fundingRatePct: null } }),
+    callAgent: bare.callAgent, backtestStats: positiveStats,
+  })
+  assert.doesNotMatch(bare.prompts.risk, /Measured evidence/)
+})

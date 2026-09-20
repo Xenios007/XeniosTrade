@@ -82,6 +82,7 @@ import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
 import { getFingptStatus } from './ai-trading/fingpt-status.js'
 import { buildMarketSnapshot, riskLimitsFor, runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-trading/exchange-fit.js'
+import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
@@ -10327,7 +10328,7 @@ function getMinOrderUsdt(symbolInfo, price) {
 // What the Risk Manager needs to size a trade the exchange will actually accept: the symbol's minimum order and the margin this
 // wallet may use. Same balance source and cap rule the executor uses (openAiTrade / scalePlanToWallet). Never fatal: the pipeline
 // treats a failure as "no constraints" and the executor still enforces the rule.
-async function getAiTradeConstraints(symbol, snapshot) {
+async function getAiExchangeConstraints(symbol, snapshot) {
   const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
   const mode = config.execution.mode
   const environment = getAiEnvironment(mode)
@@ -10359,6 +10360,41 @@ async function getAiTradeConstraints(symbol, snapshot) {
     availableUsdt: round(availableUsdt),
     openPositions,
   }
+}
+
+// Measured market evidence for the Risk Manager (risk-evidence.js): a longer candle history than the Analyst gets (500 x 5M, 300 x 1H) for the
+// volatility percentile and the typical-excursion base rates, and the LIVE futures order book (the flow data uses the testnet book, which is
+// too thin to say anything about slippage on real money). Each fetch fails independently.
+async function getAiRiskEvidence(symbol, notionalsUsdt) {
+  const closedCandles = (klines) => toCandleData(klines).filter((candle) => !(candle.closeTime > Date.now()))
+  const [klines5m, klines1h, depth] = await Promise.all([
+    fetchKlines(symbol, '5m', 500).catch(() => null),
+    fetchKlines(symbol, '1h', 300).catch(() => null),
+    fetchJson(`${futuresLiveBaseUrl}/fapi/v1/depth?symbol=${symbol}&limit=50`, {
+      retries: 1,
+      timeoutMs: 9_000,
+      cacheKey: `futures-live-depth:${symbol}:50`,
+      cacheTtlMs: 5_000,
+    }).catch(() => null),
+  ])
+  return buildRiskEvidence({
+    candles5m: klines5m ? closedCandles(klines5m) : null,
+    candles1h: klines1h ? closedCandles(klines1h) : null,
+    depth,
+    notionalsUsdt,
+  })
+}
+
+// Everything the Risk Manager is told beyond the market snapshot: the exchange minimum / margin / open positions, plus measured evidence.
+// Never fatal: the pipeline treats a failure as "no constraints" and the executor still enforces the exchange rules.
+async function getAiTradeConstraints(symbol, snapshot) {
+  const [exchange, config] = await Promise.all([getAiExchangeConstraints(symbol, snapshot).catch(() => null), getAiTradingConfig()])
+  const ceiling = riskLimitsFor(config).maxLeverage
+  // Slippage is reported for the smallest order the exchange accepts and for the largest this wallet could open.
+  const notionals = exchange ? [exchange.minOrderUsdt, Math.min(exchange.marginCapUsdt * ceiling, 5000)] : []
+  const evidence = await getAiRiskEvidence(symbol, notionals).catch(() => null)
+  if (!exchange && !evidence) return null
+  return { ...(exchange || { mode: config.execution.mode }), ...(evidence ? { evidence } : {}) }
 }
 
 async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {

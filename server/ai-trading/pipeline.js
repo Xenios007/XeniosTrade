@@ -26,6 +26,7 @@ import { describeFlow } from './flow-data.js'
 import { lookupQuantEdge } from './quant-stats.js'
 import { fitPlanToExchangeMinimum } from './exchange-fit.js'
 import { RISK_MANAGER_SYSTEM_PROMPT, riskManagerPipelineNotes } from './risk-manager-prompt.js'
+import { describeRiskEvidence } from './risk-evidence.js'
 
 export const MIN_ENTRY_BARS = 90
 export const MIN_BIAS_BARS = 40
@@ -471,7 +472,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   return lines
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, constraints = null }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, constraints = null, flowMetrics = null }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
     side: analyst.action,
@@ -504,6 +505,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
       ...portfolioLines({ constraints }),
+      ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
       'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
       ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : []),
@@ -724,7 +726,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, constraints }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, constraints, flowMetrics: flowData?.metrics }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output
