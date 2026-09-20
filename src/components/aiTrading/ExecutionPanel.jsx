@@ -7,8 +7,9 @@ import { Modal } from '../ui/Modal'
 
 /**
  * Sits under an approved verdict. Testnet trades open automatically (when enabled in AI Settings) or
- * with one click; real money is always a deliberate click plus the symbol typed back, and only while
- * armed. The server re-checks everything (armed, fresh plan, price drift, margin cap).
+ * with one click. Real money is either automatic (armed AND real-money auto-execute on: no button at all,
+ * only the outcome) or a deliberate click plus the symbol typed back, and only while armed. The server
+ * re-checks everything (armed, fresh plan, price drift, margin cap).
  */
 export function ExecutionPanel({ run, execution, onExecuted }) {
   const [busy, setBusy] = useState(false)
@@ -21,6 +22,10 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
   const mode = execution?.mode || 'testnet'
   const opened = run.execution?.status === 'opened' ? run.execution : null
   const armed = mode === 'real' && execution?.realArmed === true
+  // With real-money auto-execute on, entries are placed by the scan itself, so there is nothing to click. A run that was not
+  // opened is either one the automatic attempt failed on (a manual try would hit the same check), one that pre-dates the switch, or
+  // one whose plan has expired.
+  const autoReal = armed && execution?.autoExecuteReal === true
 
   async function submit() {
     setBusy(true)
@@ -49,6 +54,26 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
     )
   }
 
+  if (autoReal) {
+    const failed = run.execution?.status === 'failed'
+    return (
+      <div className={`grid gap-1 rounded-2xl border px-4 py-3 text-xs ${failed ? 'border-rose-400/20 bg-rose-400/10 text-rose-200' : 'border-white/10 bg-slate-950/50 text-slate-300'}`}>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge tone="warn">Real money · auto</Badge>
+          <span>
+            {failed
+              ? `The automatic real-money order was not placed: ${run.execution.error}`
+              : 'Real money auto-execute is on. This approved run was not opened (it may pre-date the switch, or its plan expired).'}
+          </span>
+        </div>
+        <span className="text-slate-400">
+          Auto-execute is on, so there is no manual Execute button. To place a run by hand, switch it off in{' '}
+          <Link to="/ai-settings" className="text-sky-300 hover:underline">AI Settings</Link>.
+        </span>
+      </div>
+    )
+  }
+
   return (
     <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -60,11 +85,7 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
             {execution?.autoExecuteTestnet ? 'Auto-execute is on but this run was not opened.' : 'Auto-execute is off.'} Open it on the testnet wallet:
           </span>
         ) : armed ? (
-          <span className="text-xs text-amber-200">
-            {execution?.autoExecuteReal
-              ? 'Real money auto-execute is on but this run was not opened. You can still place it yourself:'
-              : 'Real money is armed with auto-execute off — you place each trade yourself.'}
-          </span>
+          <span className="text-xs text-amber-200">Real money is armed with auto-execute off — you place each trade yourself.</span>
         ) : (
           <span className="text-xs text-slate-400">Real money is not armed. <Link to="/ai-settings" className="text-sky-300 hover:underline">Arm it in AI Settings</Link> to trade this.</span>
         )}
