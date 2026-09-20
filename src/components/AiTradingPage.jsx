@@ -1,16 +1,16 @@
 import { Play } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, Route, Routes } from 'react-router-dom'
 import { getAiProvider, isLocalLoginReady, isProviderConnected, providerDisplayName } from '../lib/aiProviders'
 import {
   AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS,
 } from '../lib/aiTrading'
+import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
 import { formatDateTime } from '../lib/formatters'
 import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
 import { Panel } from './Panel'
 import { Badge } from './ui/Badge'
 import { PageHeader } from './ui/PageHeader'
-import { ScanStatusList } from './aiTrading/ScanStatusList'
 import { SubNavTabs } from './ui/SubNavTabs'
 
 const RUNS_REFRESH_MS = 15_000
@@ -130,66 +130,120 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
   )
 }
 
-export function HistoryTab({ runs, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry }) {
+const HISTORY_PAGE_SIZE = 100
+
+function scanStatusLine(scanStatus, enabled) {
+  if (scanStatus?.running) return 'Scanning now…'
+  if (scanStatus?.lastFinishedAt) return `Last scan finished ${formatDateTime(scanStatus.lastFinishedAt)} · every 5 min`
+  return enabled === false ? 'Auto-scan is off.' : 'No scan has run yet.'
+}
+
+function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry }) {
   const [openId, setOpenId] = useState(null)
+  const [filter, setFilter] = useState('all')
+  const [shown, setShown] = useState(HISTORY_PAGE_SIZE)
+
+  const feed = useMemo(() => buildHistoryFeed(runs, scanLog), [runs, scanLog])
+  const items = useMemo(() => filterHistoryFeed(feed, filter), [feed, filter])
 
   return (
-    <div className="grid gap-6">
-      <Panel title="Auto-scan activity">
-        <div className="grid gap-3">
-          <ScanStatusList scanStatus={scanStatus} enabled={scanEnabled} />
-          <div className="text-[11px] leading-relaxed text-slate-500">
-            The scan runs every 5 minutes. Analyst HOLDs and Analyst errors are shown above but not saved as runs below — only runs where the Analyst
-            went LONG/SHORT, or that opened a trade, are kept (last 50), so real decisions aren't pushed out by HOLDs. This page refreshes every 15 seconds.
-          </div>
+    <Panel title="Run History">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex flex-wrap gap-2">
+          {HISTORY_FILTERS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => { setFilter(item.id); setShown(HISTORY_PAGE_SIZE) }}
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${filter === item.id ? 'border-sky-300/50 bg-sky-400/15 text-sky-100' : 'border-white/10 bg-slate-950/50 text-slate-400 hover:border-white/25'}`}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
-      </Panel>
+        <div className="text-xs text-slate-500">
+          {scanStatusLine(scanStatus, scanEnabled)}
+          {scanStatus?.lastError ? <span className="ml-2 text-rose-300">Last error: {scanStatus.lastError}</span> : null}
+        </div>
+      </div>
+      <div className="mb-3 text-[11px] leading-relaxed text-slate-500">
+        Every scan result is listed here. Only runs where the Analyst went LONG/SHORT, or that opened a trade, have a full report to open (last 50);
+        the rest are one-line HOLDs and errors. Refreshes every 15 seconds.
+      </div>
 
-      <Panel title="Run History">
-        {error ? (
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
-            <span>Could not load run history: {error}</span>
-            <button type="button" onClick={onRetry} className="rounded-full border border-rose-300/40 px-3 py-1 font-medium hover:bg-rose-400/10">Retry</button>
-          </div>
-        ) : null}
-        {loading ? (
-          <div className="py-8 text-center text-sm text-slate-400">Loading…</div>
-        ) : !runs.length ? (
-          <div className="py-8 text-center text-sm text-slate-400">
-            {error ? 'No runs could be loaded.' : 'No saved runs yet — a run appears here when the Analyst goes LONG/SHORT, or when you run the pipeline yourself on the Pipeline tab.'}
-          </div>
-        ) : (
-          <div className="grid gap-3">
-            {runs.map((run) => {
-              const open = openId === run.id
-              const final = run.final || {}
-              const approved = Boolean(final.approved)
-              const opened = run.execution?.status === 'opened'
+      {error ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
+          <span>Could not load run history: {error}</span>
+          <button type="button" onClick={onRetry} className="rounded-full border border-rose-300/40 px-3 py-1 font-medium hover:bg-rose-400/10">Retry</button>
+        </div>
+      ) : null}
+
+      {loading ? (
+        <div className="py-8 text-center text-sm text-slate-400">Loading…</div>
+      ) : !items.length ? (
+        <div className="py-8 text-center text-sm text-slate-400">
+          {error
+            ? 'Nothing could be loaded.'
+            : filter === 'all'
+              ? 'Nothing yet — scan results appear here every 5 minutes once Auto-scan is on, and manual runs from the Pipeline tab show up too.'
+              : 'Nothing matches this filter.'}
+        </div>
+      ) : (
+        <div className="grid gap-2">
+          {items.slice(0, shown).map((item) => {
+            if (item.kind === 'scan') {
+              const { entry } = item
               return (
-                <div key={run.id} className="rounded-2xl border border-white/10 bg-white/[0.03]">
-                  <button
-                    type="button"
-                    aria-expanded={open}
-                    onClick={() => setOpenId(open ? null : run.id)}
-                    className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left"
-                  >
-                    <span className="w-36 shrink-0 text-xs text-slate-400">{formatDateTime(run.startedAt)}</span>
-                    <span className="w-24 shrink-0 text-sm font-semibold text-white">{run.symbol}</span>
-                    <Badge tone={approved ? (final.action === 'LONG' ? 'up' : 'down') : 'neutral'}>
-                      {approved ? `Trade ${final.action}` : 'No trade'}
-                    </Badge>
-                    <Badge tone="neutral">{run.trigger === 'scan' ? 'Scan' : 'Manual'}</Badge>
-                    {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
-                    <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
-                  </button>
-                  {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} /></div> : null}
+                <div key={`${entry.symbol}-${entry.at}`} className="flex flex-wrap items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.015] px-4 py-2.5">
+                  <span className="w-36 shrink-0 text-xs text-slate-500">{formatDateTime(entry.at)}</span>
+                  <span className="w-24 shrink-0 text-sm font-semibold text-slate-200">{entry.symbol}</span>
+                  <Badge tone={entry.outcome === 'error' ? 'down' : 'neutral'}>{entry.outcome === 'hold' ? 'No trade' : entry.outcome}</Badge>
+                  <Badge tone="neutral">Scan</Badge>
+                  {entry.testMode ? <Badge tone="warn">Test mode</Badge> : null}
+                  <span className="min-w-0 flex-1 text-xs text-slate-500">{entry.detail}</span>
                 </div>
               )
-            })}
-          </div>
-        )}
-      </Panel>
-    </div>
+            }
+
+            const { run } = item
+            const open = openId === run.id
+            const final = run.final || {}
+            const approved = Boolean(final.approved)
+            const opened = run.execution?.status === 'opened'
+            return (
+              <div key={run.id} className="rounded-2xl border border-white/10 bg-white/[0.03]">
+                <button
+                  type="button"
+                  aria-expanded={open}
+                  onClick={() => setOpenId(open ? null : run.id)}
+                  className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left"
+                >
+                  <span className="w-36 shrink-0 text-xs text-slate-400">{formatDateTime(run.startedAt)}</span>
+                  <span className="w-24 shrink-0 text-sm font-semibold text-white">{run.symbol}</span>
+                  <Badge tone={approved ? (final.action === 'LONG' ? 'up' : 'down') : 'neutral'}>
+                    {approved ? `Trade ${final.action}` : 'No trade'}
+                  </Badge>
+                  <Badge tone="neutral">{run.trigger === 'scan' ? 'Scan' : 'Manual'}</Badge>
+                  {run.testMode ? <Badge tone="warn">Test mode</Badge> : null}
+                  {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
+                  <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
+                </button>
+                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} /></div> : null}
+              </div>
+            )
+          })}
+          {items.length > shown ? (
+            <button
+              type="button"
+              onClick={() => setShown((count) => count + HISTORY_PAGE_SIZE)}
+              className="mt-1 justify-self-center rounded-full border border-white/10 px-4 py-1.5 text-xs font-medium text-slate-300 hover:border-white/25"
+            >
+              Show more ({items.length - shown} older)
+            </button>
+          ) : null}
+        </div>
+      )}
+    </Panel>
   )
 }
 
@@ -218,6 +272,7 @@ export function AiTradingPage({ settings }) {
   const [localLogins, setLocalLogins] = useState(null)
   const [runs, setRuns] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
+  const [scanLog, setScanLog] = useState([])
   const [runsError, setRunsError] = useState('')
   const [scanStatus, setScanStatus] = useState(null)
   const [running, setRunning] = useState(false)
@@ -229,7 +284,7 @@ export function AiTradingPage({ settings }) {
       .then((payload) => { if (!cancelled) { setConfig(payload.config); setScanStatus(payload.scanStatus || null); setBacktestStats(payload.backtestStats); setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null }) } })
       .catch((err) => { if (!cancelled) setError(err.message) })
     requestJson('/api/ai-trading/runs')
-      .then((payload) => { if (!cancelled) { setRuns(payload.runs); setRunsError('') } })
+      .then((payload) => { if (!cancelled) { setRuns(payload.runs); setScanLog(payload.scanLog || []); setRunsError('') } })
       .catch((err) => { if (!cancelled) setRunsError(err instanceof Error ? err.message : 'Could not load run history.') })
       .finally(() => { if (!cancelled) setRunsLoading(false) })
     return () => { cancelled = true }
@@ -239,6 +294,7 @@ export function AiTradingPage({ settings }) {
     try {
       const payload = await requestJson('/api/ai-trading/runs')
       setRuns(payload.runs)
+      setScanLog(payload.scanLog || [])
       setRunsError('')
     } catch (err) {
       setRunsError(err instanceof Error ? err.message : 'Could not load run history.')
@@ -293,7 +349,7 @@ export function AiTradingPage({ settings }) {
           path="history"
           element={(
             <div className="grid gap-6">
-              <HistoryTab runs={runs} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} />
+              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} />
               <BacktestContext backtestStats={backtestStats} />
             </div>
           )}

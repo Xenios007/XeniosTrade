@@ -297,14 +297,23 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits }) {
 
 const SYSTEM_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). Be rigorous and skeptical: HOLD / rejecting is a good outcome when the edge is not clear. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 
-function analystPrompts(snapshot) {
+// Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes; Flow, Critic, Risk and Decision keep their
+// full skepticism and the code ceilings still cap every number, so this only lets a modest lean reach them.
+const TEST_MODE_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). TEST MODE (testnet, fake money): the goal right now is to exercise the whole pipeline, so do NOT default to HOLD. Later stages will still vet and can reject the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+// Test mode also relaxes the Critic, or its ordinary objections (late entry, modest volume) block every run before the Risk
+// Manager and Decision Agent are ever reached. It still lists every real objection; REJECT is kept for a clearly bad trade.
+const TEST_MODE_CRITIC_PREAMBLE = 'You are one agent in a five-stage crypto perpetual-futures trade-vetting pipeline (Market Analyst, Market Flow, Critic, Risk Manager, Decision). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline. The Risk Manager and Decision Agent still vet the trade after you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const TEST_MODE_CRITIC_INSTRUCTION = 'TEST MODE: still list every real objection with an honest severity, but use REJECT only for a serious flaw that makes the trade clearly bad (for example it fights strong trend or flow evidence, or the data is broken). Ordinary weaknesses such as a late entry, modest volume or a stretched but plausible range position are CAUTION.'
+const TEST_MODE_INSTRUCTION = 'TEST MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it, and propose a realistic stop and target.'
+
+function analystPrompts(snapshot, testMode = false) {
   return {
-    systemPrompt: `${SYSTEM_PREAMBLE} You are the Market Analyst.`,
+    systemPrompt: `${testMode ? TEST_MODE_PREAMBLE : SYSTEM_PREAMBLE} You are the Market Analyst.`,
     userPrompt: [
       describeMarket(snapshot),
       '',
       'Read the candles, indicators, volume, structure and regime, then decide LONG, SHORT or HOLD for the next few 5M candles.',
-      'Only choose LONG/SHORT when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.',
+      testMode ? TEST_MODE_INSTRUCTION : 'Only choose LONG/SHORT when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.',
       'Reply with exactly: {"action":"LONG|SHORT|HOLD","confidence":0-100,"regime":"short label","stopLossPercent":number,"takeProfitPercent":number,"keyFactors":["up to 5 short bullets"],"reasoning":"2-4 sentences"}',
     ].join('\n'),
   }
@@ -338,9 +347,9 @@ function flowPrompts(snapshot, analyst, metrics) {
   }
 }
 
-function criticPrompts(snapshot, analyst, flow) {
+function criticPrompts(snapshot, analyst, flow, testMode = false) {
   return {
-    systemPrompt: `${SYSTEM_PREAMBLE} You are the Critic. Your only job is to find reasons this trade should be rejected. Do not argue in its favour.`,
+    systemPrompt: `${testMode ? TEST_MODE_CRITIC_PREAMBLE : SYSTEM_PREAMBLE} You are the Critic. Your only job is to find reasons this trade should be rejected. Do not argue in its favour.`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -349,8 +358,10 @@ function criticPrompts(snapshot, analyst, flow) {
       `Analyst key factors: ${analyst.keyFactors.join(' | ') || 'none given'}`,
       `Market Flow Agent: ${flowSummary(flow)}`,
       '',
-      'Attack it: contradicting indicators, chasing an extended move, low volume, range-bound/chop, funding or crowding risk, stops that sit inside normal noise, timeframe disagreement.',
+      'Attack the setup: contradicting indicators, chasing an extended move, low volume, range-bound/chop, funding or crowding risk, timeframe disagreement.',
+      'The stop and target above are only the Analyst\'s provisional proposal: the Risk Manager sets the final stop, size and leverage after you, so do not REJECT because the proposed stop or target looks too tight or too wide. Judge the setup itself (direction, timing, structure, positioning).',
       'Verdict PASS = you found nothing material; CAUTION = real but survivable concerns; REJECT = the trade should not be taken.',
+      ...(testMode ? [TEST_MODE_CRITIC_INSTRUCTION] : []),
       'Reply with exactly: {"verdict":"PASS|CAUTION|REJECT","objections":[{"issue":"specific objection","severity":"low|medium|high"}],"reasoning":"2-3 sentences"}',
     ].join('\n'),
   }
@@ -484,6 +495,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     startedAt,
     finishedAt: null,
     advisoryOnly: true,
+    testMode: config.scan?.testMode === true,
     price: null,
     config: { agents: config.agents, risk: config.risk },
     stages: [],
@@ -514,7 +526,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'analyst',
     agentConfig: config.agents.analyst,
     callAgent,
-    prompts: analystPrompts(snapshot),
+    prompts: analystPrompts(snapshot, config.scan?.testMode === true),
     parse: parseAnalystOutput,
   })
   const analyst = analystStage.output
@@ -581,7 +593,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'critic',
     agentConfig: config.agents.critic,
     callAgent,
-    prompts: criticPrompts(snapshot, analyst, flow),
+    prompts: criticPrompts(snapshot, analyst, flow, config.scan?.testMode === true),
     parse: parseCriticOutput,
   })
   const critic = criticStage.output

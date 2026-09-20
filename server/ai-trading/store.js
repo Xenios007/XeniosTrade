@@ -7,6 +7,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeAiTradingConfig } from '../../src/lib/aiTrading.js'
+import { mergeScanLog } from '../../src/lib/aiTradingHistory.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = path.join(__dirname, '..', 'data', 'ai-trading')
@@ -124,4 +125,29 @@ export function updateAiScanStatus(mutate) {
   })
   scanStatusQueue = result.catch(() => {})
   return result
+}
+
+// ---- Auto-scan log ----------------------------------------------------------
+// One light entry per symbol per scan cycle (including the Analyst HOLDs and errors that are not saved as runs), so
+// Run History can show everything the scan did, not just the latest result per symbol. Capped; see mergeScanLog.
+const SCAN_LOG_FILE = path.join(DATA_DIR, 'scan-log.json')
+
+export async function getAiScanLog() {
+  const log = await readJson(SCAN_LOG_FILE, [])
+  return Array.isArray(log) ? log : []
+}
+
+let scanLogQueue = Promise.resolve()
+
+/** `entries` are `{ at, symbol, outcome, detail, runId? }`, oldest first. Never throws: a log failure must not break a scan. */
+export function appendAiScanLog(entries) {
+  scanLogQueue = scanLogQueue
+    .then(async () => {
+      if (!entries.length) return
+      await writeJsonAtomic(SCAN_LOG_FILE, mergeScanLog(await getAiScanLog(), entries))
+    })
+    .catch((error) => {
+      console.warn('[ai-trading] Failed to persist scan log:', error instanceof Error ? error.message : error)
+    })
+  return scanLogQueue
 }

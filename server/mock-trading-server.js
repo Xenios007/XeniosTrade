@@ -81,7 +81,7 @@ import { runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
-  appendAiTradingRun, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
+  appendAiScanLog, appendAiTradingRun, getAiScanLog, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
   updateAiScanStatus, updateAiTrades,
 } from './ai-trading/store.js'
 import {
@@ -10261,7 +10261,8 @@ app.put('/api/ai-trading/config', async (request, response) => {
 })
 
 app.get('/api/ai-trading/runs', async (_request, response) => {
-  response.json({ ok: true, runs: await getAiTradingRuns() })
+  const [runs, scanLog] = await Promise.all([getAiTradingRuns(), getAiScanLog()])
+  response.json({ ok: true, runs, scanLog })
 })
 
 // One pipeline run for a symbol, including testnet auto-execution. Shared by the Analyze button and the auto-scan
@@ -10308,6 +10309,12 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     try {
       const trade = await openAiTrade({ run, mode: 'testnet', auto: true })
       run.execution = { status: 'opened', mode: 'testnet', tradeId: trade.id, at: Date.now(), auto: true }
+      if (run.testMode) {
+        // Test mode is a one-shot pipeline check: it has done its job once a trade opened, so put the Analyst back to normal.
+        const latest = await getAiTradingConfig()
+        await saveAiTradingConfig({ ...latest, scan: { ...latest.scan, testMode: false } })
+        console.log(`[ai-trading] Test mode opened ${run.final.action} ${run.symbol} on testnet; test mode switched off.`)
+      }
     } catch (error) {
       run.execution = { status: 'failed', mode: 'testnet', error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
     }
@@ -10363,6 +10370,7 @@ async function runAiScanCycle() {
     const results = {}
     const stamp = Date.now()
     for (const item of skipped) results[item.symbol] = { at: stamp, outcome: 'skipped', detail: item.reason }
+    await appendAiScanLog(skipped.map((item) => ({ symbol: item.symbol, ...results[item.symbol] })))
 
     let cycleError = null
     for (const symbol of toRun) {
@@ -10372,14 +10380,17 @@ async function runAiScanCycle() {
       aiTradingRunsInFlight.add(symbol)
       try {
         const run = await performAiTradingRun(symbol, { trigger: 'scan' })
-        if (shouldPersistScanRun(run)) await appendAiTradingRun(run)
+        const saved = shouldPersistScanRun(run)
+        if (saved) await appendAiTradingRun(run)
         results[symbol] = summarizeScanResult(run)
+        await appendAiScanLog([{ symbol, ...results[symbol], saved, ...(run.testMode ? { testMode: true } : {}) }])
         if (run.execution?.status === 'opened') {
           console.log(`[ai-trading] Auto-scan opened ${run.final.action} ${symbol} on ${run.execution.mode}`)
         }
       } catch (error) {
         cycleError = error instanceof Error ? error.message : String(error)
         results[symbol] = { at: Date.now(), outcome: 'error', detail: redactSecrets(cycleError).slice(0, 240) }
+        await appendAiScanLog([{ symbol, ...results[symbol], saved: false }])
         console.warn(`[ai-trading] Auto-scan failed for ${symbol}: ${redactSecrets(cycleError)}`)
       } finally {
         aiTradingRunsInFlight.delete(symbol)

@@ -107,3 +107,10 @@ Same shape as Codex: any of the four model-backed agents (e.g. the Decision Agen
 - **Status:** `GET /api/ai-trading/config` returns `claude: { available, loggedIn }` next to `codex` (existence check only, the credential is never read).
 - **Dependencies:** the Agent SDK peer-requires `@anthropic-ai/sdk >= 0.93` and `zod ^4`, so `@anthropic-ai/sdk` went 0.70 -> 0.127 (used by `bot-claude.js` and the Anthropic provider in `llm.js`), plus `zod` and `@modelcontextprotocol/sdk` as explicit deps.
 - Verified: unit tests with a fake SDK, and one real call through `callAgentJson` on this machine (~3 s). NOT yet seen: a real Decision prompt through Claude end to end.
+
+## Test mode and the Critic's stop rule (added 2026-09-20)
+
+**Test mode** (`config.scan.testMode`, AI Settings -> Auto-scan, testnet only) is a one-shot pipeline check for when the market is quiet and the Analyst keeps saying HOLD. While on: the **Analyst** stops defaulting to HOLD and takes the direction the data leans toward (modest confidence, HOLD only if truly balanced), and the **Critic** uses REJECT only for a clearly bad trade (ordinary weaknesses are CAUTION). Flow, Risk Manager, Decision Agent, the gates and the risk ceilings are unchanged. Never honoured in real-money mode (`normalizeAiTradingConfig`); the server switches it off after the first testnet trade it opens; runs and scan-log rows made under it are marked "Test mode". First live use: the Analyst returned LONG for 4 of 4 symbols and the un-relaxed Critic rejected all four (late entry, declining volume, crowding, "stop too tight").
+
+**Critic and the Analyst's stop/target (permanent):** the Critic is now told the Analyst's stop and target are provisional (the Risk Manager sets the final stop, size and leverage), so it must not REJECT just because the proposed stop looks tight. It still attacks the setup itself.
+

@@ -107,6 +107,10 @@ export const AI_SCAN_COOLDOWN_MS = 15 * 60_000
 export const DEFAULT_AI_TRADING_SCAN = {
   enabled: false,
   symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+  // Testnet-only pipeline check: the Analyst stops defaulting to HOLD and takes the direction the data leans toward, so the
+  // whole chain (Flow, Critic, Risk, Decision, testnet open) gets exercised. Every later gate and the risk ceilings are
+  // unchanged. Never honoured outside testnet mode; the server switches it off after the first trade it opens.
+  testMode: false,
 }
 
 export const DEFAULT_AI_TRADING_CONFIG = {
@@ -191,6 +195,7 @@ export function normalizeAiTradingConfig(raw) {
     // Needs an explicit `true`; anything else (missing, "true", 1) stays off.
     enabled: scanSource.enabled === true,
     symbols: scanSymbols.length ? scanSymbols : [...DEFAULT_AI_TRADING_SCAN.symbols],
+    testMode: scanSource.testMode === true && execution.mode === 'testnet',
   }
 
   return { agents, risk, execution, scan }

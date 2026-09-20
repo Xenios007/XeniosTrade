@@ -920,6 +920,54 @@ test('runClaudeAgent: not logged in / SDK missing are NOT_CONFIGURED, failures s
   assert.deepEqual(await getClaudeAgentStatus({ loadModule: fakeClaude().loadModule, hasLogin: async () => true }), { available: true, loggedIn: true })
 })
 
+// ---- Test mode (testnet-only pipeline check) ----------------------------------------------------------------------
+
+test('test mode: only honoured in testnet mode, off by default, and not settable by accident', () => {
+  assert.equal(normalizeAiTradingConfig(null).scan.testMode, false)
+  assert.equal(normalizeAiTradingConfig({ scan: { testMode: true } }).scan.testMode, true, 'default mode is testnet')
+  assert.equal(normalizeAiTradingConfig({ scan: { testMode: 'true' } }).scan.testMode, false, 'needs an explicit true')
+  assert.equal(normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { testMode: true } }).scan.testMode, false, 'never in real-money mode')
+})
+
+test('test mode: changes only the Analyst and Critic prompts; Flow / Risk / Decision wording and the gates are untouched', async () => {
+  const testCfg = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const seen = { normal: {}, test: {} }
+  for (const [key, cfg] of [['normal', config], ['test', testCfg]]) {
+    const fake = fakeAgents()
+    const spy = async (call) => {
+      const role = /You are the Market Analyst\./.test(call.systemPrompt) ? 'analyst' : /Market Flow Agent\./.test(call.systemPrompt) ? 'flow' : /You are the Critic\./.test(call.systemPrompt) ? 'critic' : /You are the Decision Agent\./.test(call.systemPrompt) ? 'decision' : 'risk'
+      seen[key][role] = `${call.systemPrompt}\n${call.userPrompt}`
+      return fake.callAgent(call)
+    }
+    const result = await runAiTradingPipeline({ symbol: 'BTCUSDT', config: cfg, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: spy, backtestStats: positiveStats })
+    assert.equal(result.testMode, key === 'test')
+  }
+  assert.doesNotMatch(seen.normal.analyst, /TEST MODE/)
+  assert.match(seen.normal.analyst, /genuine edge/)
+  assert.match(seen.test.analyst, /TEST MODE/)
+  assert.doesNotMatch(seen.test.analyst, /HOLD \/ rejecting is a good outcome/)
+  for (const role of ['flow', 'risk', 'decision']) {
+    assert.equal(seen.test[role], seen.normal[role], `${role} prompt must not change in test mode`)
+    assert.doesNotMatch(seen.test[role], /TEST MODE/)
+  }
+  assert.match(seen.test.critic, /TEST MODE[\s\S]*REJECT only for a serious flaw/)
+  assert.doesNotMatch(seen.test.critic, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
+  assert.doesNotMatch(seen.normal.critic, /TEST MODE/)
+  assert.match(seen.normal.critic, /Your only job is to find reasons this trade should be rejected/, 'the normal Critic stays adversarial')
+})
+
+test('critic prompt: the Analyst\'s stop/target are provisional (the Risk Manager resizes them), in normal mode too', async () => {
+  const { prompts } = await run()
+  assert.match(prompts.critic, /provisional proposal[\s\S]*do not REJECT because the proposed stop or target/)
+  assert.doesNotMatch(prompts.critic, /stops that sit inside normal noise/)
+})
+
+test('test mode: a Critic REJECT still blocks the trade (only the Analyst is relaxed)', async () => {
+  const cfg = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const { result } = await run({ cfg, agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'x', severity: 'high' }], reasoning: 'No.' } } })
+  assert.equal(result.final.approved, false)
+})
+
 // ---- Custom OpenAI-compatible slots ---------------------------------------------------------------------------------
 
 test('custom slots: the API key is optional, no Authorization header is sent without one, and each slot is separate', async () => {
