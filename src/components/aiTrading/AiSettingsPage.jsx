@@ -9,6 +9,7 @@ import { AgentAssignmentStrip } from '../AiTradingPage'
 import { AI_CONFIG_CHANGED_EVENT } from './AiModeBadge'
 import { Panel } from '../Panel'
 import { Badge } from '../ui/Badge'
+import { ScanStatusList } from './ScanStatusList'
 import { Modal } from '../ui/Modal'
 import { PageHeader } from '../ui/PageHeader'
 
@@ -197,6 +198,23 @@ export function AiSettingsPage({ settings }) {
               onChange={(value) => saveScan({ enabled: value }, value ? 'Auto-scan is on. The first scan runs within 5 minutes.' : 'Auto-scan is off.')}
             />
           </label>
+          {config.execution.mode === 'testnet' ? (
+            <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+              <span>
+                Test mode <Badge tone="warn">Testnet only</Badge>
+                <span className="mt-0.5 block text-xs text-slate-500">
+                  Pipeline check: the Market Analyst stops defaulting to HOLD and takes the direction the data leans toward, and the Critic and Risk Manager only stop a clearly bad trade (a weak
+                  edge means a small size, not a veto). Flow, the code gates and the fixed risk ceilings are unchanged and can still block it. Switches itself off after the first trade opens.
+                </span>
+              </span>
+              <Toggle
+                checked={Boolean(config.scan.testMode)}
+                disabled={busy}
+                label="Test mode"
+                onChange={(value) => saveScan({ testMode: value }, value ? 'Test mode is on: the Analyst will now lean toward a direction. It turns off after the first trade opens.' : 'Test mode is off.')}
+              />
+            </label>
+          ) : null}
           <div>
             <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Symbols to scan</div>
             <div className="flex flex-wrap gap-2">
@@ -218,26 +236,7 @@ export function AiSettingsPage({ settings }) {
               })}
             </div>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-xs text-slate-400">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>
-                {scanStatus?.running ? 'Scanning now…' : scanStatus?.lastFinishedAt ? `Last scan finished ${formatDateTime(scanStatus.lastFinishedAt)}` : 'No scan has run yet.'}
-              </span>
-              {scanStatus?.lastError ? <span className="text-rose-300">Last error: {scanStatus.lastError}</span> : null}
-            </div>
-            {scanStatus?.results && Object.keys(scanStatus.results).length ? (
-              <ul className="mt-2 grid gap-1">
-                {Object.entries(scanStatus.results).map(([symbol, result]) => (
-                  <li key={symbol} className="flex flex-wrap items-baseline gap-x-2">
-                    <span className="w-16 shrink-0 font-medium text-slate-200">{symbol.replace('USDT', '')}</span>
-                    <Badge tone={result.outcome === 'opened' || result.outcome === 'approved' ? 'up' : result.outcome === 'error' ? 'down' : 'neutral'}>{result.outcome}</Badge>
-                    <span className="min-w-0 flex-1 truncate text-slate-500" title={result.detail}>{result.detail}</span>
-                    <span className="shrink-0 text-slate-600">{formatDateTime(result.at)}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
+          <ScanStatusList scanStatus={scanStatus} enabled={config.scan.enabled} />
         </div>
       </Panel>
 
@@ -292,6 +291,22 @@ export function AiSettingsPage({ settings }) {
               The system's own readiness review still says it is not ready for real money — treat this as a small live experiment.
             </p>
           </div>
+
+          <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+            <span>
+              Position Manager acts on real-money positions
+              <span className="mt-0.5 block text-xs text-slate-500">
+                The Position Manager always reviews open real-money trades, but by default it only advises. Switched on, it may move the stop toward profit, take a partial,
+                change the target, or close the position on the live account by itself. It can never add risk. Off by default.
+              </span>
+            </span>
+            <Toggle
+              checked={Boolean(execution.positionManagerActsOnReal)}
+              disabled={busy}
+              label="Position Manager acts on real money"
+              onChange={(value) => saveExecution({ positionManagerActsOnReal: value }, value ? 'The Position Manager may now act on real-money positions.' : 'The Position Manager only advises on real-money positions.')}
+            />
+          </label>
 
           <div className="flex flex-wrap items-end gap-3">
             <label className="grid gap-1 text-xs text-slate-400">

@@ -1,10 +1,13 @@
 import { ArrowRight, Check, Loader2, X } from 'lucide-react'
-import { AI_TRADING_AGENTS } from '../lib/aiTrading'
+import { AI_TRADING_AGENTS, AI_TRADING_ENTRY_STAGE_IDS, AI_TRADING_STAGE_NAMES } from '../lib/aiTrading'
 import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
 import { Badge } from './ui/Badge'
 import { Panel } from './Panel'
 import { ExecutionPanel } from './aiTrading/ExecutionPanel'
 import { StatCard } from './ui/StatCard'
+
+// The entry pipeline's agents. The Position Manager works after entry and is not a stage of a run.
+const ENTRY_AGENTS = AI_TRADING_AGENTS.filter((agent) => AI_TRADING_ENTRY_STAGE_IDS.includes(agent.id))
 
 const KIND_LABEL = { ai: 'AI', data: 'Data', code: 'Code' }
 const KIND_TONE = { ai: 'info', data: 'neutral', code: 'warn' }
@@ -111,9 +114,10 @@ function StageDetails({ stage }) {
       return (
         <div className="grid gap-2">
           <Row label="Result">
-            <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? 'Approved' : 'Veto'}</Badge>
+            <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? (output.reduced ? 'Reduced' : 'Approved') : 'Veto'}</Badge>
           </Row>
-          {output.ai && output.ai.decision === 'APPROVE' ? (
+          {output.ai?.confidence != null ? <Row label="Entry confidence">{output.ai.confidence}%</Row> : null}
+          {output.ai && ['APPROVE', 'REDUCE'].includes(output.ai.decision) ? (
             <Row label="Model asked for">
               {num(output.ai.stopLossPercent)}% stop · {num(output.ai.takeProfitPercent)}% target · {num(output.ai.riskPercent)}% risk · {num(output.ai.leverage, 0)}x
             </Row>
@@ -208,8 +212,12 @@ function FlowNode({ label, tone = 'neutral', dot }) {
   )
 }
 
-/** Market Data -> 5 agents -> Trade / No Trade, then one detail card per stage. Pass `run={null}` for the idle diagram. */
+/** Market Data -> 4 entry agents -> Trade / No Trade (-> Position Manager), then one detail card per stage. Pass `run={null}` for the idle diagram. */
 export function PipelineFlow({ run, running }) {
+  // Runs saved before the Decision Agent was retired still show that stage, so old history stays readable.
+  const legacyStages = (run?.stages || []).filter((stage) => !AI_TRADING_ENTRY_STAGE_IDS.includes(stage.id))
+  const legacyAgents = legacyStages.map((stage) => ({ id: stage.id, name: AI_TRADING_STAGE_NAMES[stage.id] || stage.name || stage.id, kind: 'ai', role: 'Retired agent, shown for this older run.' }))
+  const agents = [...ENTRY_AGENTS, ...legacyAgents]
   const finalTone = !run || running ? 'neutral' : run.final.approved ? (run.final.action === 'LONG' ? 'up' : 'down') : 'neutral'
   const finalLabel = !run || running ? 'Trade / No Trade' : run.final.approved ? `Trade ${run.final.action}` : 'No Trade'
 
@@ -217,7 +225,7 @@ export function PipelineFlow({ run, running }) {
     <div className="grid gap-5">
       <div className="flex flex-wrap items-center gap-2">
         <FlowNode label="Market Data" />
-        {AI_TRADING_AGENTS.map((agent) => {
+        {agents.map((agent) => {
           const stage = run?.stages.find((item) => item.id === agent.id)
           return (
             <div key={agent.id} className="flex items-center gap-2">
@@ -228,9 +236,11 @@ export function PipelineFlow({ run, running }) {
         })}
         <ArrowRight className="h-4 w-4 text-slate-600" />
         <FlowNode label={finalLabel} tone={finalTone} />
+        <ArrowRight className="h-4 w-4 text-slate-600" />
+        <FlowNode label="Position Manager (after entry)" />
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
-        {AI_TRADING_AGENTS.map((agent) => (
+        {agents.map((agent) => (
           <StageCard key={agent.id} agent={agent} stage={run?.stages.find((stage) => stage.id === agent.id)} running={running} />
         ))}
       </div>

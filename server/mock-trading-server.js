@@ -70,17 +70,20 @@ import { refreshBotOpenrouterDecisions } from './strategy/bot-openrouter.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
 import { mergeAiProviderCredentialsUpdate, normalizeAiProviderCredentials } from '../src/lib/aiProviders.js'
 import { getAiProviderCredential, setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
-import { AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN } from '../src/lib/aiTrading.js'
+import { AI_POSITION_MANAGER_INTERVAL_MS, AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN } from '../src/lib/aiTrading.js'
+import {
+  applyPartialClose, buildEntryContext, computeTradeMetrics, parsePositionManagerOutput, planPositionAction, positionManagerPrompts, recordReview,
+} from './ai-trading/position-manager.js'
 import { listAllProviderModels, listProviderModels } from './ai-models/catalog.js'
 import { callAgentJson, redactSecrets } from './ai-trading/llm.js'
 import { collectFlowData } from './ai-trading/flow-data.js'
 import { getCodexAgentStatus } from './ai-trading/codex-agent.js'
 import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
-import { runAiTradingPipeline } from './ai-trading/pipeline.js'
+import { buildMarketSnapshot, runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
-  appendAiTradingRun, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
+  appendAiScanLog, appendAiTradingRun, getAiScanLog, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
   updateAiScanStatus, updateAiTrades,
 } from './ai-trading/store.js'
 import {
@@ -8242,6 +8245,7 @@ async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKe
   const trackedQuantity = getTrackedTradeQuantity(trade)
   const knownOrderIds = new Set([
     Number(trade.exchangeEntryOrderId || 0),
+    ...(trade.partialCloseOrderIds || []).map(Number), // fills of the Position Manager's partial closes are not the final exit
   ])
   const closingFills = (Array.isArray(fills) ? fills : [])
     .filter((fill) => {
@@ -8524,6 +8528,7 @@ function closeTradeRecord({
   status,
   result,
   closedAt = Date.now(),
+  extra = {},
 }) {
   const resolvedExitPrice = Number(exitPrice)
 
@@ -8531,14 +8536,19 @@ function closeTradeRecord({
     throw new Error('A valid exit price is required to close the trade.')
   }
 
+  // The remaining leg's PnL, plus whatever the AI Position Manager already banked through partial closes.
+  const legPnl = getTradePnlForExitPrice(trade, resolvedExitPrice)
+  const partialPnl = Number(trade.partialRealizedPnl || 0)
+
   return {
     ...trade,
+    ...extra,
     status,
     exitPrice: resolvedExitPrice,
     result,
     closedAt,
     closedDateKey: manilaDateKey(closedAt),
-    pnl: getTradePnlForExitPrice(trade, resolvedExitPrice),
+    pnl: legPnl == null || !partialPnl ? legPnl : Number((legPnl + partialPnl).toFixed(2)),
   }
 }
 
@@ -10259,11 +10269,40 @@ app.put('/api/ai-trading/config', async (request, response) => {
 })
 
 app.get('/api/ai-trading/runs', async (_request, response) => {
-  response.json({ ok: true, runs: await getAiTradingRuns() })
+  const [runs, scanLog] = await Promise.all([getAiTradingRuns(), getAiScanLog()])
+  response.json({ ok: true, runs, scanLog })
 })
 
 // One pipeline run for a symbol, including testnet auto-execution. Shared by the Analyze button and the auto-scan
 // loop; the caller owns the in-flight guard and decides whether to persist the run.
+// Derivatives positioning / order flow for the Market Flow Agent and the Position Manager (public futures data, no keys). The
+// order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
+async function getAiFlowData(target, snapshot) {
+  const [depth, btcKlines] = await Promise.all([
+    fetchFuturesDepth(target, 20).catch(() => null),
+    target === 'BTCUSDT' ? null : fetchKlines('BTCUSDT', '5m', 60).catch(() => null),
+  ])
+  const closedOnly = (candles) => candles.filter((candle) => !(candle.closeTime > Date.now()))
+  return collectFlowData({
+    symbol: target,
+    baseUrl: futuresLiveBaseUrl,
+    fetchJson: (url, cacheKey) => fetchJson(url, { retries: 1, timeoutMs: 9_000, cacheKey, cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS }),
+    entry: snapshot.entryCandles,
+    orderBook: depth,
+    btcCandles: btcKlines ? closedOnly(toCandleData(btcKlines)) : null,
+  })
+}
+
+async function getAiMarketInputs(target) {
+  const [bias, higher, entry, marketContext] = await Promise.all([
+    fetchKlines(target, '1h', 120),
+    fetchKlines(target, '15m', 120),
+    fetchKlines(target, '5m', 120),
+    fetchSignalMarketContext(target),
+  ])
+  return { bias: toCandleData(bias), higher: toCandleData(higher), entry: toCandleData(entry), marketContext }
+}
+
 async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
   // Refresh the provider-credential mirror the LLM caller reads.
   await getSettings()
@@ -10275,30 +10314,8 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     callAgent: callAgentJson,
     // Derivatives positioning / order flow for the Market Flow Agent (public futures data, no keys). The
     // order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
-    getFlowData: async (target, snapshot) => {
-      const [depth, btcKlines] = await Promise.all([
-        fetchFuturesDepth(target, 20).catch(() => null),
-        target === 'BTCUSDT' ? null : fetchKlines('BTCUSDT', '5m', 60).catch(() => null),
-      ])
-      const closedOnly = (candles) => candles.filter((candle) => !(candle.closeTime > Date.now()))
-      return collectFlowData({
-        symbol: target,
-        baseUrl: futuresLiveBaseUrl,
-        fetchJson: (url, cacheKey) => fetchJson(url, { retries: 1, timeoutMs: 9_000, cacheKey, cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS }),
-        entry: snapshot.entryCandles,
-        orderBook: depth,
-        btcCandles: btcKlines ? closedOnly(toCandleData(btcKlines)) : null,
-      })
-    },
-    getMarketInputs: async (target) => {
-      const [bias, higher, entry, marketContext] = await Promise.all([
-        fetchKlines(target, '1h', 120),
-        fetchKlines(target, '15m', 120),
-        fetchKlines(target, '5m', 120),
-        fetchSignalMarketContext(target),
-      ])
-      return { bias: toCandleData(bias), higher: toCandleData(higher), entry: toCandleData(entry), marketContext }
-    },
+    getFlowData: getAiFlowData,
+    getMarketInputs: getAiMarketInputs,
   })
   run.trigger = trigger
   // Testnet auto-execution. Real money is never automatic (assertCanExecute refuses auto + real).
@@ -10306,6 +10323,12 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     try {
       const trade = await openAiTrade({ run, mode: 'testnet', auto: true })
       run.execution = { status: 'opened', mode: 'testnet', tradeId: trade.id, at: Date.now(), auto: true }
+      if (run.testMode) {
+        // Test mode is a one-shot pipeline check: it has done its job once a trade opened, so put the Analyst back to normal.
+        const latest = await getAiTradingConfig()
+        await saveAiTradingConfig({ ...latest, scan: { ...latest.scan, testMode: false } })
+        console.log(`[ai-trading] Test mode opened ${run.final.action} ${run.symbol} on testnet; test mode switched off.`)
+      }
     } catch (error) {
       run.execution = { status: 'failed', mode: 'testnet', error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
     }
@@ -10361,6 +10384,7 @@ async function runAiScanCycle() {
     const results = {}
     const stamp = Date.now()
     for (const item of skipped) results[item.symbol] = { at: stamp, outcome: 'skipped', detail: item.reason }
+    await appendAiScanLog(skipped.map((item) => ({ symbol: item.symbol, ...results[item.symbol] })))
 
     let cycleError = null
     for (const symbol of toRun) {
@@ -10370,14 +10394,17 @@ async function runAiScanCycle() {
       aiTradingRunsInFlight.add(symbol)
       try {
         const run = await performAiTradingRun(symbol, { trigger: 'scan' })
-        if (shouldPersistScanRun(run)) await appendAiTradingRun(run)
+        const saved = shouldPersistScanRun(run)
+        if (saved) await appendAiTradingRun(run)
         results[symbol] = summarizeScanResult(run)
+        await appendAiScanLog([{ symbol, ...results[symbol], saved, ...(run.testMode ? { testMode: true } : {}) }])
         if (run.execution?.status === 'opened') {
           console.log(`[ai-trading] Auto-scan opened ${run.final.action} ${symbol} on ${run.execution.mode}`)
         }
       } catch (error) {
         cycleError = error instanceof Error ? error.message : String(error)
         results[symbol] = { at: Date.now(), outcome: 'error', detail: redactSecrets(cycleError).slice(0, 240) }
+        await appendAiScanLog([{ symbol, ...results[symbol], saved: false }])
         console.warn(`[ai-trading] Auto-scan failed for ${symbol}: ${redactSecrets(cycleError)}`)
       } finally {
         aiTradingRunsInFlight.delete(symbol)
@@ -10526,7 +10553,7 @@ function toAiExchangeSide(side) {
   return side === 'LONG' ? 'BUY' : 'SELL'
 }
 
-async function closeAiTradeNow(tradeId) {
+async function closeAiTradeNow(tradeId, { closedBy = null } = {}) {
   const settings = await getSettings()
   const trade = (await getAiTrades()).find((item) => item.id === tradeId)
   if (!trade) {
@@ -10557,15 +10584,16 @@ async function closeAiTradeNow(tradeId) {
       exitPrice = Number((await fetchTickerPrice(trade.symbol))?.price || 0)
     }
     closed = closeTradeRecord({
-      trade, exitPrice, status: 'CLOSED_MANUAL', result: 'MANUAL', closedAt: Number(closeResult?.closedAt || fill?.closedAt || Date.now()),
+      trade, exitPrice, status: 'CLOSED_MANUAL', result: 'MANUAL', closedAt: Number(closeResult?.closedAt || fill?.closedAt || Date.now()), extra: closedBy ? { closedBy } : {},
     })
   } else {
     closed = closeTradeRecord({
-      trade, exitPrice: Number((await fetchTickerPrice(trade.symbol))?.price || 0), status: 'CLOSED_MANUAL', result: 'MANUAL',
+      trade, exitPrice: Number((await fetchTickerPrice(trade.symbol))?.price || 0), status: 'CLOSED_MANUAL', result: 'MANUAL', extra: closedBy ? { closedBy } : {},
     })
   }
 
-  await updateAiTrades((current) => current.map((item) => (item.id === tradeId && isOpenAiTrade(item) ? closed : item)))
+  // Keep anything the Position Manager logged on the record while the close was in flight.
+  await updateAiTrades((current) => current.map((item) => (item.id === tradeId && isOpenAiTrade(item) ? { ...closed, managerReviews: item.managerReviews ?? closed.managerReviews, managerLastReviewAt: item.managerLastReviewAt ?? closed.managerLastReviewAt } : item)))
   aiExchangeSummaryCache[trade.aiTradingMode] = null
   return closed
 }
@@ -10585,6 +10613,7 @@ async function monitorAiTrades() {
     const changes = new Map()
 
     for (const trade of open) {
+      if (aiTradesBeingManaged.has(trade.id)) continue // the Position Manager is mid-change on this trade's orders
       try {
         let next = trade
         if (isBinanceExecutedTrade(trade)) {
@@ -10618,6 +10647,240 @@ async function monitorAiTrades() {
     aiMonitorRunning = false
   }
 }
+
+// ---- AI Trading: Position Manager -------------------------------------------
+// The fifth AI role. Every AI_POSITION_MANAGER_INTERVAL_MS an open AI trade is handed to the Position Manager model with a fresh
+// market snapshot; it answers HOLD / MOVE_TO_BREAKEVEN / TIGHTEN_STOP / LET_PROFIT_RUN / EXTEND_TAKE_PROFIT / PARTIAL_TAKE_PROFIT /
+// EXIT_NOW and this block executes it (see ai-trading/position-manager.js for the prompt and the safety checks). The software
+// applies no trading rules of its own: it supplies information, validates the order can be sent without adding risk, and executes.
+// Real-money positions are reviewed too, but only acted on when execution.positionManagerActsOnReal is switched on.
+const aiTradesBeingManaged = new Set()
+let aiManagerCycleRunning = false
+
+function diffTradeFields(before, after) {
+  const changes = {}
+  for (const key of Object.keys(after)) {
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) changes[key] = after[key]
+  }
+  return changes
+}
+
+// New protection first, then retire the old orders: if Binance rejects the replacement the position keeps its current orders.
+async function replaceAiProtectiveOrders(trade, { stop, takeProfit, quantity }, { apiKey, secretKey, baseUrl }) {
+  const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), trade.symbol)
+  if (!symbolInfo) throw new Error(`No futures symbol rules found for ${trade.symbol}.`)
+  const seed = `xenios${Date.now()}ai`
+  const place = async (type, price, suffix) => {
+    const mode = getProtectiveTriggerRoundMode(trade.side, type)
+    const trigger = normalizeFuturesPrice(symbolInfo, price, mode)
+    const order = await placeBinanceAlgoOrder({
+      apiKey, secretKey, baseUrl, algoType: 'CONDITIONAL', symbol: trade.symbol, side: getOppositeTradeSide(trade.side), type,
+      triggerPrice: formatFuturesPrice(symbolInfo, trigger, mode), quantity: formatFuturesQuantity(symbolInfo, quantity),
+      reduceOnly: 'true', workingType: 'CONTRACT_PRICE', priceProtect: 'TRUE', clientAlgoId: `${seed}_${suffix}`,
+    })
+    return { order, trigger }
+  }
+
+  let newStop = null
+  let newTakeProfit = null
+  try {
+    newStop = await place('STOP_MARKET', stop, 'sl')
+    if (takeProfit != null) newTakeProfit = await place('TAKE_PROFIT_MARKET', takeProfit, 'tp')
+  } catch (error) {
+    await Promise.allSettled([newStop, newTakeProfit].filter(Boolean).map(({ order }) => cancelProtectiveOrder({
+      symbol: trade.symbol, orderId: order.orderId, algoId: order.algoId, clientAlgoId: order.clientAlgoId, apiKey, secretKey, baseUrl,
+    })))
+    throw error
+  }
+  await cancelProtectiveOrdersForTrade(trade, { apiKey, secretKey, baseUrl })
+  return {
+    stopLoss: newStop.trigger,
+    takeProfit: newTakeProfit ? newTakeProfit.trigger : null,
+    exchangeStopOrderId: newStop.order.orderId || null,
+    exchangeStopClientOrderId: newStop.order.clientOrderId || null,
+    exchangeStopAlgoId: newStop.order.algoId || null,
+    exchangeStopAlgoClientId: newStop.order.clientAlgoId || null,
+    exchangeTakeProfitOrderId: newTakeProfit?.order.orderId || null,
+    exchangeTakeProfitClientOrderId: newTakeProfit?.order.clientOrderId || null,
+    exchangeTakeProfitAlgoId: newTakeProfit?.order.algoId || null,
+    exchangeTakeProfitAlgoClientId: newTakeProfit?.order.clientAlgoId || null,
+  }
+}
+
+/** Executes a validated plan (no full exit) on a Binance trade. Returns the updated record and, if a step after a partial close failed, the error. */
+async function executeAiPlanOnExchange(trade, plan, price, credentials) {
+  let next = trade
+  let remaining = Number(trade.quantity)
+  if (plan.partialPct) {
+    const snapshot = await fetchBinanceAccountSnapshot(credentials)
+    const openAmount = Math.abs(getExchangePositionAmount(snapshot, trade.symbol))
+    if (!(openAmount > 1e-8)) throw new Error('The position is no longer open on the exchange.')
+    const symbolInfo = findSymbolRules(await fetchFuturesExchangeInfo(), trade.symbol)
+    const lot = symbolInfo && (getFilter(symbolInfo, 'MARKET_LOT_SIZE') || getFilter(symbolInfo, 'LOT_SIZE'))
+    if (!lot) throw new Error(`No lot size rules for ${trade.symbol}.`)
+    const closeQuantity = roundDownToStep(openAmount * (plan.partialPct / 100), Number(lot.stepSize))
+    if (closeQuantity < Number(lot.minQty) || openAmount - closeQuantity < Number(lot.minQty)) {
+      throw new Error(`A ${plan.partialPct}% partial close is below the minimum lot size for ${trade.symbol} (position ${openAmount}).`)
+    }
+    const result = await closeExchangePositionImmediately({ symbol: trade.symbol, side: trade.side, quantity: closeQuantity, symbolInfo, ...credentials })
+    next = applyPartialClose(next, { quantity: closeQuantity, price: result.exitPrice || price, at: result.closedAt, orderId: result.order?.orderId })
+    remaining = openAmount - closeQuantity
+  }
+
+  if (plan.partialPct || plan.newStop != null || plan.newTakeProfit != null) {
+    const stop = plan.newStop ?? Number(next.stopLoss)
+    const takeProfit = plan.newTakeProfit === 'REMOVE' ? null : (plan.newTakeProfit ?? (Number(next.takeProfit) > 0 ? Number(next.takeProfit) : null))
+    try {
+      next = { ...next, ...(await replaceAiProtectiveOrders(next, { stop, takeProfit, quantity: remaining }, credentials)) }
+    } catch (error) {
+      if (!plan.partialPct) throw error // nothing changed on the exchange: report it as a failed action
+      return { trade: next, error: `Partial close executed, but re-sizing the stop/target failed: ${error instanceof Error ? error.message : error}` }
+    }
+  }
+  return { trade: next, error: null }
+}
+
+/** The same plan on a local paper trade (no exchange keys): just edit the record. */
+function executeAiPlanOnPaperTrade(trade, plan, price) {
+  let next = trade
+  if (plan.partialPct) next = applyPartialClose(next, { quantity: Number(trade.quantity) * (plan.partialPct / 100), price })
+  if (plan.newStop != null) next = { ...next, stopLoss: plan.newStop }
+  if (plan.newTakeProfit === 'REMOVE') next = { ...next, takeProfit: null }
+  else if (plan.newTakeProfit != null) next = { ...next, takeProfit: plan.newTakeProfit }
+  return next
+}
+
+function describeAppliedPlan(plan, price) {
+  const bits = []
+  if (plan.closeAll) bits.push('closed the whole position')
+  if (plan.partialPct) bits.push(`took ${plan.partialPct}% off`)
+  if (plan.newStop != null) bits.push(`stop -> ${plan.newStop}`)
+  if (plan.newTakeProfit === 'REMOVE') bits.push('target removed (open-ended)')
+  else if (plan.newTakeProfit != null) bits.push(`target -> ${plan.newTakeProfit}`)
+  return bits.length ? `${bits.join(', ')} (price ${price})` : null
+}
+
+async function persistAiTradeReview(tradeId, applyChanges, review, recordOptions) {
+  return updateAiTrades((current) => current.map((item) => {
+    if (item.id !== tradeId) return item
+    const merged = applyChanges && isOpenAiTrade(item) ? { ...item, ...applyChanges } : item
+    return recordReview({ ...merged, managerLastError: null }, review, recordOptions)
+  }))
+}
+
+async function runPositionManagerReview(tradeId) {
+  if (aiTradesBeingManaged.has(tradeId)) return null
+  aiTradesBeingManaged.add(tradeId)
+  try {
+    const trade = (await getAiTrades()).find((item) => item.id === tradeId)
+    if (!trade || !isOpenAiTrade(trade)) return null
+    await getSettings() // refresh the provider-credential mirror the LLM caller reads
+    const config = await getAiTradingConfig()
+    const agent = config.agents.manager
+    const canAct = trade.aiTradingMode === 'testnet' || config.execution.positionManagerActsOnReal
+
+    let review
+    let metrics
+    let price
+    try {
+      const entryContext = trade.entryContext || buildEntryContext((await getAiTradingRuns()).find((run) => run.id === trade.aiRunId))
+      const inputs = await getAiMarketInputs(trade.symbol)
+      const snapshot = buildMarketSnapshot({ symbol: trade.symbol, ...inputs })
+      const flowMetrics = (await getAiFlowData(trade.symbol, snapshot).catch(() => null))?.metrics || null
+      price = Number((await fetchTickerPrice(trade.symbol).catch(() => null))?.price) || snapshot.price
+      metrics = computeTradeMetrics({ trade, price, candles: inputs.entry })
+      const { systemPrompt, userPrompt } = positionManagerPrompts({
+        trade, entryContext, metrics, snapshot, flowMetrics, previousReviews: trade.managerReviews || [], testMode: entryContext?.testMode === true,
+      })
+      const answer = await callAgentJson({ providerId: agent.providerId, model: agent.model, systemPrompt, userPrompt })
+      review = parsePositionManagerOutput(answer.json)
+    } catch (error) {
+      // No usable review changes nothing: the trade keeps its current orders. Stamp the time so a broken model is retried on the normal cadence.
+      const message = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 240)
+      console.warn(`[ai-trading] Position Manager could not review ${trade.symbol}: ${message}`)
+      await updateAiTrades((current) => current.map((item) => (item.id === tradeId ? { ...item, managerLastReviewAt: Date.now(), managerLastError: message } : item)))
+      return null
+    }
+
+    const plan = planPositionAction({ trade, review, price })
+    const hasChange = plan.ok && (plan.closeAll || plan.partialPct || plan.newStop != null || plan.newTakeProfit != null)
+    const recordOptions = { at: Date.now(), metrics }
+    let result = null
+
+    if (!plan.ok) {
+      Object.assign(recordOptions, { executed: false, rejectedReason: plan.reason })
+      await persistAiTradeReview(tradeId, null, review, recordOptions)
+    } else if (!hasChange) {
+      await persistAiTradeReview(tradeId, null, review, plan.notes.length ? { ...recordOptions, applied: plan.notes[0] } : recordOptions)
+    } else if (!canAct) {
+      await persistAiTradeReview(tradeId, null, review, { ...recordOptions, advisoryOnly: true })
+    } else {
+      const environment = getAiEnvironment(trade.aiTradingMode)
+      const settings = await getSettings()
+      const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
+      const credentials = { apiKey, secretKey, baseUrl: getFuturesBaseUrl(environment) }
+      try {
+        if (plan.closeAll) {
+          await closeAiTradeNow(tradeId, { closedBy: 'position-manager' })
+          await persistAiTradeReview(tradeId, null, review, { ...recordOptions, applied: describeAppliedPlan(plan, price) })
+        } else {
+          let next
+          let warning = null
+          if (isBinanceExecutedTrade(trade)) {
+            if (!apiKey || !secretKey) throw new Error('Binance API keys are required to change this trade.')
+            ;({ trade: next, error: warning } = await executeAiPlanOnExchange(trade, plan, price, credentials))
+          } else {
+            next = executeAiPlanOnPaperTrade(trade, plan, price)
+          }
+          await persistAiTradeReview(tradeId, diffTradeFields(trade, next), review, { ...recordOptions, applied: describeAppliedPlan(plan, price), ...(warning ? { warning } : {}) })
+        }
+        aiExchangeSummaryCache[trade.aiTradingMode] = null
+      } catch (error) {
+        const message = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 240)
+        console.warn(`[ai-trading] Position Manager action failed on ${trade.symbol}: ${message}`)
+        await persistAiTradeReview(tradeId, null, review, { ...recordOptions, executed: false, rejectedReason: `Could not execute: ${message}` })
+      }
+    }
+
+    console.log(`[ai-trading] Position Manager ${trade.symbol} ${metrics.rMultiple}R: ${review.decision} (thesis ${review.thesisConfidence}%)${plan.ok ? '' : ` — rejected: ${plan.reason}`}${!canAct && hasChange ? ' — advisory only' : ''}`)
+    result = (await getAiTrades()).find((item) => item.id === tradeId) || null
+    return result
+  } finally {
+    aiTradesBeingManaged.delete(tradeId)
+  }
+}
+
+async function runPositionManagerCycle() {
+  if (aiManagerCycleRunning) return
+  aiManagerCycleRunning = true
+  try {
+    const now = Date.now()
+    const due = (await getAiTrades()).filter((trade) => isOpenAiTrade(trade)
+      && !aiTradesBeingManaged.has(trade.id)
+      && now - Number(trade.managerLastReviewAt || trade.transactTime || 0) >= AI_POSITION_MANAGER_INTERVAL_MS)
+    for (const trade of due) {
+      await runPositionManagerReview(trade.id).catch((error) => {
+        console.warn('[ai-trading] Position Manager review failed:', error instanceof Error ? error.message : error)
+      })
+    }
+  } finally {
+    aiManagerCycleRunning = false
+  }
+}
+
+app.post('/api/ai-trading/trades/:tradeId/review', async (request, response) => {
+  try {
+    const tradeId = String(request.params.tradeId || '')
+    const trade = (await getAiTrades()).find((item) => item.id === tradeId)
+    if (!trade) throw new AiExecutionError('Trade not found.', 404)
+    if (!isOpenAiTrade(trade)) throw new AiExecutionError('Only open trades can be reviewed.')
+    if (aiTradesBeingManaged.has(tradeId)) throw new AiExecutionError('A review of this trade is already running.')
+    const updated = await runPositionManagerReview(tradeId)
+    response.json({ ok: true, trade: updated || trade })
+  } catch (error) {
+    sendAiExecutionError(response, error)
+  }
+})
 
 function sendAiExecutionError(response, error) {
   if (error instanceof AiExecutionError) {
@@ -11494,6 +11757,13 @@ if (IS_MAIN_MODULE) {
       console.error('Failed to run AI Trading auto-scan:', error)
     })
   }, AI_SCAN_INTERVAL_MS)
+
+  // Checks once a minute which open AI trades are due a Position Manager review (one every AI_POSITION_MANAGER_INTERVAL_MS).
+  setInterval(() => {
+    runPositionManagerCycle().catch((error) => {
+      console.error('Failed to run AI Trading Position Manager:', error)
+    })
+  }, 60_000)
 }
 
 setInterval(() => {

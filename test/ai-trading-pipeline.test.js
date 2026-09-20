@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_AI_TRADING_CONFIG, normalizeAiTradingConfig } from '../src/lib/aiTrading.js'
 import {
-  buildMarketSnapshot, evaluateGates, parseAnalystOutput, parseCriticOutput, parseDecisionOutput, parseFlowOutput, parseRiskProposal, runAiTradingPipeline, runRiskManager,
+  buildMarketSnapshot, evaluateGates, parseAnalystOutput, parseCriticOutput, parseFlowOutput, parseRiskProposal, runAiTradingPipeline, runRiskManager,
 } from '../server/ai-trading/pipeline.js'
 import { classifyOiPriceRegime, collectFlowData, describeFlow, summarizeFlow } from '../server/ai-trading/flow-data.js'
 import { createQuantStatsAccumulator, lookupQuantEdge, stopLossBucket } from '../server/ai-trading/quant-stats.js'
@@ -27,7 +27,10 @@ test('normalizeAiTradingConfig: defaults, unknown providers, risk is not user-co
   assert.equal(cleaned.agents.analyst.providerId, '', 'unknown provider becomes unassigned')
   assert.equal(cleaned.agents.analyst.model, 'm')
   assert.equal(cleaned.agents.critic.providerId, 'openai')
-  assert.equal(cleaned.agents.decision.providerId, 'anthropic', 'missing entry falls back to the default')
+  assert.equal(cleaned.agents.manager.providerId, 'anthropic', 'missing entry falls back to the default')
+  assert.equal(cleaned.agents.decision, undefined, 'the Decision Agent no longer exists')
+  assert.equal(normalizeAiTradingConfig({ agents: { decision: { providerId: 'claude', model: 'm' } } }).agents.manager.providerId, 'claude', 'a saved Decision assignment is inherited by the Position Manager')
+  assert.equal(normalizeAiTradingConfig({ agents: { decision: { providerId: 'claude' }, manager: { providerId: 'openai' } } }).agents.manager.providerId, 'openai', 'an explicit manager entry wins')
   assert.deepEqual(cleaned.risk, DEFAULT_AI_TRADING_CONFIG.risk, 'a client-supplied risk block is ignored: the ceilings are fixed in code')
   assert.equal(cleaned.risk.vetoOnNegativeEv, undefined, 'the backtest veto setting no longer exists')
   assert.deepEqual(normalizeAiTradingConfig({ risk: { riskPerTradePct: 50, maxLeverage: 99 } }).risk, DEFAULT_AI_TRADING_CONFIG.risk)
@@ -154,7 +157,6 @@ test('parsers reject malformed agent output', () => {
   assert.throws(() => parseAnalystOutput({ action: 'LONG', confidence: 'high', stopLossPercent: 1, takeProfitPercent: 2 }), /confidence/)
   assert.throws(() => parseCriticOutput({ verdict: 'MAYBE' }), /invalid verdict/)
   assert.equal(parseCriticOutput({ verdict: 'reject', objections: [{ issue: 'x', severity: 'HIGH' }, { issue: '' }] }).objections.length, 1)
-  assert.throws(() => parseDecisionOutput({ decision: 'LONG', confidence: null }), /confidence/)
 })
 
 test('resolveProviderCall: reports a missing key rather than throwing', () => {
@@ -180,7 +182,6 @@ const marketInputs = () => ({
 // Wide, deliberately generous stop/target so the ATR floor never interferes with the scripted scenarios.
 const ANALYST_LONG = { action: 'LONG', confidence: 72, regime: 'TRENDING_UP', stopLossPercent: 1.5, takeProfitPercent: 4, keyFactors: ['trend'], reasoning: 'Trend continuation.' }
 const CRITIC_PASS = { verdict: 'PASS', objections: [], reasoning: 'Nothing material.' }
-const DECISION_LONG = { decision: 'LONG', confidence: 75, reasoning: 'Agents agree.' }
 const FLOW_SUPPORTS = { verdict: 'SUPPORTS', crowding: 'LOW', flags: [{ issue: 'OI rising with price (+1.8%)', severity: 'low' }], reasoning: 'New longs opening without crowding.' }
 const FLOW_DATA = { metrics: { fundingRatePct: 0.005, oiChange1hPct: 1.8, oiPriceRegime: 'new longs opening (price up, OI up)', longShortRatio: 1.1 }, sources: { premium: true, openInterest: true }, derivativesSources: 5 }
 
@@ -189,14 +190,14 @@ function fakeAgents(overrides = {}) {
   const prompts = {}
   const analystReply = overrides.analyst || ANALYST_LONG
   // By default the Risk Manager approves exactly the Analyst's stop/target at the configured risk and leverage caps.
-  const defaultRisk = { decision: 'APPROVE', stopLossPercent: analystReply.stopLossPercent, takeProfitPercent: analystReply.takeProfitPercent, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Sized within limits.' }
-  const replies = { analyst: ANALYST_LONG, flow: FLOW_SUPPORTS, critic: CRITIC_PASS, risk: defaultRisk, decision: DECISION_LONG, ...overrides }
+  const defaultRisk = { decision: 'APPROVE', confidence: 75, stopLossPercent: analystReply.stopLossPercent, takeProfitPercent: analystReply.takeProfitPercent, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Sized within limits.' }
+  const replies = { analyst: ANALYST_LONG, flow: FLOW_SUPPORTS, critic: CRITIC_PASS, risk: defaultRisk, ...overrides }
   const callAgent = async ({ systemPrompt, userPrompt, providerId }) => {
     const role = /You are the Market Analyst\./.test(systemPrompt)
       ? 'analyst'
       : /You are the Market Flow Agent\./.test(systemPrompt)
         ? 'flow'
-        : /You are the Critic\./.test(systemPrompt) ? 'critic' : /You are the Decision Agent\./.test(systemPrompt) ? 'decision' : 'risk'
+        : /You are the Critic\./.test(systemPrompt) ? 'critic' : 'risk'
     calls.push(role)
     prompts[role] = userPrompt
     const reply = replies[role]
@@ -218,13 +219,16 @@ async function run({
   return { result, calls: fake.calls, prompts: fake.prompts }
 }
 
-test('pipeline: all five stages agree -> approved trade with a Risk Manager plan', async () => {
+test('pipeline: all four entry stages agree -> approved trade with a Risk Manager plan and the Risk Manager\'s confidence', async () => {
   const { result, calls } = await run()
-  assert.deepEqual(result.stages.map((stage) => stage.id), ['analyst', 'flow', 'critic', 'risk', 'decision'])
+  assert.deepEqual(result.stages.map((stage) => stage.id), ['analyst', 'flow', 'critic', 'risk'])
   assert.ok(result.stages.every((stage) => stage.status === 'ok'), JSON.stringify(result.stages.map((s) => [s.id, s.status, s.error])))
-  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk', 'decision'])
+  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'])
   assert.equal(result.final.approved, true)
   assert.equal(result.final.action, 'LONG')
+  assert.equal(result.final.confidence, 75, 'the final confidence is the Risk Manager\'s')
+  assert.ok(!result.stages.some((stage) => stage.id === 'decision'), 'there is no Decision stage any more')
+  assert.ok(result.entrySnapshot && result.entrySnapshot.price > 0, 'the entry market state is recorded for the Position Manager')
   assert.equal(result.final.trade.side, 'LONG')
   assert.ok(result.final.trade.stopLoss < result.price)
   assert.equal(result.advisoryOnly, true)
@@ -235,14 +239,14 @@ test('pipeline: Analyst HOLD ends the run without spending on later agents', asy
   const { result, calls } = await run({ agents: { analyst: { action: 'HOLD', confidence: 30, stopLossPercent: 1, takeProfitPercent: 2, reasoning: 'Chop.' } } })
   assert.deepEqual(calls, ['analyst'])
   assert.equal(result.final.action, 'HOLD')
-  assert.deepEqual(result.stages.slice(1).map((stage) => stage.status), ['skipped', 'skipped', 'skipped', 'skipped'])
+  assert.deepEqual(result.stages.slice(1).map((stage) => stage.status), ['skipped', 'skipped', 'skipped'])
 })
 
-test('pipeline: Critic REJECT blocks the trade and the Decision Agent is never consulted', async () => {
+test('pipeline: Critic REJECT blocks the trade and the Risk Manager is never consulted', async () => {
   const { result, calls } = await run({ agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'Chasing an extended move', severity: 'high' }], reasoning: 'No.' } } })
   assert.deepEqual(calls, ['analyst', 'flow', 'critic'])
   assert.equal(result.final.action, 'HOLD')
-  assert.equal(result.stages.find((stage) => stage.id === 'decision').status, 'skipped')
+  assert.equal(result.stages.find((stage) => stage.id === 'risk').status, 'skipped')
   assert.equal(result.final.gates.find((gate) => gate.id === 'critic').passed, false)
 })
 
@@ -251,7 +255,7 @@ test('pipeline: Market Flow AGAINST blocks the trade and no later paid stage is 
   assert.deepEqual(calls, ['analyst', 'flow'])
   assert.equal(result.final.action, 'HOLD')
   assert.equal(result.final.gates.find((gate) => gate.id === 'flow').passed, false)
-  assert.deepEqual(result.stages.slice(2).map((stage) => stage.status), ['skipped', 'skipped', 'skipped'])
+  assert.deepEqual(result.stages.slice(2).map((stage) => stage.status), ['skipped', 'skipped'])
   assert.match(result.final.reason, /Market Flow Agent|Critic Agent/)
   assert.match(result.final.reason, /Blocked before the Critic Agent/)
 })
@@ -263,7 +267,7 @@ test('pipeline: the Market Flow stage records the evidence next to its verdict, 
   assert.equal(flow.output.metrics.oiPriceRegime, 'new longs opening (price up, OI up)')
   assert.match(prompts.flow, /Open interest/)
   assert.match(prompts.critic, /Market Flow Agent: SUPPORTS/)
-  assert.match(prompts.decision, /Market Flow Agent: SUPPORTS/)
+  assert.match(prompts.risk, /Market Flow Agent: SUPPORTS/)
 })
 
 test('pipeline: fails closed when flow data is unavailable or the flow agent has no provider — and spends nothing after', async () => {
@@ -282,13 +286,12 @@ test('pipeline: fails closed when flow data is unavailable or the flow agent has
   assert.deepEqual(noKey.calls, ['analyst', 'flow'])
 })
 
-test('backtest stats are background only: a negative history no longer blocks, and is shown to the Risk Manager and Decision Agent', async () => {
+test('backtest stats are background only: a negative history no longer blocks, and is shown to the Risk Manager', async () => {
   const { result, prompts, calls } = await run({ stats: negativeStats })
   assert.equal(result.final.approved, true, 'negative backtest EV must not veto on its own any more')
-  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk', 'decision'])
+  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'])
   assert.match(prompts.risk, /Backtest background/)
   assert.match(prompts.risk, /EV -/)
-  assert.match(prompts.decision, /Backtest background/)
   assert.ok(!/Backtest background/.test(prompts.flow), 'the Flow Agent judges positioning only')
   assert.equal(result.stages.find((stage) => stage.id === 'risk').output.backtest.verdict, 'AGAINST')
   assert.ok(!result.stages.some((stage) => stage.id === 'quant'))
@@ -305,16 +308,24 @@ test('pipeline: a Risk Manager veto blocks the trade even with every agent in fa
   assert.match(result.stages.find((stage) => stage.id === 'risk').summary, /Veto/)
 })
 
-test('pipeline: the Decision Agent can downgrade but never flip direction', async () => {
-  const downgrade = await run({ agents: { decision: { decision: 'HOLD', confidence: 80, reasoning: 'Not convinced.' } } })
-  assert.equal(downgrade.result.final.action, 'HOLD')
+test('pipeline: the Risk Manager confidence is the entry gate; REDUCE opens a smaller trade; there is no second AI after it', async () => {
+  const timid = await run({ agents: { risk: { decision: 'APPROVE', confidence: 40, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Meh.' } } })
+  assert.equal(timid.result.final.approved, false, 'approved sizing is not enough: the confidence must reach the minimum')
+  assert.equal(timid.result.final.trade, null)
+  assert.equal(timid.result.final.gates.find((gate) => gate.id === 'risk').passed, false)
+  assert.match(timid.result.final.reason, /confidence/i)
 
-  const flip = await run({ agents: { decision: { decision: 'SHORT', confidence: 90, reasoning: 'Reverse it.' } } })
-  assert.equal(flip.result.final.action, 'HOLD')
-  assert.equal(flip.result.final.trade, null)
+  const atMinimum = await run({ agents: { risk: { decision: 'APPROVE', confidence: config.risk.minConfidence, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Just enough.' } } })
+  assert.equal(atMinimum.result.final.approved, true, 'a confidence exactly at the minimum passes')
 
-  const timid = await run({ agents: { decision: { decision: 'LONG', confidence: 40, reasoning: 'Meh.' } } })
-  assert.equal(timid.result.final.action, 'HOLD')
+  const reduce = await run({ agents: { risk: { decision: 'REDUCE', confidence: 68, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.3, leverage: 2, concerns: ['Crowded'], reasoning: 'Real but weaker.' } } })
+  assert.equal(reduce.result.final.approved, true)
+  assert.equal(reduce.result.final.trade.maxLossUsdt, 3, '0.3% of 1000')
+  const reduced = reduce.result.stages.find((stage) => stage.id === 'risk').output
+  assert.equal(reduced.reduced, true)
+  assert.equal(reduced.ai.decision, 'REDUCE')
+  assert.match(reduce.result.stages.find((stage) => stage.id === 'risk').summary, /Approved/)
+  assert.deepEqual(reduce.calls, ['analyst', 'flow', 'critic', 'risk'])
 })
 
 test('pipeline: fails closed when a provider is unconfigured, errors, or market data is missing', async () => {
@@ -327,9 +338,6 @@ test('pipeline: fails closed when a provider is unconfigured, errors, or market 
   assert.equal(criticDown.result.final.action, 'HOLD', 'no Critic verdict must never count as a pass')
   assert.equal(criticDown.result.stages.find((stage) => stage.id === 'critic').status, 'error')
 
-  const decisionDown = await run({ agents: { decision: new Error('timeout') } })
-  assert.equal(decisionDown.result.final.action, 'HOLD')
-
   const noData = await run({ getMarketInputs: async () => { throw new Error('exchange down') } })
   assert.equal(noData.result.final.action, 'HOLD')
   assert.match(noData.result.final.reason, /Market data unavailable/)
@@ -340,7 +348,7 @@ test('pipeline: fails closed when a provider is unconfigured, errors, or market 
   assert.equal(thin.calls.length, 0)
 })
 
-test('AI Risk Manager: a VETO blocks the trade and the Decision Agent is never consulted', async () => {
+test('AI Risk Manager: a VETO blocks the trade (and needs no confidence)', async () => {
   const { result, calls } = await run({ agents: { risk: { decision: 'VETO', concerns: ['Thin book'], reasoning: 'Liquidity is too poor to size this safely.' } } })
   assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'])
   assert.equal(result.final.action, 'HOLD')
@@ -351,7 +359,7 @@ test('AI Risk Manager: a VETO blocks the trade and the Decision Agent is never c
 })
 
 test('AI Risk Manager: asking for more risk or leverage than the limits allow is clamped, never honoured', async () => {
-  const { result } = await run({ agents: { risk: { decision: 'APPROVE', stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 25, leverage: 100, concerns: [], reasoning: 'YOLO.' } } })
+  const { result } = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 25, leverage: 100, concerns: [], reasoning: 'YOLO.' } } })
   const risk = result.stages.find((stage) => stage.id === 'risk').output
   assert.equal(risk.approved, true)
   assert.ok(risk.plan.maxLossUsdt <= config.risk.accountEquityUsdt * config.risk.riskPerTradePct / 100 + 0.01, `max loss ${risk.plan.maxLossUsdt} exceeds the risk cap`)
@@ -361,12 +369,12 @@ test('AI Risk Manager: asking for more risk or leverage than the limits allow is
 })
 
 test('AI Risk Manager: it can size below the cap, and a plan that still breaks a limit is rejected', async () => {
-  const cautious = await run({ agents: { risk: { decision: 'APPROVE', stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.25, leverage: 2, concerns: [], reasoning: 'Weak conviction.' } } })
+  const cautious = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.25, leverage: 2, concerns: [], reasoning: 'Weak conviction.' } } })
   assert.equal(cautious.result.final.approved, true)
   assert.equal(cautious.result.final.trade.maxLossUsdt, 2.5) // 0.25% of 1000
   assert.ok(cautious.result.final.trade.leverage <= 2)
 
-  const tooTight = await run({ agents: { risk: { decision: 'APPROVE', stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Tiny target.' } } })
+  const tooTight = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Tiny target.' } } })
   assert.equal(tooTight.result.final.action, 'HOLD', 'reward:risk below the minimum is vetoed by code even though the model approved')
   assert.match(tooTight.result.stages.find((stage) => stage.id === 'risk').output.vetoReasons[0], /Reward:risk/)
 })
@@ -375,9 +383,8 @@ test('AI Risk Manager: no usable answer is a veto, never unchecked sizing', asyn
   const down = await run({ agents: { risk: new Error('HTTP 500') } })
   assert.equal(down.result.final.action, 'HOLD')
   assert.equal(down.result.stages.find((stage) => stage.id === 'risk').status, 'error')
-  assert.ok(!down.calls.includes('decision'))
 
-  const malformed = await run({ agents: { risk: { decision: 'APPROVE', stopLossPercent: 1 } } })
+  const malformed = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1 } } })
   assert.equal(malformed.result.final.action, 'HOLD')
   assert.match(malformed.result.stages.find((stage) => stage.id === 'risk').error, /positive/)
 })
@@ -392,9 +399,13 @@ test('AI Risk Manager: is not called (and not paid for) once an earlier gate has
 test('parseRiskProposal + legacy config', () => {
   assert.equal(parseRiskProposal({ decision: 'reject' }).decision, 'VETO')
   assert.throws(() => parseRiskProposal({ decision: 'MAYBE' }), /invalid decision/)
-  assert.throws(() => parseRiskProposal({ decision: 'APPROVE', stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: null }), /leverage/)
+  assert.equal(parseRiskProposal({ decision: 'REDUCE', confidence: 64, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 0.3, leverage: 2 }).decision, 'REDUCE')
+  assert.throws(() => parseRiskProposal({ decision: 'APPROVE', stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 2 }), /confidence/, 'an approval without a confidence is an error, not a silent pass')
+  assert.equal(parseRiskProposal({ decision: 'VETO' }).confidence, null)
+  assert.throws(() => parseRiskProposal({ decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: null }), /leverage/)
 
   const legacy = normalizeAiTradingConfig({ agents: { analyst: { providerId: 'google' }, critic: { providerId: 'openai' }, decision: { providerId: 'openai' } } })
+  assert.equal(legacy.agents.manager.providerId, 'openai')
   assert.equal(legacy.agents.risk.providerId, 'google', 'a config saved before the Risk Manager became an AI agent reuses the Analyst provider')
   assert.equal(normalizeAiTradingConfig({ agents: { risk: { providerId: 'xai' } } }).agents.risk.providerId, 'xai')
 })
@@ -403,7 +414,7 @@ test('evaluateGates: an absent stage never passes its gate by default', () => {
   const gates = evaluateGates({ analyst: { action: 'LONG', confidence: 70 }, config })
   assert.equal(gates.find((gate) => gate.id === 'critic').passed, false)
   assert.equal(gates.find((gate) => gate.id === 'risk').passed, false)
-  assert.equal(gates.find((gate) => gate.id === 'decision').passed, false)
+  assert.equal(gates.find((gate) => gate.id === 'decision'), undefined, 'the Decision gate no longer exists')
 })
 
 // ---- provider caller (against local fake servers, no real network) --------
@@ -852,7 +863,7 @@ test('claude provider: agent-only, needs no key, is separate from the API-key An
   assert.equal(getAiProvider('anthropic').localLogin, undefined)
   assert.equal(resolveProviderCall('claude').configured, true)
   assert.equal(resolveProviderCall('claude', ' claude-x ').model, 'claude-x')
-  assert.equal(normalizeAiTradingConfig({ agents: { decision: { providerId: 'claude', model: '' } } }).agents.decision.providerId, 'claude')
+  assert.equal(normalizeAiTradingConfig({ agents: { manager: { providerId: 'claude', model: '' } } }).agents.manager.providerId, 'claude')
   assert.equal(isLocalLoginReady({ claude: { available: true, loggedIn: true } }, 'claude'), true)
   assert.equal(isLocalLoginReady({ claude: { available: true, loggedIn: false } }, 'claude'), false)
   assert.equal(isLocalLoginReady(null, 'claude'), false)
@@ -918,4 +929,69 @@ test('runClaudeAgent: not logged in / SDK missing are NOT_CONFIGURED, failures s
     /Claude timed out after 0s/,
   )
   assert.deepEqual(await getClaudeAgentStatus({ loadModule: fakeClaude().loadModule, hasLogin: async () => true }), { available: true, loggedIn: true })
+})
+
+// ---- Test mode (testnet-only pipeline check) ----------------------------------------------------------------------
+
+test('test mode: only honoured in testnet mode, off by default, and not settable by accident', () => {
+  assert.equal(normalizeAiTradingConfig(null).scan.testMode, false)
+  assert.equal(normalizeAiTradingConfig({ scan: { testMode: true } }).scan.testMode, true, 'default mode is testnet')
+  assert.equal(normalizeAiTradingConfig({ scan: { testMode: 'true' } }).scan.testMode, false, 'needs an explicit true')
+  assert.equal(normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { testMode: true } }).scan.testMode, false, 'never in real-money mode')
+})
+
+test('test mode: changes the Analyst, Critic and Risk prompts; Flow wording and the code gates are untouched', async () => {
+  const testCfg = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const seen = { normal: {}, test: {} }
+  for (const [key, cfg] of [['normal', config], ['test', testCfg]]) {
+    const fake = fakeAgents()
+    const spy = async (call) => {
+      const role = /You are the Market Analyst\./.test(call.systemPrompt) ? 'analyst' : /Market Flow Agent\./.test(call.systemPrompt) ? 'flow' : /You are the Critic\./.test(call.systemPrompt) ? 'critic' : 'risk'
+      seen[key][role] = `${call.systemPrompt}\n${call.userPrompt}`
+      return fake.callAgent(call)
+    }
+    const result = await runAiTradingPipeline({ symbol: 'BTCUSDT', config: cfg, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: spy, backtestStats: positiveStats })
+    assert.equal(result.testMode, key === 'test')
+  }
+  assert.doesNotMatch(seen.normal.analyst, /TEST MODE/)
+  assert.match(seen.normal.analyst, /genuine edge/)
+  assert.match(seen.test.analyst, /TEST MODE/)
+  assert.doesNotMatch(seen.test.analyst, /HOLD \/ rejecting is a good outcome/)
+  assert.equal(seen.test.flow, seen.normal.flow, 'the Flow prompt must not change in test mode')
+  assert.doesNotMatch(seen.test.flow, /TEST MODE/)
+  assert.match(seen.test.risk, /TEST MODE[\s\S]*VETO only if the trade is clearly unacceptable[\s\S]*size SMALL/)
+  assert.doesNotMatch(seen.test.risk, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
+  assert.doesNotMatch(seen.normal.risk, /TEST MODE/)
+  assert.match(seen.test.risk, /Fixed ceilings and gates are enforced in code/)
+  assert.match(seen.test.risk, /Fixed ceilings \(enforced in code/, 'the ceilings are still listed to the Risk Manager')
+  assert.match(seen.test.critic, /TEST MODE[\s\S]*REJECT only for a serious flaw/)
+  assert.doesNotMatch(seen.test.critic, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
+  assert.doesNotMatch(seen.normal.critic, /TEST MODE/)
+  assert.match(seen.normal.critic, /Your only job is to find reasons this trade should be rejected/, 'the normal Critic stays adversarial')
+})
+
+test('critic prompt: the Analyst\'s stop/target are provisional (the Risk Manager resizes them), in normal mode too', async () => {
+  const { prompts } = await run()
+  assert.match(prompts.critic, /provisional proposal[\s\S]*do not REJECT because the proposed stop or target/)
+  assert.doesNotMatch(prompts.critic, /stops that sit inside normal noise/)
+})
+
+test('test mode: a Critic REJECT still blocks the trade (only the Analyst is relaxed)', async () => {
+  const cfg = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const { result } = await run({ cfg, agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'x', severity: 'high' }], reasoning: 'No.' } } })
+  assert.equal(result.final.approved, false)
+})
+
+test('test mode: the code ceilings still cap a permissive Risk Manager (leverage/risk clamped, weak reward:risk rejected)', async () => {
+  const cfg = normalizeAiTradingConfig({ scan: { testMode: true } })
+  const greedy = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 50, leverage: 100, concerns: [], reasoning: 'Go big.' }
+  const { result } = await run({ cfg, agents: { risk: greedy } })
+  const plan = result.stages.find((stage) => stage.id === 'risk').output.plan
+  assert.ok(plan.leverage <= LIMITS.maxLeverage, `leverage ${plan.leverage} must be clamped to ${LIMITS.maxLeverage}`)
+  assert.ok(plan.riskPctOfEquity <= LIMITS.riskPerTradePct + 1e-9, `risk ${plan.riskPctOfEquity}% must be clamped to ${LIMITS.riskPerTradePct}%`)
+
+  const poorRr = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 2, concerns: [], reasoning: 'Tiny target.' }
+  const rejected = await run({ cfg, agents: { risk: poorRr } })
+  assert.equal(rejected.result.stages.find((stage) => stage.id === 'risk').output.approved, false, 'reward:risk below the ceiling is still rejected in test mode')
+  assert.equal(rejected.result.final.approved, false)
 })

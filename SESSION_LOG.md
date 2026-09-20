@@ -12,6 +12,18 @@ every session. Times are UTC. Server logs are UTC+8 (Asia/Manila).
 
 ## WHERE WE LEFT OFF  — as of 2026-09-20 (latest)
 
+### Position Manager replaces the Decision Agent — 2026-09-20 (deployed, server restarted, first live review seen)
+
+**Owner spec:** keep the architecture, change only the fifth AI role. Four AI agents decide entry (Analyst Codex, Flow Claude, Critic Codex, Risk Manager Codex); the Risk Manager is the FINAL entry approver (APPROVE / REDUCE / VETO + confidence; no Decision Agent). The fifth AI, **Position Manager (Claude)**, re-reviews every open trade every 5 min and decides HOLD / MOVE_TO_BREAKEVEN / TIGHTEN_STOP / LET_PROFIT_RUN / EXTEND_TAKE_PROFIT / PARTIAL_TAKE_PROFIT / EXIT_NOW. **No fixed trading rules in code** (R multiple etc. are prompt inputs only). Details: `docs/AI_TRADING.md` -> "Position Manager".
+
+**Built:** `server/ai-trading/position-manager.js` (metrics, prompt, parser, `planPositionAction` safety checks, partial/review bookkeeping), Position Manager block + review loop + `POST /api/ai-trading/trades/:id/review` in `mock-trading-server.js`, pipeline without the Decision stage (`confidence` on the Risk Manager, gate on it), config `decision` -> `manager` migration, `execution.positionManagerActsOnReal` (off), UI: Trade History -> Position Manager panel (timeline + Review now), report/model pages/homepage text. `npm test` 200/200.
+
+**Code-enforced safety (not trading rules):** a stop can only move toward profit and must be on the protective side of price; a target can only be extended/removed; partial 1-99%; size never added; invalid actions are rejected whole and the trade keeps its orders. On REAL money the Position Manager only advises unless "Position Manager acts on real money" is switched on in AI Settings.
+
+**Verified live:** one real Claude review of the open testnet XRPUSDT trade: HOLD, thesis 42%, -0.59R, good reasoning, saved. **NOT verified live:** any executed action on the exchange (stop replacement, partial close, target change, EXIT_NOW) — the exchange code paths are not unit-tested (no fake exchange); watch the first executed action closely and check the stop/target orders on the testnet account. Partial-close PnL accounting (`partialRealizedPnl` added at final close) is also untested against a real partial.
+
+**Still open from earlier:** the scan list is still the 10 TEMPORARY symbols (see the entry below); Critic is on Codex now (Gemini free tier = 20 calls/day).
+
 ### TEMPORARY: scan widened to 10 symbols + Claude/Codex agent providers — 2026-09-20 (deployed + server restarted)
 
 **Owner request:** waiting for the first AI testnet trade; widen the auto-scan so more setups appear, then **return to the basic symbols after testing**.

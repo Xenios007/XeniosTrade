@@ -11,6 +11,7 @@
 //     back as confirmation, and always scaled down to a hard margin cap.
 
 import { summarizeAccount } from '../../src/lib/accountMetrics.js'
+import { buildEntryContext } from './position-manager.js'
 
 export const AI_TRADE_SOURCE = 'AI_TRADING'
 export const AI_MODEL_ID = 'ai-trading'
@@ -170,6 +171,13 @@ export function buildAiTradeRecord({ run, plan, mode, scaled, execution, marginM
     quantity: Number(execution.quantity || scaled.quantityHint),
     stopLoss: Number(execution.stopLoss || stop),
     takeProfit: Number(execution.takeProfit || plan.takeProfit),
+    // What the entry agents set. The Position Manager may move the live stop / target later; these stay for its R maths and the report.
+    initialStopLoss: Number(execution.stopLoss || stop),
+    initialTakeProfit: Number(execution.takeProfit || plan.takeProfit),
+    initialQuantity: Number(execution.quantity || scaled.quantityHint),
+    // Why the trade was taken, kept here so the Position Manager still has the thesis after the run history rolls over.
+    entryContext: buildEntryContext(run),
+    managerReviews: [],
     entryPrice: Number(execution.entryPrice || plan.entryPrice),
     notional: Number(execution.notional || scaled.notional),
     margin: Number(scaled.margin.toFixed(4)),
@@ -213,7 +221,8 @@ export function settlePaperTrade(trade, price) {
   if (isLong ? price <= trade.stopLoss : price >= trade.stopLoss) {
     return { exitPrice: trade.stopLoss, status: 'CLOSED_SL', result: 'SL' }
   }
-  if (isLong ? price >= trade.takeProfit : price <= trade.takeProfit) {
+  // An open-ended trade (the Position Manager removed the target) has no take profit to hit; `price >= null` would read as 0.
+  if (isFinitePositive(trade.takeProfit) && (isLong ? price >= trade.takeProfit : price <= trade.takeProfit)) {
     return { exitPrice: trade.takeProfit, status: 'CLOSED_TP', result: 'TP' }
   }
   return null

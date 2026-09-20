@@ -5,6 +5,7 @@ import { Panel } from '../Panel'
 import { TradeHistoryStatsPanel } from '../TradeHistoryStatsPanel'
 import { TradeHistoryTable } from '../TradeHistoryTable'
 import { PageHeader } from '../ui/PageHeader'
+import { PositionManagerPanel } from './PositionManagerPanel'
 import { SubNavTabs } from '../ui/SubNavTabs'
 
 const TABS = [
@@ -53,6 +54,7 @@ function ModeHistory({ mode, ledger, refresh }) {
         title={mode === 'real' ? 'Real Money Performance' : 'Testnet Performance'}
         unsyncedBalanceNote="Starting balance plus what the AI's trades made — see the Wallet page for the exchange balance."
       />
+      <PositionManagerPanel mode={mode} trades={trades} refresh={refresh} />
       <TradeHistoryTable
         title={mode === 'real' ? 'Real Money Trade History' : 'Testnet Trade History'}
         trades={trades}

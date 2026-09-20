@@ -43,14 +43,13 @@ const EXAMPLE_STAGES = [
   { agent: 'Market Flow', result: 'NEUTRAL · crowding medium', tone: 'ok' },
   { agent: 'Critic', result: 'REJECT · entry into falling knife', tone: 'stop' },
   { agent: 'Risk Manager', result: 'Skipped — already blocked', tone: 'skip' },
-  { agent: 'Decision Agent', result: 'Skipped — already blocked', tone: 'skip' },
 ]
 
 const PLATFORM = [
   {
     Icon: Network,
     title: 'Five-agent review desk',
-    body: 'An Analyst proposes, Market Flow checks derivatives positioning, a Critic attacks the idea, a Risk Manager sizes it, and a Decision Agent confirms or holds.',
+    body: 'An Analyst proposes, Market Flow checks derivatives positioning, a Critic attacks the idea, and a Risk Manager gives the final approval. Once a trade is open, a Position Manager keeps re-reading it.',
   },
   {
     Icon: Bot,
@@ -369,7 +368,7 @@ export function HomePage({ authChecked, authenticated, googleEnabled, loginError
               host="ai.projxenios.trade"
               blurb="An on-demand, advisory desk that vets one trade idea at a time and returns Trade or No Trade — with the reasoning for every stage."
               points={[
-                'Analyst, Market Flow, Critic, Risk Manager and Decision agents',
+                'Analyst, Market Flow, Critic and Risk Manager decide the entry; a Position Manager watches the open trade',
                 'Pick the provider and model behind each agent',
                 'AI-decided risk, run history and full audit trail',
                 'Advisory only — it never places an order',
