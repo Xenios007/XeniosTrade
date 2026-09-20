@@ -9,7 +9,7 @@
 //    to the static `suggested` models in the provider catalog, clearly labelled.
 
 import crypto from 'node:crypto'
-import { AI_PROVIDERS, getAiProvider } from '../../src/lib/aiProviders.js'
+import { AI_PROVIDERS, getAiProvider, isProviderConnected } from '../../src/lib/aiProviders.js'
 import { redactSecrets } from '../ai-trading/llm.js'
 
 export const CATALOG_TTL_MS = 10 * 60 * 1000
@@ -170,8 +170,10 @@ export async function listProviderModels(providerId, credential, { now = Date.no
   const baseUrl = String(credential?.baseUrl || provider.baseUrl || '').trim().replace(/\/+$/, '')
   // Same rule as the Providers & Keys page: a keyless local server only counts once its URL is saved, not
   // because the catalog carries a default localhost address.
-  const connected = provider.keyless ? Boolean(String(credential?.baseUrl || '').trim()) : Boolean(apiKey)
-  const base = { providerId, label: provider.label, connected, fetchedAt: now() }
+  // A `localServer` provider (FinGPT) is built in: its URL is a fixed default, so it is always asked, and an offline
+  // process shows up as the "Could not list models" fallback below.
+  const connected = provider.localServer ? true : isProviderConnected(provider, credential, Boolean(apiKey))
+  const base = { providerId, label: (provider.customSlot && credential?.label) || provider.label, connected, fetchedAt: now() }
 
   const fallback = (error) => ({ ...base, source: 'catalog', error, models: suggestedModels(provider) })
 
@@ -209,5 +211,9 @@ export async function listProviderModels(providerId, credential, { now = Date.no
 
 /** Every catalog provider, in parallel. Unconnected ones just return their suggested models. */
 export async function listAllProviderModels(getCredential, options) {
-  return Promise.all(AI_PROVIDERS.filter((provider) => !provider.agentOnly).map((provider) => listProviderModels(provider.id, getCredential(provider.id), options)))
+  const credentials = Object.fromEntries(AI_PROVIDERS.map((provider) => [provider.id, getCredential(provider.id)]))
+  return Promise.all(AI_PROVIDERS
+    // Unconfigured custom slots have nothing to browse; they only appear on Providers & Keys (as the next empty slot).
+    .filter((provider) => !provider.agentOnly && (!provider.customSlot || credentials[provider.id]))
+    .map((provider) => listProviderModels(provider.id, credentials[provider.id], options)))
 }

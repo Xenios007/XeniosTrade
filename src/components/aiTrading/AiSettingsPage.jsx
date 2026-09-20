@@ -9,6 +9,7 @@ import { AgentAssignmentStrip } from '../AiTradingPage'
 import { AI_CONFIG_CHANGED_EVENT } from './AiModeBadge'
 import { Panel } from '../Panel'
 import { Badge } from '../ui/Badge'
+import { ScanStatusList } from './ScanStatusList'
 import { Modal } from '../ui/Modal'
 import { PageHeader } from '../ui/PageHeader'
 
@@ -67,7 +68,7 @@ export function AiSettingsPage({ settings }) {
     const payload = await requestJson('/api/ai-trading/config')
     setConfig(payload.config)
     setScanStatus(payload.scanStatus || null)
-    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null })
+    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
     setDraft({
       testnetStartingBalance: String(payload.config.execution.testnetStartingBalance),
       realMaxMarginUsdt: String(payload.config.execution.realMaxMarginUsdt),
@@ -218,26 +219,7 @@ export function AiSettingsPage({ settings }) {
               })}
             </div>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-xs text-slate-400">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>
-                {scanStatus?.running ? 'Scanning now…' : scanStatus?.lastFinishedAt ? `Last scan finished ${formatDateTime(scanStatus.lastFinishedAt)}` : 'No scan has run yet.'}
-              </span>
-              {scanStatus?.lastError ? <span className="text-rose-300">Last error: {scanStatus.lastError}</span> : null}
-            </div>
-            {scanStatus?.results && Object.keys(scanStatus.results).length ? (
-              <ul className="mt-2 grid gap-1">
-                {Object.entries(scanStatus.results).map(([symbol, result]) => (
-                  <li key={symbol} className="flex flex-wrap items-baseline gap-x-2">
-                    <span className="w-16 shrink-0 font-medium text-slate-200">{symbol.replace('USDT', '')}</span>
-                    <Badge tone={result.outcome === 'opened' || result.outcome === 'approved' ? 'up' : result.outcome === 'error' ? 'down' : 'neutral'}>{result.outcome}</Badge>
-                    <span className="min-w-0 flex-1 truncate text-slate-500" title={result.detail}>{result.detail}</span>
-                    <span className="shrink-0 text-slate-600">{formatDateTime(result.at)}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
+          <ScanStatusList scanStatus={scanStatus} enabled={config.scan.enabled} />
         </div>
       </Panel>
 

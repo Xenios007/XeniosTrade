@@ -76,6 +76,7 @@ import { callAgentJson, redactSecrets } from './ai-trading/llm.js'
 import { collectFlowData } from './ai-trading/flow-data.js'
 import { getCodexAgentStatus } from './ai-trading/codex-agent.js'
 import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
+import { getFingptStatus } from './ai-trading/fingpt-status.js'
 import { runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
@@ -1967,7 +1968,7 @@ function sanitizeSettingsForClient(settings = defaultSettings) {
     aiProviderCredentials: Object.fromEntries(
       Object.entries(normalizedSettings.aiProviderCredentials).map(([providerId, entry]) => [
         providerId,
-        { baseUrl: entry.baseUrl, model: entry.model, apiKey: '' },
+        { baseUrl: entry.baseUrl, model: entry.model, apiKey: '', ...(entry.label ? { label: entry.label } : {}) },
       ]),
     ),
     credentials: {
@@ -10229,13 +10230,14 @@ const aiTradingRunsInFlight = new Set()
 
 app.get('/api/ai-trading/config', async (_request, response) => {
   const noLogin = () => ({ available: false, loggedIn: false })
-  const [config, quantStats, scanStatus, codex, claude] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin)])
+  const [config, quantStats, scanStatus, codex, claude, fingpt] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin), getFingptStatus()])
   response.json({
     ok: true,
     config,
     scanStatus,
     codex,
     claude,
+    fingpt,
     backtestStats: quantStats
       ? { available: true, generatedAt: quantStats.generatedAt, tradeCount: quantStats.tradeCount, source: quantStats.source }
       : { available: false },

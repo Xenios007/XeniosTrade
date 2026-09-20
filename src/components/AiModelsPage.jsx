@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { AI_PROVIDERS, getAiProvider, isLocalLoginReady } from '../lib/aiProviders'
+import { AI_PROVIDERS, getAiProvider, isLocalLoginReady, isProviderConnected, isProviderListed, providerDisplayName } from '../lib/aiProviders'
 import { AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS } from '../lib/aiTrading'
 import { APP_MODE, APP_MODE_AI, APP_MODE_BOT, isAiModelsTabVisible } from '../lib/appMode'
 import { AiModelsBrowser } from './AiModelsBrowser'
@@ -56,14 +56,17 @@ function AiModelsTabs() {
   )
 }
 
-function ProviderCard({ provider, entry, status, onEdit, onRemove }) {
-  const connected = Boolean(status?.present) || (provider.keyless && Boolean(entry?.baseUrl))
+function ProviderCard({ provider, entry, status, liveStatus, onEdit, onRemove }) {
+  // A built-in local model (FinGPT) is "connected" while its server answers, not because a URL was saved.
+  const connected = provider.localServer
+    ? Boolean(liveStatus?.loggedIn)
+    : isProviderConnected(provider, entry, Boolean(status?.present))
 
   return (
     <div className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-sm font-semibold text-white">{provider.label}</div>
+          <div className="text-sm font-semibold text-white">{providerDisplayName(provider, { [provider.id]: entry })}</div>
           <div className="mt-0.5 truncate text-[11px] uppercase tracking-[0.14em] text-slate-500">
             {provider.id}
             {provider.advanced ? ' · advanced' : ''}
@@ -76,7 +79,7 @@ function ProviderCard({ provider, entry, status, onEdit, onRemove }) {
               : 'border-amber-400/20 bg-amber-400/10 text-amber-200'
           }`}
         >
-          {connected ? 'Connected' : 'Not Connected'}
+          {connected ? (provider.localServer ? 'Running' : 'Connected') : (provider.localServer ? (liveStatus?.available ? 'Loading' : 'Offline') : 'Not Connected')}
         </span>
       </div>
 
@@ -89,14 +92,21 @@ function ProviderCard({ provider, entry, status, onEdit, onRemove }) {
       </div>
 
       <div className="text-xs leading-relaxed text-slate-400">
-        {connected ? (
+        {provider.localServer ? (
           <>
-            {status?.present ? `Key stored server-side · fingerprint ${status.fingerprint || 'n/a'} · ${status.length} chars` : 'Local endpoint, no key required'}
+            {connected ? 'Local model server is running · no API key required.' : 'Local model server is not running — start it with npm run fingpt.'}
+            <div className="mt-1 truncate">Base URL: {entry?.baseUrl || provider.baseUrl}</div>
+            {entry?.model ? <div className="mt-1 truncate">Model: {entry.model}</div> : null}
+          </>
+        ) : connected ? (
+          <>
+            {status?.present ? `Key stored server-side · fingerprint ${status.fingerprint || 'n/a'} · ${status.length} chars` : (provider.customSlot ? 'No API key saved (optional).' : 'Local endpoint, no key required')}
             {entry?.baseUrl ? <div className="mt-1 truncate">Base URL: {entry.baseUrl}</div> : null}
             {entry?.model ? <div className="mt-1 truncate">Model: {entry.model}</div> : null}
           </>
         ) : (
-          provider.keyless ? 'Local — no API key required.' : `Needs an API key (${provider.keyHint || 'provider key'}).`
+          provider.customSlot ? 'Add the base URL of any OpenAI-compatible server — API key optional.'
+            : provider.keyless ? 'Local — no API key required.' : `Needs an API key (${provider.keyHint || 'provider key'}).`
         )}
       </div>
 
@@ -106,9 +116,9 @@ function ProviderCard({ provider, entry, status, onEdit, onRemove }) {
           onClick={onEdit}
           className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-white/20"
         >
-          {connected ? 'Update' : 'Connect'}
+          {connected || provider.localServer ? (provider.localServer ? 'Configure' : 'Update') : 'Connect'}
         </button>
-        {connected ? (
+        {(provider.localServer ? Boolean(entry?.baseUrl || entry?.model) : connected) ? (
           <button
             type="button"
             onClick={onRemove}
@@ -136,13 +146,24 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
   const credentials = settings?.aiProviderCredentials || {}
   const credentialStatus = settings?.aiProviderCredentialStatus || {}
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ apiKey: '', baseUrl: '', model: '' })
+  const [form, setForm] = useState({ apiKey: '', baseUrl: '', model: '', label: '' })
   const [feedback, setFeedback] = useState('')
+  const [liveStatus, setLiveStatus] = useState(null)
+
+  // Built-in local models report their own readiness on the AI Trading config payload.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/ai-trading/config')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => { if (!cancelled && payload) setLiveStatus({ fingpt: payload.fingpt || null }) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   function startEdit(provider) {
     const entry = credentials[provider.id] || {}
     setEditing(provider)
-    setForm({ apiKey: '', baseUrl: entry.baseUrl || '', model: entry.model || '' })
+    setForm({ apiKey: '', baseUrl: entry.baseUrl || '', model: entry.model || '', label: entry.label || '' })
     setFeedback('')
   }
 
@@ -150,12 +171,12 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
     if (!editing) return
     const result = await onSave({
       aiProviderCredentials: {
-        [editing.id]: { apiKey: form.apiKey, baseUrl: form.baseUrl, model: form.model },
+        [editing.id]: { apiKey: form.apiKey, baseUrl: form.baseUrl, model: form.model, label: form.label },
       },
     })
     if (result?.ok) {
       setEditing(null)
-      setForm({ apiKey: '', baseUrl: '', model: '' })
+      setForm({ apiKey: '', baseUrl: '', model: '', label: '' })
     } else {
       setFeedback(result?.error || 'Unable to save this provider.')
     }
@@ -177,12 +198,13 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
           <div className="py-8 text-center text-sm text-slate-400">Loading…</div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {AI_PROVIDERS.filter((provider) => !provider.agentOnly).map((provider) => (
+            {AI_PROVIDERS.filter((provider) => !provider.agentOnly && isProviderListed(provider, credentials)).map((provider) => (
               <ProviderCard
                 key={provider.id}
                 provider={provider}
                 entry={credentials[provider.id]}
                 status={credentialStatus[provider.id]}
+                liveStatus={liveStatus?.[provider.id]}
                 onEdit={() => startEdit(provider)}
                 onRemove={() => remove(provider)}
               />
@@ -193,7 +215,7 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
 
       {editing ? (
         <Modal
-          title={`Connect ${editing.label}`}
+          title={`Connect ${providerDisplayName(editing, credentials)}`}
           onClose={() => setEditing(null)}
           footer={(
             <>
@@ -218,6 +240,18 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
           {feedback ? (
             <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">{feedback}</div>
           ) : null}
+          {editing.customSlot ? (
+            <label className="block">
+              <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Display name (optional)</span>
+              <input
+                value={form.label}
+                maxLength={40}
+                onChange={(event) => setForm((current) => ({ ...current, label: event.target.value }))}
+                placeholder="e.g. My vLLM · Qwen 2.5 7B"
+                className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
+              />
+            </label>
+          ) : null}
           {!editing.keyless ? (
             <label className="block">
               <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">
@@ -234,7 +268,9 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
             </label>
           ) : (
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-slate-400">
-              This provider runs locally — no API key required.
+              {editing.localServer
+                ? 'Built-in local model (FinGPT). Leave the Base URL empty to use it, or set it to any other OpenAI-compatible local server (llama.cpp, vLLM, LM Studio…) to run your own model in this slot. No API key required.'
+                : 'This provider runs locally — no API key required.'}
             </div>
           )}
           {(editing.baseUrlEditable || editing.baseUrlRequired) ? (
@@ -354,7 +390,7 @@ function AgentAssignments({ settings }) {
         if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
         if (!cancelled) {
           setConfig(payload.config)
-          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null })
+          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
           setDraft(payload.config.agents)
         }
       })
@@ -435,10 +471,12 @@ function AgentAssignments({ settings }) {
             const connected = provider
               ? (provider.localLogin
                 ? isLocalLoginReady(localLogins, provider.id)
-                : Boolean(credentialStatus[provider.id]?.present) || (provider.keyless && Boolean(credentials[provider.id]?.baseUrl)))
+                : isProviderConnected(provider, credentials[provider.id], Boolean(credentialStatus[provider.id]?.present)))
               : false
-            const effectiveModel = assignment.model || (provider?.localLogin ? '' : credentials[provider?.id]?.model || provider?.suggested?.[0] || '')
-            const notConnectedLabel = provider?.localLogin
+            const effectiveModel = assignment.model || (provider?.localLogin && !provider?.localServer ? '' : credentials[provider?.id]?.model || provider?.suggested?.[0] || '')
+            const notConnectedLabel = provider?.localServer
+              ? (loginStatus?.available ? 'Model still loading' : 'Local server offline')
+              : provider?.localLogin
               ? (loginStatus && !loginStatus.available ? `${loginName} SDK missing` : 'Not logged in')
               : 'No key saved'
 
@@ -463,8 +501,8 @@ function AgentAssignments({ settings }) {
                       className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
                     >
                       <option value="">Unassigned (agent will not run)</option>
-                      {AI_PROVIDERS.map((item) => (
-                        <option key={item.id} value={item.id}>{item.label}{(item.localLogin ? isLocalLoginReady(localLogins, item.id) : credentialStatus[item.id]?.present) ? ' ✓' : ''}</option>
+                      {AI_PROVIDERS.filter((item) => isProviderListed(item, credentials) || item.id === assignment.providerId).map((item) => (
+                        <option key={item.id} value={item.id}>{providerDisplayName(item, credentials)}{(item.localLogin ? isLocalLoginReady(localLogins, item.id) : isProviderConnected(item, credentials[item.id], Boolean(credentialStatus[item.id]?.present))) ? ' ✓' : ''}</option>
                       ))}
                     </select>
                   </label>
@@ -474,7 +512,7 @@ function AgentAssignments({ settings }) {
                       value={assignment.model}
                       disabled={!provider}
                       onChange={(event) => update(agent.id, { model: event.target.value })}
-                      placeholder={effectiveModel || (provider?.localLogin ? `${loginName} default model` : 'model id')}
+                      placeholder={effectiveModel || (provider?.localLogin && !provider?.localServer ? `${loginName} default model` : 'model id')}
                       list={`agent-model-suggestions-${agent.id}`}
                       className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none disabled:opacity-40"
                     />
@@ -486,7 +524,9 @@ function AgentAssignments({ settings }) {
                   </label>
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">
-                  {provider?.localLogin
+                  {provider?.localServer
+                    ? 'Runs on this machine: FinGPT (Llama 3 8B + LoRA, 4-bit NF4) via server/local-llm — no API key, no per-token cost. Start it with npm run fingpt. Calls are slow (partly offloaded to RAM).'
+                    : provider?.localLogin
                     ? `Runs through this server's ${loginName} login${assignment.model ? ` with ${assignment.model}` : ' with its default model'} — no API key, counted against that ${loginName} account. Each call can take a minute or more.`
                     : provider ? `Will call ${effectiveModel || 'a model you still need to name'}${assignment.model ? '' : ' (provider default)'}.` : 'Nothing is called until a provider is chosen.'}
                 </div>

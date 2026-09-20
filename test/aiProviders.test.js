@@ -65,3 +65,34 @@ test('mergeAiProviderCredentialsUpdate: an unknown provider id in the request is
   const next = mergeAiProviderCredentialsUpdate(current, { 'not-a-real-provider': { apiKey: 'sk-x' } })
   assert.deepEqual(Object.keys(next), ['anthropic'])
 })
+
+test('custom slots: unique ids, optional key, labels kept only on custom slots', async () => {
+  const { isProviderConnected, isProviderListed, providerDisplayName } = await import('../src/lib/aiProviders.js')
+  const slots = AI_PROVIDERS.filter((provider) => provider.customSlot)
+  assert.ok(slots.length >= 3)
+  assert.ok(slots.every((provider) => provider.keyOptional && provider.baseUrlRequired))
+
+  const normalized = normalizeAiProviderCredentials({
+    'custom-2': { apiKey: '', baseUrl: 'http://127.0.0.1:8000/v1', model: 'm', label: '  My vLLM  ' },
+    anthropic: { apiKey: 'k', label: 'ignored' },
+  })
+  assert.equal(normalized['custom-2'].label, 'My vLLM')
+  assert.equal('label' in normalized.anthropic, false)
+
+  // Blank label in an update keeps the stored one; a new one replaces it.
+  assert.equal(mergeAiProviderCredentialsUpdate(normalized, { 'custom-2': { baseUrl: 'http://x/v1', label: '' } })['custom-2'].label, 'My vLLM')
+  assert.equal(mergeAiProviderCredentialsUpdate(normalized, { 'custom-2': { label: 'Other' } })['custom-2'].label, 'Other')
+
+  const custom2 = getAiProvider('custom-2')
+  assert.equal(providerDisplayName(custom2, normalized), 'My vLLM')
+  assert.equal(providerDisplayName(custom2, {}), custom2.label)
+  assert.equal(isProviderConnected(custom2, normalized['custom-2'], false), true)
+  assert.equal(isProviderConnected(getAiProvider('openai'), { baseUrl: 'http://x' }, false), false)
+
+  // Only the first empty slot after the last used one is offered.
+  assert.equal(isProviderListed(getAiProvider('custom'), {}), true)
+  assert.equal(isProviderListed(getAiProvider('custom-2'), {}), false)
+  assert.equal(isProviderListed(getAiProvider('custom-2'), { custom: { baseUrl: 'x' } }), true)
+  assert.equal(isProviderListed(getAiProvider('custom-3'), { custom: { baseUrl: 'x' } }), false)
+  assert.equal(isProviderListed(getAiProvider('custom-3'), normalized), true)
+})

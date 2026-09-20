@@ -20,6 +20,9 @@ const P = (id, label, over = {}) => ({
   ...over,
 })
 
+const CUSTOM_SLOT_COUNT = 5
+const MAX_LABEL_LENGTH = 40
+
 export const AI_PROVIDERS = [
   P('anthropic', 'Anthropic (Claude)', {
     baseUrl: 'https://api.anthropic.com',
@@ -72,6 +75,22 @@ export const AI_PROVIDERS = [
     agentOnly: true,
     localLogin: true,
     keyHint: 'machine login',
+  }),
+  // FinGPT (Llama-3-8B + LoRA, 4-bit NF4) served from this machine by server/local-llm/server.py (OpenAI-compatible, port
+  // 8011). No key; `localServer` marks a built-in local model whose readiness is that process's /health, and the Base URL
+  // stays editable so the same slot can point at any other OpenAI-compatible local server. `timeoutMs` is the per-call
+  // budget because an 8B model generates slowly on this hardware.
+  P('fingpt', 'FinGPT · Llama 3 8B (local, 4-bit)', {
+    baseUrl: 'http://127.0.0.1:8011/v1',
+    baseUrlEditable: true,
+    baseUrlHint: 'http://127.0.0.1:8011/v1',
+    keyless: true,
+    localLogin: true,
+    localServer: true,
+    keyHint: 'local server',
+    suggested: ['fingpt-llama3-8b'],
+    wiredBot: 'AI Trading agents (local model)',
+    timeoutMs: 420_000,
   }),
   P('meta', 'Meta (Llama via Together)', {
     baseUrl: 'https://api.together.xyz/v1',
@@ -144,11 +163,21 @@ export const AI_PROVIDERS = [
     keyless: true,
     keyHint: 'not required',
   }),
-  P('custom', 'Custom OpenAI-compatible', {
-    baseUrlEditable: true,
-    baseUrlRequired: true,
-    baseUrlHint: 'https://your-endpoint/v1',
-  }),
+  // Custom OpenAI-compatible endpoints, for testing your own / self-hosted models. Several fixed slots (each one holds one
+  // base URL + model, and can be given a display name); the page only shows the configured ones plus the next empty one.
+  // The key is optional because a local server (vLLM, llama.cpp, TGI...) usually has none.
+  ...Array.from({ length: CUSTOM_SLOT_COUNT }, (_unused, index) => P(
+    index === 0 ? 'custom' : `custom-${index + 1}`,
+    index === 0 ? 'Custom OpenAI-compatible' : `Custom OpenAI-compatible ${index + 1}`,
+    {
+      baseUrlEditable: true,
+      baseUrlRequired: true,
+      baseUrlHint: 'http://127.0.0.1:8000/v1',
+      keyOptional: true,
+      keyHint: 'optional',
+      customSlot: index + 1,
+    },
+  )),
 ]
 
 const AI_PROVIDERS_BY_ID = new Map(AI_PROVIDERS.map((provider) => [provider.id, provider]))
@@ -162,6 +191,30 @@ function toTrimmedString(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/** A key is only needed when the provider requires one; keyless and `keyOptional` providers connect on a saved base URL. */
+export function isProviderConnected(provider, entry, keyPresent) {
+  if (!provider) return false
+  if (keyPresent) return true
+  return Boolean(provider.keyless || provider.keyOptional) && Boolean(String(entry?.baseUrl || '').trim())
+}
+
+/** The name to show for a provider: a custom slot's own label when the user gave it one. */
+export function providerDisplayName(provider, credentials) {
+  if (!provider) return ''
+  return (provider.customSlot && credentials?.[provider.id]?.label) || provider.label
+}
+
+/**
+ * Which providers the Providers & Keys / agent pickers list. Custom slots after the first stay hidden until the one
+ * before them is in use, so there is always exactly one empty custom slot to add the next model to.
+ */
+export function isProviderListed(provider, credentials) {
+  if (!provider.customSlot || provider.customSlot === 1) return true
+  if (credentials?.[provider.id]) return true
+  const previousId = provider.customSlot === 2 ? 'custom' : `custom-${provider.customSlot - 1}`
+  return Boolean(credentials?.[previousId])
+}
+
 /** Validates/cleans a `{ [providerId]: { apiKey, baseUrl, model } }` map from disk or a request body. */
 export function normalizeAiProviderCredentials(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -173,8 +226,10 @@ export function normalizeAiProviderCredentials(raw) {
         const apiKey = toTrimmedString(entry.apiKey)
         const baseUrl = toTrimmedString(entry.baseUrl)
         const model = toTrimmedString(entry.model)
+        // Only custom slots can be named, and the field is left out when unset so other entries keep their exact shape.
+        const label = getAiProvider(providerId).customSlot ? toTrimmedString(entry.label).slice(0, MAX_LABEL_LENGTH) : ''
         if (!apiKey && !baseUrl && !model) return null
-        return [providerId, { apiKey, baseUrl, model }]
+        return [providerId, { apiKey, baseUrl, model, ...(label ? { label } : {}) }]
       })
       .filter(Boolean),
   )
@@ -208,6 +263,7 @@ export function mergeAiProviderCredentialsUpdate(currentMap, requestedMap) {
       apiKey: requestedApiKey || existing.apiKey,
       baseUrl: requestedBaseUrl || existing.baseUrl,
       model: requestedModel || existing.model,
+      label: toTrimmedString(entry.label) || existing.label || '',
     }
   }
 

@@ -49,7 +49,7 @@ export function resolveProviderCall(providerId, modelOverride = '') {
   }
 
   // Codex / Claude sign in with the machine's own login (checked when called), so they have no key, base URL or default model here.
-  if (provider.localLogin) return { configured: true, provider, model: String(modelOverride || '').trim() }
+  if (provider.localLogin && !provider.localServer) return { configured: true, provider, model: String(modelOverride || '').trim() }
 
   const credential = getAiProviderCredential(providerId) || {}
   const envName = ENV_KEY_FALLBACKS[providerId]
@@ -57,7 +57,7 @@ export function resolveProviderCall(providerId, modelOverride = '') {
   const baseUrl = String(credential.baseUrl || provider.baseUrl || '').trim()
   const model = String(modelOverride || credential.model || provider.suggested?.[0] || '').trim()
 
-  if (!provider.keyless && !apiKey) {
+  if (!provider.keyless && !provider.keyOptional && !apiKey) {
     return { configured: false, provider, reason: `${provider.label} has no API key — add one on the AI Models page.` }
   }
   if (!baseUrl) {
@@ -227,7 +227,7 @@ export async function callAgentJson({ providerId, model = '', systemPrompt, user
     }
   }
 
-  const args = { ...resolved, systemPrompt, userPrompt, timeoutMs: timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS }
+  const args = { ...resolved, systemPrompt, userPrompt, timeoutMs: timeoutMs ?? resolved.provider.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS }
   const text = providerId === 'anthropic' ? await callAnthropic(args) : await callOpenAiCompatible(args)
   return { json: extractJsonObject(text), providerId, model: resolved.model }
 }

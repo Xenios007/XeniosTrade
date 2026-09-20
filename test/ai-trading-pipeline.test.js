@@ -919,3 +919,30 @@ test('runClaudeAgent: not logged in / SDK missing are NOT_CONFIGURED, failures s
   )
   assert.deepEqual(await getClaudeAgentStatus({ loadModule: fakeClaude().loadModule, hasLogin: async () => true }), { available: true, loggedIn: true })
 })
+
+// ---- Custom OpenAI-compatible slots ---------------------------------------------------------------------------------
+
+test('custom slots: the API key is optional, no Authorization header is sent without one, and each slot is separate', async () => {
+  const { setAiProviderCredentialsStore } = await import('../server/strategy/ai-provider-credentials-store.js')
+  const { callAgentJson, resolveProviderCall } = await import('../server/ai-trading/llm.js')
+
+  await withFakeProvider((body) => ({ payload: { choices: [{ message: { content: JSON.stringify({ model: body.model }) } }] } }), async (baseUrl, requests) => {
+    setAiProviderCredentialsStore({
+      custom: { apiKey: '', baseUrl, model: 'local-a' },
+      'custom-2': { apiKey: 'second-key', baseUrl, model: 'local-b', label: 'Second' },
+    })
+
+    const first = await callAgentJson({ providerId: 'custom', systemPrompt: 's', userPrompt: 'u' })
+    assert.deepEqual(first.json, { model: 'local-a' })
+    assert.equal(requests[0].headers.authorization, undefined)
+
+    const second = await callAgentJson({ providerId: 'custom-2', systemPrompt: 's', userPrompt: 'u' })
+    assert.deepEqual(second.json, { model: 'local-b' })
+    assert.equal(requests[1].headers.authorization, 'Bearer second-key')
+  })
+
+  setAiProviderCredentialsStore({})
+  assert.match(resolveProviderCall('custom').reason, /base URL/)
+  // A hosted provider still needs its key.
+  assert.match(resolveProviderCall('openai').reason, /API key/)
+})
