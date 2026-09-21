@@ -349,6 +349,10 @@ const SYSTEM_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futu
 
 // Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes here; Flow keeps its
 // full skepticism and the code ceilings still cap every number, so this only lets a modest lean reach them.
+// The Critic's preamble is deliberately NOT the skeptical one the other stages share ("HOLD / rejecting is a good outcome"): a Critic told
+// that, and told its only job is to reject, rejected 27 of 27 setups in normal mode. It is an adversarial reviewer, not a veto machine.
+const CRITIC_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+
 const TEST_MODE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): the goal right now is to exercise the whole pipeline, so do NOT default to HOLD. Later stages will still vet and can reject the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 // Test mode also relaxes the Critic, or its ordinary objections (late entry, modest volume) block every run before the Risk
 // Manager is ever reached. It still lists every real objection; REJECT is kept for a clearly bad trade.
@@ -403,7 +407,7 @@ function flowPrompts(snapshot, analyst, metrics) {
 
 function criticPrompts(snapshot, analyst, flow, testMode = false) {
   return {
-    systemPrompt: `${testMode ? TEST_MODE_CRITIC_PREAMBLE : SYSTEM_PREAMBLE} You are the Critic. Your only job is to find reasons this trade should be rejected. Do not argue in its favour.`,
+    systemPrompt: `${testMode ? TEST_MODE_CRITIC_PREAMBLE : CRITIC_PREAMBLE} You are the Critic. You are an adversarial reviewer, not a veto machine. Your job is to find what could make this trade wrong and to say honestly how serious each problem is. You are not the last line of defence: the Risk Manager still sizes the trade and can veto it after you, so reserve REJECT for problems that are clearly fatal. You may acknowledge what is sound about the setup, but your objections are the focus.`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -412,9 +416,10 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
       `Analyst key factors: ${analyst.keyFactors.join(' | ') || 'none given'}`,
       `Market Flow Agent: ${flowSummary(flow)}`,
       '',
-      'Attack the setup: contradicting indicators, chasing an extended move, low volume, range-bound/chop, funding or crowding risk, timeframe disagreement.',
+      'Attack the setup: contradicting indicators, chasing an extended move, low volume, range-bound/chop, funding or crowding risk, timeframe disagreement. Every objection must cite a specific number or level from the data above; an objection with no evidence behind it does not count.',
       'The stop and target above are only the Analyst\'s provisional proposal: the Risk Manager sets the final stop, size and leverage after you, so do not REJECT because the proposed stop or target looks too tight or too wide. Judge the setup itself (direction, timing, structure, positioning).',
-      'Verdict PASS = you found nothing material; CAUTION = real but survivable concerns; REJECT = the trade should not be taken.',
+      'Severity: high = potentially fatal, medium = a real concern the trade can survive, low = minor. Do not mark ordinary weaknesses high just because there are several of them.',
+      'Verdict rules. PASS = nothing material. CAUTION = real but ordinary concerns the trade can survive; this is the default whenever your objections are the usual kind (a late or extended entry, nearby resistance or support, modest volume, chop, timeframe disagreement, crowded positioning), however many of them there are. REJECT = only a clearly fatal flaw: the trade fights strong trend or flow evidence, there is no room before an obvious barrier, the thesis is already invalidated, or the data is broken or contradictory. Expect most reasonable setups to end in PASS or CAUTION.',
       ...(testMode ? [TEST_MODE_CRITIC_INSTRUCTION] : []),
       'Reply with exactly: {"verdict":"PASS|CAUTION|REJECT","objections":[{"issue":"specific objection","severity":"low|medium|high"}],"reasoning":"2-3 sentences"}',
     ].join('\n'),

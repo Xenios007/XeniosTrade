@@ -86,9 +86,12 @@ import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
-  appendAiScanLog, appendAiTradingRun, getAiScanLog, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, patchAiTradingRun, saveAiTradingConfig,
-  updateAiScanStatus, updateAiTrades,
+  appendAiScanLog, appendAiTradingRun, getAiScanLog, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, getShadowSignals, patchAiTradingRun,
+  saveAiTradingConfig, updateAiScanStatus, updateAiTrades, updateShadowSignals,
 } from './ai-trading/store.js'
+import {
+  SHADOW_FEE_ROUND_TRIP_PCT, baselineIsCovered, buildShadowSignal, computeBaseline, resolveShadowSignal, summarizeShadow,
+} from './ai-trading/shadow.js'
 import {
   AI_MODEL_NAME, AI_WALLET_IDS, AI_WALLET_NAMES, AiExecutionError, assertCanExecute, buildAiTradeRecord, isOpenAiTrade,
   scalePlanToWallet, settlePaperTrade, summarizeAiWallet,
@@ -10362,6 +10365,94 @@ async function getAiExchangeConstraints(symbol, snapshot) {
   }
 }
 
+// ---- Shadow outcome tracker (shadow.js) -----------------------------------------------------------------------------------------
+// Every Analyst LONG/SHORT is recorded with the Analyst's own bracket; later its outcome is replayed against 1-minute candles, and once the
+// hour-plus-horizon after it has passed, a "no skill" baseline is added. This is how the gates (Flow, Critic, Risk Manager) are judged on
+// hundreds of samples instead of a handful. Read-only market data; no orders, no model calls.
+async function recordShadowSignal(run) {
+  const signal = buildShadowSignal(run)
+  if (!signal) return
+  await updateShadowSignals((current) => (current.some((item) => item.id === signal.id) ? undefined : [signal, ...current]))
+}
+
+async function fetchShadowCandles(symbol, startMs) {
+  const path = `/klines?symbol=${symbol}&interval=1m&startTime=${Math.floor(startMs)}&limit=1000`
+  const klines = await fetchJson(`${publicDataBaseUrl}${path}`, {
+    retries: 1,
+    timeoutMs: 9_000,
+    fallbackUrl: `${publicDataFallbackBaseUrl}${path}`,
+    cacheKey: `shadow-klines:${symbol}:${Math.floor(startMs / 60_000)}`,
+    cacheTtlMs: 60_000,
+  })
+  return toCandleData(klines)
+}
+
+let shadowResolving = false
+
+async function resolveShadowSignals({ maxSignals = 15 } = {}) {
+  if (shadowResolving) return { skipped: true }
+  shadowResolving = true
+  try {
+    // Seed from the saved runs, so history that pre-dates the tracker (and manual runs) counts too. Idempotent by run id.
+    const seeds = (await getAiTradingRuns()).map(buildShadowSignal).filter(Boolean)
+    await updateShadowSignals((current) => {
+      const known = new Set(current.map((item) => item.id))
+      const fresh = seeds.filter((item) => !known.has(item.id))
+      return fresh.length ? [...current, ...fresh] : undefined
+    })
+
+    const now = Date.now()
+    const signals = await getShadowSignals()
+    const due = signals
+      .filter((signal) => (signal.status === 'pending' && now - signal.startedAt >= 2 * 60_000)
+        || (signal.status === 'resolved' && !signal.baseline && baselineIsCovered(signal, now)))
+      .slice(0, maxSignals)
+
+    const updates = new Map()
+    for (const signal of due) {
+      try {
+        const candles = await fetchShadowCandles(signal.symbol, signal.startedAt)
+        if (!candles.length) continue
+        let next = signal
+        if (signal.status === 'pending') {
+          const outcome = resolveShadowSignal(signal, candles, now)
+          if (outcome) next = { ...signal, status: 'resolved', outcome }
+        }
+        if (next.status === 'resolved' && !next.baseline && baselineIsCovered(next, now)) {
+          const baseline = computeBaseline(next, candles)
+          if (baseline) next = { ...next, baseline }
+        }
+        if (next !== signal) updates.set(signal.id, next)
+      } catch {
+        // One symbol's candles failing must not stop the others; it is retried next pass.
+      }
+    }
+    if (updates.size) await updateShadowSignals((current) => current.map((item) => updates.get(item.id) || item))
+    return { checked: due.length, updated: updates.size }
+  } finally {
+    shadowResolving = false
+  }
+}
+
+app.get('/api/ai-trading/shadow', async (request, response) => {
+  try {
+    if (request.query.refresh === '1') await resolveShadowSignals({ maxSignals: 30 })
+    const signals = await getShadowSignals()
+    const compact = ({ id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, outcome, testMode }) => ({
+      id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, testMode, result: outcome?.result ?? null, netPct: outcome?.netPct ?? null, minutes: outcome?.minutes ?? null,
+    })
+    response.json({
+      ok: true,
+      total: signals.length,
+      summary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT }),
+      testModeSummary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, testMode: true }),
+      recent: signals.slice(0, 40).map(compact),
+    })
+  } catch (error) {
+    response.status(500).json({ error: error instanceof Error ? error.message : 'Unable to read shadow signals' })
+  }
+})
+
 // Measured market evidence for the Risk Manager (risk-evidence.js): a longer candle history than the Analyst gets (500 x 5M, 300 x 1H) for the
 // volatility percentile and the typical-excursion base rates, and the LIVE futures order book (the flow data uses the testnet book, which is
 // too thin to say anything about slippage on real money). Each fetch fails independently.
@@ -10428,6 +10519,8 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
       run.execution = { status: 'failed', mode: autoMode, error: error instanceof Error ? error.message : String(error), at: Date.now(), auto: true }
     }
   }
+  // Shadow tracker: remember every Analyst LONG/SHORT (blocked or not) so its outcome can be judged later. Never allowed to fail the run.
+  await recordShadowSignal(run).catch((error) => console.warn('[ai-trading] Shadow record failed:', error instanceof Error ? error.message : error))
   return run
 }
 
@@ -10512,6 +10605,8 @@ async function runAiScanCycle() {
       lastError: cycleError ? redactSecrets(cycleError).slice(0, 240) : null,
       results: { ...status.results, ...results },
     }))
+    // Judge earlier signals against what the market did since (free: public candles only). Fire and forget: it must never delay or fail a scan.
+    resolveShadowSignals().catch((error) => console.warn('[ai-trading] Shadow resolve failed:', error instanceof Error ? error.message : error))
   } finally {
     aiScanCycleRunning = false
     // Never leave the status stuck on "running" if a step above threw.

@@ -8,11 +8,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeAiTradingConfig } from '../../src/lib/aiTrading.js'
 import { mergeScanLog } from '../../src/lib/aiTradingHistory.js'
+import { MAX_SHADOW_SIGNALS } from './shadow.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = path.join(__dirname, '..', 'data', 'ai-trading')
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json')
 const RUNS_FILE = path.join(DATA_DIR, 'runs.json')
+const SHADOW_FILE = path.join(DATA_DIR, 'shadow-signals.json')
 export const MAX_STORED_RUNS = 50
 
 async function readJson(file, fallback) {
@@ -151,3 +153,29 @@ export function appendAiScanLog(entries) {
     })
   return scanLogQueue
 }
+
+// ---- Shadow outcome tracker (see shadow.js) ---------------------------------
+// One small record per Analyst LONG/SHORT signal, whether or not a gate blocked it, kept far longer than the 50 saved runs so the gates can
+// be judged on hundreds of samples. Newest first, capped.
+export async function getShadowSignals() {
+  const signals = await readJson(SHADOW_FILE, [])
+  return Array.isArray(signals) ? signals : []
+}
+
+let shadowQueue = Promise.resolve()
+
+/** `mutate(current)` returns the next array, or undefined for "no change". Serialised like the other stores. */
+export function updateShadowSignals(mutate) {
+  shadowQueue = shadowQueue
+    .then(async () => {
+      const current = await getShadowSignals()
+      const next = mutate(current)
+      if (next === undefined) return
+      await writeJsonAtomic(SHADOW_FILE, [...next].sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_SHADOW_SIGNALS))
+    })
+    .catch((error) => {
+      console.warn('[ai-trading] Failed to persist shadow signals:', error instanceof Error ? error.message : error)
+    })
+  return shadowQueue
+}
+

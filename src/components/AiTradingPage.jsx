@@ -12,6 +12,7 @@ import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
 import { Panel } from './Panel'
 import { Badge } from './ui/Badge'
 import { PageHeader } from './ui/PageHeader'
+import { ShadowOutcomesPanel } from './aiTrading/ShadowOutcomesPanel'
 import { SubNavTabs } from './ui/SubNavTabs'
 
 const RUNS_REFRESH_MS = 15_000
@@ -353,6 +354,7 @@ export function AiTradingPage({ settings }) {
           element={(
             <div className="grid gap-6">
               <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} />
+              <ShadowOutcomesPanel />
               <BacktestContext backtestStats={backtestStats} />
             </div>
           )}

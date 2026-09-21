@@ -967,7 +967,12 @@ test('test mode: changes the Analyst, Critic and Risk prompts; Flow wording and 
   assert.match(seen.test.critic, /TEST MODE[\s\S]*REJECT only for a serious flaw/)
   assert.doesNotMatch(seen.test.critic, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
   assert.doesNotMatch(seen.normal.critic, /TEST MODE/)
-  assert.match(seen.normal.critic, /Your only job is to find reasons this trade should be rejected/, 'the normal Critic stays adversarial')
+  // The normal Critic is still adversarial (it must attack the setup and cite evidence) but it is no longer told its only job is to reject
+  assert.match(seen.normal.critic, /adversarial reviewer, not a veto machine/)
+  assert.match(seen.normal.critic, /find what could make this trade wrong/)
+  assert.match(seen.normal.critic, /Attack the setup/)
+  assert.match(seen.normal.critic, /cite a specific number or level/)
+  assert.doesNotMatch(seen.normal.critic, /Your only job is to find reasons|Do not argue in its favour|rejecting is a good outcome/)
 })
 
 test('critic prompt: the Analyst\'s stop/target are provisional (the Risk Manager resizes them), in normal mode too', async () => {
@@ -1314,4 +1319,41 @@ test('fixed leverage: the Risk Manager is told it, and the numbers that follow f
   })
   assert.doesNotMatch(seenNormal.risk.userPrompt, /FIXED at|is fixed at/)
   assert.match(seenNormal.risk.systemPrompt, /`leverage` is your ceiling/)
+})
+
+// ---- Critic: adversarial reviewer, REJECT only for a fatal flaw ---------------------------------------------------------------
+
+test('critic: CAUTION is the default for ordinary weaknesses and REJECT is reserved for a clearly fatal flaw', async () => {
+  const fake = fakeAgents()
+  const seen = {}
+  const spy = async (call) => {
+    if (/You are the Critic\./.test(call.systemPrompt)) seen.critic = call
+    return fake.callAgent(call)
+  }
+  await runAiTradingPipeline({ symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: spy, backtestStats: positiveStats })
+  const { systemPrompt, userPrompt } = seen.critic
+  assert.match(userPrompt, /CAUTION = real but ordinary concerns the trade can survive; this is the default whenever your objections are the usual kind/)
+  assert.match(userPrompt, /a late or extended entry, nearby resistance or support, modest volume, chop, timeframe disagreement, crowded positioning/)
+  assert.match(userPrompt, /however many of them there are/)
+  assert.match(userPrompt, /REJECT = only a clearly fatal flaw/)
+  assert.match(userPrompt, /Expect most reasonable setups to end in PASS or CAUTION/)
+  assert.match(userPrompt, /Severity: high = potentially fatal/)
+  assert.match(systemPrompt, /not the last line of defence/)
+  assert.match(systemPrompt, /reserve REJECT for problems that are clearly fatal/)
+  // the shared skeptical preamble ("rejecting is a good outcome") is not used for the Critic
+  assert.doesNotMatch(systemPrompt, /rejecting is a good outcome|Be rigorous and skeptical/)
+  // the other stages keep it
+  const analyst = fakeAgents()
+  let analystSystem = ''
+  await runAiTradingPipeline({ symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: async (call) => { if (/You are the Market Analyst\./.test(call.systemPrompt)) analystSystem = call.systemPrompt; return analyst.callAgent(call) }, backtestStats: positiveStats })
+  assert.match(analystSystem, /rejecting is a good outcome/)
+})
+
+test('critic: a CAUTION verdict passes the gate (only REJECT blocks), and the Risk Manager is told about it', async () => {
+  const cautious = { verdict: 'CAUTION', objections: [{ issue: 'late entry at 0.7 of the range', severity: 'medium' }], reasoning: 'Ordinary concerns.' }
+  const fake = fakeAgents({ critic: cautious })
+  const result = await runAiTradingPipeline({ symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: fake.callAgent, backtestStats: positiveStats })
+  assert.equal(result.final.gates.find((gate) => gate.id === 'critic').passed, true)
+  assert.ok(fake.calls.includes('risk'), 'the Risk Manager was reached')
+  assert.match(fake.prompts.risk, /Critic: CAUTION\./)
 })
