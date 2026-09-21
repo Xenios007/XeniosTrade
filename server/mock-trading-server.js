@@ -83,6 +83,7 @@ import { getFingptStatus } from './ai-trading/fingpt-status.js'
 import { buildMarketSnapshot, riskLimitsFor, runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-trading/exchange-fit.js'
 import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
+import { quoteLargeIntegers } from './exchange-json.js'
 import { dailyStatus } from './ai-trading/daily-limits.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
@@ -4172,7 +4173,8 @@ async function fetchSignedFuturesApi(pathname, {
     })
 
   const text = await response.text()
-  const parsed = safeParseJson(text)
+  // Order ids can exceed 2^53 now; keep them exact (see exchange-json.js), or the very next status lookup asks for the wrong order.
+  const parsed = safeParseJson(quoteLargeIntegers(text))
 
   if (!response.ok) {
     const environmentLabel = baseUrl === futuresLiveBaseUrl ? 'Binance Futures Live' : 'Binance Futures Testnet'
@@ -7998,13 +8000,14 @@ async function closeExchangePositionImmediately({
     reduceOnly: true,
   })
 
+  // The close order has been sent; the status lookup only refines the exit price, so its failure must not make a completed close look failed.
   const closeOrderStatus = await fetchBinanceOrderStatus({
     symbol,
     orderId: closeOrder.orderId,
     apiKey,
     secretKey,
     baseUrl,
-  })
+  }).catch(() => null)
 
   return {
     order: closeOrderStatus || closeOrder,
@@ -8058,7 +8061,8 @@ async function extendExchangeTakeProfitForBot8(trade, nextTakeProfit, { apiKey, 
   return { ...trade, takeProfit: triggerPrice, exchangeTakeProfitOrderId: replacement.orderId || null, exchangeTakeProfitClientOrderId: replacement.clientOrderId || null, exchangeTakeProfitAlgoId: replacement.algoId || null, exchangeTakeProfitAlgoClientId: replacement.clientAlgoId || null }
 }
 
-async function createExchangeTradeExecution(payload, settings, { forceBinance = false, environment } = {}) {
+// Exported for tests (a stubbed exchange): this is the function that puts real orders on the account.
+export async function createExchangeTradeExecution(payload, settings, { forceBinance = false, environment } = {}) {
   const resolvedEnvironment = normalizeWalletEnvironment(environment)
   const isLive = resolvedEnvironment === REAL_MONEY_WALLET_ENVIRONMENT
   const executionMode = isLive ? 'binance-futures-live' : 'binance-futures-testnet'
@@ -8100,50 +8104,72 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
     getProtectiveTriggerRoundMode(payload.side, 'TAKE_PROFIT_MARKET'),
   )
 
-  await setBinanceMarginType({
+  // Every call before the entry order is labelled, so a rejected request says WHICH one it was (a bare exchange message such as
+  // "Precision is over the maximum defined for this asset" cannot otherwise be traced), and none of them can leave a position behind.
+  const step = async (label, run) => {
+    try {
+      return await run()
+    } catch (error) {
+      throw new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  await step('Margin type', () => setBinanceMarginType({
     symbol: payload.symbol,
     marginMode,
     apiKey,
     secretKey,
     baseUrl,
-  })
-  await setBinanceLeverage({
+  }))
+  await step('Leverage', () => setBinanceLeverage({
     symbol: payload.symbol,
     leverage: payload.leverage,
     apiKey,
     secretKey,
     baseUrl,
-  })
+  }))
 
   const clientOrderSeed = `xenios${Date.now()}${Math.random().toString(36).slice(2, 6)}`
-  const entryOrder = await placeBinanceOrder({
-    baseUrl,
-    apiKey,
-    secretKey,
+  const entryParams = {
     symbol: payload.symbol,
     side: payload.side,
     type: 'MARKET',
     quantity: formatFuturesQuantity(resolvedSymbolInfo, payload.quantity),
     newClientOrderId: `${clientOrderSeed}_entry`,
-  })
-  const entryOrderStatus = await fetchBinanceOrderStatus({
-    symbol: payload.symbol,
-    orderId: entryOrder.orderId,
-    apiKey,
-    secretKey,
-    baseUrl,
-  })
-  const executedQuantity = Number(entryOrderStatus?.executedQty || entryOrder.executedQty || payload.quantity)
-  const resolvedEntryPrice = getExchangeOrderFillPrice(entryOrderStatus || entryOrder, payload.entryPrice)
-
-  if (!Number.isFinite(executedQuantity) || executedQuantity <= 0) {
-    throw new Error(`${environmentLabel} did not return a valid executed quantity for the entry order.`)
   }
+  if (isLive) {
+    // Real money: have the exchange validate the exact entry order first. POST /fapi/v1/order/test never reaches the matching engine, so a
+    // rejected quantity or filter costs nothing and the reason is reported before any position exists.
+    await step('Order validation', () => fetchSignedFuturesApi('/fapi/v1/order/test', { method: 'POST', apiKey, secretKey, baseUrl, params: entryParams }))
+  }
+  const entryOrder = await step('Entry order', () => placeBinanceOrder({ baseUrl, apiKey, secretKey, ...entryParams }))
 
+  // From here a position EXISTS on the exchange. Anything that goes wrong must cancel the protective orders and close it (the catch below),
+  // never leave it open and unprotected - which is exactly what a failed status lookup used to do.
+  // A market-order acknowledgement can report executedQty "0.000" (a truthy string), so pick the first POSITIVE quantity, not the first non-empty one.
+  const firstPositive = (...values) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) ?? 0
+  let executedQuantity = firstPositive(entryOrder?.executedQty, payload.quantity)
+  let resolvedEntryPrice = Number(payload.entryPrice || 0)
+  let entryOrderStatus = null
   let stopOrder = null
   let takeProfitOrder = null
 
   try {
+    // The status lookup only refines the fill price and quantity: the entry response already says what filled, so a failed lookup must not
+    // abort the trade.
+    entryOrderStatus = await fetchBinanceOrderStatus({
+      symbol: payload.symbol,
+      orderId: entryOrder.orderId,
+      apiKey,
+      secretKey,
+      baseUrl,
+    }).catch(() => null)
+    executedQuantity = firstPositive(entryOrderStatus?.executedQty, entryOrder.executedQty, payload.quantity)
+    resolvedEntryPrice = getExchangeOrderFillPrice(entryOrderStatus || entryOrder, payload.entryPrice)
+
+    if (!Number.isFinite(executedQuantity) || executedQuantity <= 0) {
+      throw new Error(`${environmentLabel} did not return a valid executed quantity for the entry order.`)
+    }
+
     stopOrder = await placeBinanceAlgoOrder({
       apiKey,
       secretKey,
@@ -8225,17 +8251,19 @@ async function createExchangeTradeExecution(payload, settings, { forceBinance = 
       }),
     ])
 
-    await closeExchangePositionImmediately({
+    const positionClosed = await closeExchangePositionImmediately({
       symbol: payload.symbol,
       side: payload.side,
-      quantity: executedQuantity,
+      quantity: Number.isFinite(executedQuantity) && executedQuantity > 0 ? executedQuantity : payload.quantity,
       symbolInfo: resolvedSymbolInfo,
       apiKey,
       secretKey,
       baseUrl,
-    }).catch(() => null)
+    }).then(() => true).catch(() => false)
 
-    throw new Error(`Failed to place exchange-side stop loss / take profit after entry: ${error instanceof Error ? error.message : String(error)}`)
+    const reason = error instanceof Error ? error.message : String(error)
+    console.error(`[ai-trading] ${payload.symbol} ${payload.side} entry filled on ${environmentLabel} but a later step failed (${reason}); position ${positionClosed ? 'closed again' : 'COULD NOT BE CLOSED - CHECK BINANCE NOW'}.`)
+    throw new Error(`Failed to place exchange-side stop loss / take profit after entry: ${reason}. ${positionClosed ? 'The position was closed again.' : 'THE POSITION MAY STILL BE OPEN and unprotected: check Binance.'}`)
   }
 }
 
