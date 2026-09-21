@@ -10437,7 +10437,9 @@ async function resolveShadowSignals({ maxSignals = 15 } = {}) {
 app.get('/api/ai-trading/shadow', async (request, response) => {
   try {
     if (request.query.refresh === '1') await resolveShadowSignals({ maxSignals: 30 })
-    const signals = await getShadowSignals()
+    // `?since=<epoch ms>` limits the view to newer signals (e.g. to judge only the signals made after a prompt change).
+    const since = Number(request.query.since) || 0
+    const signals = (await getShadowSignals()).filter((signal) => signal.startedAt >= since)
     const compact = ({ id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, outcome, testMode }) => ({
       id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, testMode, result: outcome?.result ?? null, netPct: outcome?.netPct ?? null, minutes: outcome?.minutes ?? null,
     })

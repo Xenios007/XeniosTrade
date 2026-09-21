@@ -65,11 +65,17 @@ export function ShadowOutcomesPanel() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [showTest, setShowTest] = useState(false)
+  // Only signals newer than this many hours (0 = everything). Lets a prompt change be judged on the signals made after it.
+  const [sinceHours, setSinceHours] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     const load = (refresh) => {
-      fetch(`/api/ai-trading/shadow${refresh ? '?refresh=1' : ''}`)
+      const params = new URLSearchParams()
+      if (refresh) params.set('refresh', '1')
+      if (sinceHours > 0) params.set('since', String(Date.now() - sinceHours * 3_600_000))
+      const query = params.toString()
+      fetch(`/api/ai-trading/shadow${query ? `?${query}` : ''}`)
         .then((response) => response.json().then((payload) => ({ response, payload })))
         .then(({ response, payload }) => {
           if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
@@ -80,7 +86,7 @@ export function ShadowOutcomesPanel() {
     load(true)
     const timer = setInterval(() => { if (!document.hidden) load(false) }, 60_000)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [])
+  }, [sinceHours])
 
   const summary = showTest ? data?.testModeSummary : data?.summary
   const criticRate = summary?.criticRejectRate
@@ -89,13 +95,26 @@ export function ShadowOutcomesPanel() {
     <Panel
       title="Shadow outcomes"
       action={(
-        <button
-          type="button"
-          onClick={() => setShowTest((value) => !value)}
-          className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300 hover:border-white/20"
-        >
-          {showTest ? 'Showing test-mode signals' : 'Showing normal-mode signals'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={sinceHours}
+            onChange={(event) => setSinceHours(Number(event.target.value))}
+            aria-label="Signals to include"
+            className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-xs text-slate-300 outline-none"
+          >
+            <option value={0}>All signals</option>
+            <option value={24}>Last 24 hours</option>
+            <option value={6}>Last 6 hours</option>
+            <option value={2}>Last 2 hours</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => setShowTest((value) => !value)}
+            className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300 hover:border-white/20"
+          >
+            {showTest ? 'Showing test-mode signals' : 'Showing normal-mode signals'}
+          </button>
+        </div>
       )}
     >
       <div className="grid gap-3">
