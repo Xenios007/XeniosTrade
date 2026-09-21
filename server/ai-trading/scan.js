@@ -14,7 +14,7 @@ function closedAtOf(trade) {
  * A run is wasted LLM spend (and a duplicate entry) when the symbol already has an open AI position, was closed
  * moments ago, is being analysed right now, or the wallet is already at its position cap.
  */
-export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Date.now(), inFlight = new Set(), cooldownMs = AI_SCAN_COOLDOWN_MS }) {
+export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Date.now(), inFlight = new Set(), cooldownMs = AI_SCAN_COOLDOWN_MS, dailyBlock = null }) {
   const toRun = []
   const skipped = []
   const openInMode = trades.filter((trade) => isOpenAiTrade(trade) && trade.aiTradingMode === mode).length
@@ -22,7 +22,10 @@ export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Da
 
   for (const symbol of symbols) {
     const own = trades.filter((trade) => trade.symbol === symbol)
-    if (inFlight.has(symbol)) {
+    if (dailyBlock) {
+      // A daily limit stops NEW automatic entries, so there is no point spending model calls on any symbol.
+      skipped.push({ symbol, reason: dailyBlock.reason })
+    } else if (inFlight.has(symbol)) {
       skipped.push({ symbol, reason: 'A run for this symbol is already in progress.' })
     } else if (own.some(isOpenAiTrade)) {
       skipped.push({ symbol, reason: 'Already has an open AI position.' })

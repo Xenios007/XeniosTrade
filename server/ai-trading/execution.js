@@ -13,6 +13,7 @@
 import { summarizeAccount } from '../../src/lib/accountMetrics.js'
 import { buildEntryContext } from './position-manager.js'
 import { AVAILABLE_BALANCE_USAGE, marginCapFor } from './exchange-fit.js'
+import { dailyStatus } from './daily-limits.js'
 
 export const AI_TRADE_SOURCE = 'AI_TRADING'
 export const AI_MODEL_ID = 'ai-trading'
@@ -95,6 +96,11 @@ export function assertCanExecute({ run, mode, config, trades = [], livePrice, no
       // Armed is not enough: automatic real-money entries are their own switch (config.execution.autoExecuteReal).
       if (execution.autoExecuteReal !== true) {
         throw new AiExecutionError('Real money auto-execute is off. Turn it on in AI Settings, or execute this run yourself.', 403)
+      }
+      // Daily profit lock / loss stop / trade cap: stops NEW automatic entries (the scan planner checks the same rule earlier).
+      const daily = dailyStatus({ trades, mode, now, execution })
+      if (daily.blocked) {
+        throw new AiExecutionError(daily.blocked.reason, 403)
       }
     } else if (String(confirm).trim().toUpperCase() !== run.symbol) {
       throw new AiExecutionError(`Type ${run.symbol} to confirm this real money trade.`, 400)

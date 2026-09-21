@@ -1357,3 +1357,76 @@ test('critic: a CAUTION verdict passes the gate (only REJECT blocks), and the Ri
   assert.ok(fake.calls.includes('risk'), 'the Risk Manager was reached')
   assert.match(fake.prompts.risk, /Critic: CAUTION\./)
 })
+
+// ---- Active profile ---------------------------------------------------------------------------------------------------------
+
+test('active profile: off by default, needs an explicit true, and honoured in either mode', () => {
+  assert.equal(normalizeAiTradingConfig(null).scan.activeMode, false)
+  assert.equal(normalizeAiTradingConfig({ scan: { activeMode: true } }).scan.activeMode, true)
+  assert.equal(normalizeAiTradingConfig({ scan: { activeMode: 'true' } }).scan.activeMode, false)
+  assert.equal(normalizeAiTradingConfig({ execution: { mode: 'real' }, scan: { activeMode: true } }).scan.activeMode, true)
+})
+
+test('active profile: relaxes the Analyst, Flow and Risk Manager wording only; the Critic and the code gates are unchanged', async () => {
+  const capture = async (cfg) => {
+    const fake = fakeAgents()
+    const seen = {}
+    const spy = async (call) => {
+      const role = /You are the Market Analyst\./.test(call.systemPrompt) ? 'analyst' : /Market Flow Agent\./.test(call.systemPrompt) ? 'flow' : /You are the Critic\./.test(call.systemPrompt) ? 'critic' : 'risk'
+      seen[role] = call
+      return fake.callAgent(call)
+    }
+    const result = await runAiTradingPipeline({ symbol: 'BTCUSDT', config: cfg, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: spy, backtestStats: positiveStats })
+    return { seen, result }
+  }
+  const normal = await capture(config)
+  const active = await capture(normalizeAiTradingConfig({ scan: { activeMode: true } }))
+
+  assert.equal(active.result.activeMode, true)
+  assert.equal(normal.result.activeMode, false)
+
+  // Analyst: leans instead of defaulting to HOLD, honest confidence, no skeptical preamble
+  assert.match(active.seen.analyst.systemPrompt, /ACTIVE MODE: the account owner wants this pipeline to find tradable setups/)
+  assert.match(active.seen.analyst.userPrompt, /choose the direction the data leans toward even if the edge is modest/)
+  assert.doesNotMatch(active.seen.analyst.systemPrompt, /rejecting is a good outcome/)
+  assert.doesNotMatch(active.seen.analyst.userPrompt, /genuine edge/)
+  assert.doesNotMatch(normal.seen.analyst.userPrompt, /ACTIVE MODE/)
+
+  // Flow: two independent adverse signals before AGAINST; a lopsided ratio alone is not enough
+  assert.match(active.seen.flow.userPrompt, /AGAINST needs at least two independent adverse signals/)
+  assert.match(active.seen.flow.userPrompt, /persistently lopsided long\/short account ratio on its own is NOT enough/)
+  assert.doesNotMatch(normal.seen.flow.userPrompt, /ACTIVE MODE/)
+
+  // Risk Manager: REDUCE an extended-but-valid entry instead of vetoing; the notes say the instruction wins
+  assert.match(active.seen.risk.userPrompt, /an extended or late entry in a valid trend is a reason to REDUCE/)
+  assert.match(active.seen.risk.systemPrompt, /ACTIVE MODE is on for this run/)
+  assert.match(active.seen.risk.systemPrompt, /the ACTIVE MODE instruction wins: REDUCE rather than VETO/)
+  assert.doesNotMatch(normal.seen.risk.userPrompt, /ACTIVE MODE/)
+  assert.doesNotMatch(normal.seen.risk.systemPrompt, /ACTIVE MODE is on/)
+
+  // Critic: already reserves REJECT for fatal flaws, so its prompt is identical in both profiles
+  assert.equal(active.seen.critic.systemPrompt, normal.seen.critic.systemPrompt)
+  assert.equal(active.seen.critic.userPrompt, normal.seen.critic.userPrompt)
+
+  // the code gates are untouched: the same fake agents produce the same gates
+  assert.deepEqual(active.result.final.gates.map((gate) => [gate.id, gate.passed]), normal.result.final.gates.map((gate) => [gate.id, gate.passed]))
+})
+
+test('active profile: test mode keeps its own wording when both are on (the one-shot check wins)', async () => {
+  const fake = fakeAgents()
+  let analystSystem = ''
+  let riskSystem = ''
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: normalizeAiTradingConfig({ scan: { testMode: true, activeMode: true } }), getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => {
+      if (/You are the Market Analyst\./.test(call.systemPrompt)) analystSystem = call.systemPrompt
+      if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) riskSystem = call.systemPrompt
+      return fake.callAgent(call)
+    },
+    backtestStats: positiveStats,
+  })
+  assert.match(analystSystem, /TEST MODE \(testnet, fake money\)/)
+  assert.doesNotMatch(analystSystem, /ACTIVE MODE/)
+  assert.match(riskSystem, /the TEST MODE instruction wins/)
+  assert.doesNotMatch(riskSystem, /ACTIVE MODE is on/)
+})

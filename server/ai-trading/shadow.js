@@ -50,6 +50,7 @@ export function buildShadowSignal(run) {
     confidence: finite(analyst.confidence) ? Number(analyst.confidence) : null,
     startedAt: Number(run.startedAt),
     testMode: run.testMode === true,
+    activeMode: run.activeMode === true,
     group: classifySignal(run),
     verdicts: {
       flow: stage('flow')?.output?.verdict ?? null,
@@ -208,8 +209,9 @@ function summarizeGroup(key, signals, feePct) {
 }
 
 /** Per-stage results, plus how the Critic and Flow verdicts were distributed, for the dashboard. */
-export function summarizeShadow(signals, { feePct = SHADOW_FEE_ROUND_TRIP_PCT, testMode = false } = {}) {
-  const pool = signals.filter((signal) => signal.testMode === testMode)
+export function summarizeShadow(signals, { feePct = SHADOW_FEE_ROUND_TRIP_PCT, testMode = false, activeMode = undefined } = {}) {
+  // `activeMode` true/false limits the view to signals made under the active profile / the normal one (undefined = both).
+  const pool = signals.filter((signal) => signal.testMode === testMode && (activeMode === undefined || Boolean(signal.activeMode) === activeMode))
   const keys = ['executed', 'approved_not_opened', 'flow', 'critic', 'risk', 'other']
   const groups = [summarizeGroup('all', pool, feePct), ...keys.map((key) => summarizeGroup(key, pool.filter((signal) => signal.group === key), feePct)).filter((group) => group.signals > 0)]
   const tally = (field) => {

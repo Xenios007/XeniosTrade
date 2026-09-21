@@ -52,11 +52,21 @@ function ModeCard({ mode, active, title, body, onSelect, busy }) {
   )
 }
 
+// The editable number fields of the execution settings, as strings for the inputs.
+const draftFromExecution = (execution) => ({
+  testnetStartingBalance: String(execution.testnetStartingBalance),
+  realMaxMarginUsdt: String(execution.realMaxMarginUsdt),
+  dailyProfitTargetUsdt: String(execution.dailyProfitTargetUsdt ?? 0),
+  dailyMaxLossUsdt: String(execution.dailyMaxLossUsdt ?? 0),
+  dailyMaxTrades: String(execution.dailyMaxTrades ?? 0),
+})
+
 export function AiSettingsPage({ settings }) {
   const [config, setConfig] = useState(null)
   const [scanStatus, setScanStatus] = useState(null)
   const [localLogins, setLocalLogins] = useState(null)
-  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '' })
+  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '', dailyProfitTargetUsdt: '', dailyMaxLossUsdt: '', dailyMaxTrades: '' })
+  const [daily, setDaily] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -69,10 +79,8 @@ export function AiSettingsPage({ settings }) {
     setConfig(payload.config)
     setScanStatus(payload.scanStatus || null)
     setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
-    setDraft({
-      testnetStartingBalance: String(payload.config.execution.testnetStartingBalance),
-      realMaxMarginUsdt: String(payload.config.execution.realMaxMarginUsdt),
-    })
+    setDaily(payload.daily || null)
+    setDraft(draftFromExecution(payload.config.execution))
   }, [])
 
   useEffect(() => {
@@ -120,10 +128,8 @@ export function AiSettingsPage({ settings }) {
         body: JSON.stringify({ ...config, execution: { ...config.execution, ...patch } }),
       })
       setConfig(payload.config)
-      setDraft({
-        testnetStartingBalance: String(payload.config.execution.testnetStartingBalance),
-        realMaxMarginUsdt: String(payload.config.execution.realMaxMarginUsdt),
-      })
+      setDraft(draftFromExecution(payload.config.execution))
+      requestJson('/api/ai-trading/config').then((fresh) => setDaily(fresh.daily || null)).catch(() => {})
       setNotice(message)
       window.dispatchEvent(new Event(AI_CONFIG_CHANGED_EVENT))
       return true
@@ -221,6 +227,22 @@ export function AiSettingsPage({ settings }) {
               />
             </label>
           )}
+          <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
+            <span>
+              Active profile <Badge tone={config.execution.mode === 'real' ? 'down' : 'info'}>{config.execution.mode === 'real' ? 'REAL MONEY' : 'Testnet'}</Badge>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                Stays on (unlike test mode): the Analyst takes the direction the data leans toward instead of defaulting to HOLD, Market Flow needs two independent adverse
+                signals before it blocks (a lopsided long/short ratio alone no longer does), and the Risk Manager reduces the size of an extended-but-valid entry instead of vetoing it.
+                Every code gate, the risk ceilings, the margin cap and the daily limits still apply. It finds more trades, not better ones: judge it in Run History, Shadow outcomes.
+              </span>
+            </span>
+            <Toggle
+              checked={Boolean(config.scan.activeMode)}
+              disabled={busy}
+              label="Active profile"
+              onChange={(value) => saveScan({ activeMode: value }, value ? 'Active profile is on: the pipeline will look for tradable setups more readily.' : 'Active profile is off.')}
+            />
+          </label>
           <div>
             <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Symbols to scan</div>
             <div className="flex flex-wrap gap-2">
@@ -315,6 +337,53 @@ export function AiSettingsPage({ settings }) {
               onChange={(value) => saveExecution({ autoExecuteReal: value }, value ? 'Real money auto-execute is ON: approved runs now open live orders by themselves.' : 'Real money auto-execute is off.')}
             />
           </label>
+
+          <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3">
+            <div className="text-sm text-slate-200">
+              Daily limits on automatic real-money trades
+              <span className="mt-0.5 block text-xs text-slate-500">
+                Once today&apos;s realized result (after an estimated 0.1% fee per trade) reaches the profit target or the loss stop, or that many trades were opened,
+                no new automatic real trade opens until tomorrow (Manila time). Open positions keep being managed, and you can still execute a run by hand. 0 = off.
+              </span>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              {[
+                ['dailyProfitTargetUsdt', 'Profit target (USDT)'],
+                ['dailyMaxLossUsdt', 'Loss stop (USDT)'],
+                ['dailyMaxTrades', 'Max trades'],
+              ].map(([key, label]) => (
+                <label key={key} className="grid gap-1 text-xs text-slate-400">
+                  {label}
+                  <input
+                    type="number"
+                    min={0}
+                    step={key === 'dailyMaxTrades' ? 1 : 0.5}
+                    value={draft[key]}
+                    onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
+                    className="w-32 rounded-2xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-white outline-none"
+                  />
+                </label>
+              ))}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => saveExecution({
+                  dailyProfitTargetUsdt: Number(draft.dailyProfitTargetUsdt) || 0,
+                  dailyMaxLossUsdt: Number(draft.dailyMaxLossUsdt) || 0,
+                  dailyMaxTrades: Number(draft.dailyMaxTrades) || 0,
+                }, 'Daily limits saved.')}
+                className="rounded-full bg-sky-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
+              >
+                Save limits
+              </button>
+            </div>
+            {daily ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                <span>Today ({daily.dateKey}, {daily.mode}): realized {daily.realizedUsdt >= 0 ? '+' : ''}{Number(daily.realizedUsdt).toFixed(2)} USDT · {daily.tradesOpened} opened · {daily.wins} won / {daily.losses} lost</span>
+                {daily.blocked ? <Badge tone="warn">{daily.blocked.code === 'profit' ? 'Profit target reached' : daily.blocked.code === 'loss' ? 'Loss stop hit' : 'Trade cap reached'}</Badge> : <Badge tone="up">Trading allowed</Badge>}
+              </div>
+            ) : null}
+          </div>
 
           <label className="flex items-center justify-between gap-4 text-sm text-slate-200">
             <span>

@@ -425,7 +425,7 @@ Return STRICT JSON only.
  * How this pipeline consumes the Risk Manager's answer. Appended after the role text; where it differs from the role text
  * (field names, who computes the quantity, hard limits) these notes are what the code actually does.
  */
-export function riskManagerPipelineNotes({ testMode = false, fixedLeverage = 0 } = {}) {
+export function riskManagerPipelineNotes({ testMode = false, activeMode = false, fixedLeverage = 0 } = {}) {
   const lines = [
     '============================================================',
     'HOW THIS PIPELINE USES YOUR ANSWER',
@@ -450,6 +450,14 @@ export function riskManagerPipelineNotes({ testMode = false, fixedLeverage = 0 }
     'MFE/MAE percentiles, fees, funding, portfolio drawdown) is unavailable to you, so account for that uncertainty instead of inventing it.',
     'The backtest line, the exchange minimum order / margin lines and the open-positions line are real data when present.',
   ]
+  if (activeMode && !testMode) {
+    lines.push(
+      '',
+      'ACTIVE MODE is on for this run (see the ACTIVE MODE instruction in the user message). Where it conflicts with the VETO conditions above',
+      '(an extended or late entry in a valid trend, weak background statistics), the ACTIVE MODE instruction wins: REDUCE rather than VETO, and',
+      'still VETO a clearly unacceptable trade.',
+    )
+  }
   if (testMode) {
     lines.push(
       '',

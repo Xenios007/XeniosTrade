@@ -364,14 +364,23 @@ const TEST_MODE_RISK_PREAMBLE = 'You are one agent in a four-stage crypto perpet
 const TEST_MODE_RISK_INSTRUCTION = 'TEST MODE: VETO only if the trade is clearly unacceptable or you cannot form any plan inside the fixed ceilings. A weak edge, the negative backtest background, a Critic CAUTION or crowded flow are reasons to size SMALL (for example a low riskPercent and 1-2x leverage), not to veto. Choose a stop at or beyond the ATR floor and a target that gives at least the required reward:risk. Report the confidence you actually hold that the trade should be taken.'
 const TEST_MODE_INSTRUCTION = 'TEST MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it, and propose a realistic stop and target.'
 
-function analystPrompts(snapshot, testMode = false) {
+// Active profile (config.scan.activeMode): the persistent, real-money-capable counterpart of test mode. It changes wording only (never a code gate,
+// ceiling or daily limit): the Analyst takes a modest lean instead of defaulting to HOLD, Market Flow needs two independent adverse signals before it
+// blocks (a lopsided long/short ratio alone is what blocked most uptrend longs), and the Risk Manager REDUCES an extended-but-valid entry instead of
+// vetoing it. The Critic already reserves REJECT for fatal flaws, so it needs no separate wording.
+const ACTIVE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). ACTIVE MODE: the account owner wants this pipeline to find tradable setups rather than default to HOLD. Later stages still vet the trade and fixed limits still apply. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const ACTIVE_ANALYST_INSTRUCTION = 'ACTIVE MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol ATR and realistic for the next few 5M candles.'
+const ACTIVE_FLOW_INSTRUCTION = 'ACTIVE MODE: AGAINST needs at least two independent adverse signals (for example open interest moving against the trade, taker flow against it, or extreme funding or basis). A persistently lopsided long/short account ratio on its own is NOT enough: report crowding HIGH if it is, but the verdict is NEUTRAL (or SUPPORTS) unless something else is also against the trade.'
+const ACTIVE_RISK_INSTRUCTION = 'ACTIVE MODE: an extended or late entry in a valid trend is a reason to REDUCE (smaller size, tighter stop, nearer target), not to VETO. VETO only for a clearly unacceptable trade: no defensible stop, a fatal flaw the Critic raised, liquidation too close to the stop, broken data, or negative evidence specific to this setup. Background statistics from unrelated bots are weak evidence, not a veto.'
+
+function analystPrompts(snapshot, testMode = false, activeMode = false) {
   return {
-    systemPrompt: `${testMode ? TEST_MODE_PREAMBLE : SYSTEM_PREAMBLE} You are the Market Analyst.`,
+    systemPrompt: `${testMode ? TEST_MODE_PREAMBLE : activeMode ? ACTIVE_PREAMBLE : SYSTEM_PREAMBLE} You are the Market Analyst.`,
     userPrompt: [
       describeMarket(snapshot),
       '',
       'Read the candles, indicators, volume, structure and regime, then decide LONG, SHORT or HOLD for the next few 5M candles.',
-      testMode ? TEST_MODE_INSTRUCTION : 'Only choose LONG/SHORT when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.',
+      testMode ? TEST_MODE_INSTRUCTION : activeMode ? ACTIVE_ANALYST_INSTRUCTION : 'Only choose LONG/SHORT when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.',
       'Reply with exactly: {"action":"LONG|SHORT|HOLD","confidence":0-100,"regime":"short label","stopLossPercent":number,"takeProfitPercent":number,"keyFactors":["up to 5 short bullets"],"reasoning":"2-4 sentences"}',
     ].join('\n'),
   }
@@ -388,7 +397,7 @@ function backtestLine(backtest) {
     : `Backtest background: ${backtest.note}`
 }
 
-function flowPrompts(snapshot, analyst, metrics) {
+function flowPrompts(snapshot, analyst, metrics, activeMode = false) {
   return {
     systemPrompt: `${SYSTEM_PREAMBLE} You are the Market Flow Agent. You judge derivatives positioning and order flow only — the Analyst already covers the chart, so do not restate it.`,
     userPrompt: [
@@ -400,6 +409,7 @@ function flowPrompts(snapshot, analyst, metrics) {
       '',
       'Judge whether this flow supports the proposed direction. Look for: crowding on the same side as the trade (stretched funding, lopsided long/short ratios) that risks a squeeze against it; whether open interest confirms the move (new positions) or contradicts it (covering/liquidation); aggressive taker flow or book depth leaning against the trade; and, for alts, whether BTC is moving against it. Ignore metrics marked unavailable rather than guessing them.',
       'SUPPORTS = flow confirms the trade; NEUTRAL = mixed or not informative; AGAINST = flow contradicts it or makes it dangerous.',
+      ...(activeMode ? [ACTIVE_FLOW_INSTRUCTION] : []),
       'Reply with exactly: {"verdict":"SUPPORTS|NEUTRAL|AGAINST","crowding":"LOW|MEDIUM|HIGH","flags":[{"issue":"specific observation with the number","severity":"low|medium|high"}],"reasoning":"2-3 sentences"}',
     ].join('\n'),
   }
@@ -508,7 +518,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   return lines
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, constraints = null, flowMetrics = null }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
     side: analyst.action,
@@ -520,7 +530,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
   })
   return {
     // The role text is the project owner's Risk Manager prompt (risk-manager-prompt.js); the notes after it say how this pipeline uses the answer.
-    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode, fixedLeverage: limits.fixedLeverage })}`,
+    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode, activeMode: activeMode && !testMode, fixedLeverage: limits.fixedLeverage })}`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -547,7 +557,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
       'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
-      ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : []),
+      ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : activeMode ? [ACTIVE_RISK_INSTRUCTION] : []),
       `confidence (0-100) is your final confidence that this trade should be taken; opening needs at least ${limits.minConfidence}. A VETO may omit it.`,
       'Reply with exactly: {"decision":"APPROVE|REDUCE|VETO","confidence":0-100,"stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
     ].join('\n'),
@@ -640,6 +650,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     finishedAt: null,
     advisoryOnly: true,
     testMode: config.scan?.testMode === true,
+    activeMode: config.scan?.activeMode === true,
     price: null,
     config: { agents: config.agents, risk: config.risk },
     stages: [],
@@ -681,7 +692,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'analyst',
     agentConfig: config.agents.analyst,
     callAgent,
-    prompts: analystPrompts(snapshot, config.scan?.testMode === true),
+    prompts: analystPrompts(snapshot, config.scan?.testMode === true, config.scan?.activeMode === true),
     parse: parseAnalystOutput,
   })
   const analyst = analystStage.output
@@ -729,7 +740,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
       id: 'flow',
       agentConfig: config.agents.flow,
       callAgent,
-      prompts: flowPrompts(snapshot, analyst, flowData.metrics),
+      prompts: flowPrompts(snapshot, analyst, flowData.metrics, config.scan?.activeMode === true),
       parse: parseFlowOutput,
     })
     // Keep the evidence next to the verdict so the report is auditable.
@@ -765,7 +776,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, constraints, flowMetrics: flowData?.metrics }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output

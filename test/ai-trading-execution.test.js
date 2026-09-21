@@ -195,3 +195,30 @@ test('wallet summaries: testnet uses the configured start; real derives its base
   assert.equal(real.ledger.runningBalance, 10.75)
   assert.equal(summarizeAiWallet({ mode: 'real', trades: [], config: config(), exchange: null }).startingBalance, 0)
 })
+
+// ---- Daily limits at the executor -------------------------------------------------------------------------------------------
+
+test('daily limits: an automatic real entry is refused once a limit is reached; manual execution and testnet are not', async () => {
+  const { manilaDay } = await import('../server/ai-trading/daily-limits.js')
+  const today = manilaDay(NOW)
+  const wins = [
+    { symbol: 'ETHUSDT', aiTradingMode: 'real', status: 'CLOSED_TP', pnl: 2.16, notional: 360, closedDateKey: today, tradeDateKey: today },
+    { symbol: 'SOLUSDT', aiTradingMode: 'real', status: 'CLOSED_TP', pnl: 2.16, notional: 360, closedDateKey: today, tradeDateKey: today },
+  ]
+  const limited = config({ mode: 'real', realArmed: true, autoExecuteReal: true, dailyProfitTargetUsdt: 2 })
+  const auto = (over = {}) => base({ mode: 'real', config: limited, auto: true, confirm: '', trades: wins, ...over })
+
+  rejects(auto(), /Daily profit target reached/)
+  // the same trades with no target set: allowed
+  assertCanExecute(auto({ config: config({ mode: 'real', realArmed: true, autoExecuteReal: true }) }))
+  // loss stop
+  const losses = wins.map((trade) => ({ ...trade, status: 'CLOSED_SL', pnl: -1.44 }))
+  rejects(
+    auto({ trades: losses, config: config({ mode: 'real', realArmed: true, autoExecuteReal: true, dailyMaxLossUsdt: 3.6 }) }),
+    /Daily loss limit reached/,
+  )
+  // manual real execution (typed symbol) is the operator's call and is not limited
+  assertCanExecute(base({ mode: 'real', config: limited, confirm: 'BTCUSDT', trades: wins }))
+  // testnet auto-execution is never limited
+  assertCanExecute(base({ config: config({ autoExecuteTestnet: true, dailyProfitTargetUsdt: 2 }), auto: true, trades: wins.map((trade) => ({ ...trade, aiTradingMode: 'testnet' })) }))
+})

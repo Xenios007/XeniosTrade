@@ -106,6 +106,10 @@ export const AI_TRADING_REAL_FIXED_LEVERAGE_MAX = 10
 export const AI_TRADING_EXECUTION_LIMITS = {
   testnetStartingBalance: { min: 10, max: 1_000_000, step: 10, label: 'Testnet wallet starting balance (USDT)' },
   realMaxMarginUsdt: { min: 1, max: 100, step: 1, label: 'Real money: max margin per trade (USDT)' },
+  // Daily limits on AUTOMATIC real-money entries (0 = off). See server/ai-trading/daily-limits.js.
+  dailyProfitTargetUsdt: { min: 0, max: 100_000, step: 0.5, label: 'Daily profit target (USDT, 0 = off)' },
+  dailyMaxLossUsdt: { min: 0, max: 100_000, step: 0.5, label: 'Daily loss stop (USDT, 0 = off)' },
+  dailyMaxTrades: { min: 0, max: 50, step: 1, label: 'Max real trades per day (0 = off)' },
 }
 
 export const DEFAULT_AI_TRADING_EXECUTION = {
@@ -120,6 +124,11 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   // The Position Manager always reviews open trades. It only ACTS (moves stops, takes partials, exits) on testnet unless this is
   // switched on for real-money positions; real-money entries are manual, so their management is opt-in too.
   positionManagerActsOnReal: false,
+  // Daily limits on automatic real-money entries (0 = off): stop opening new trades once today's realized result (after estimated fees) reaches the
+  // profit target or the loss stop, or once this many real trades were opened today. Open positions keep being managed; manual execution is unaffected.
+  dailyProfitTargetUsdt: 0,
+  dailyMaxLossUsdt: 0,
+  dailyMaxTrades: 0,
   // Real money only: 0 = leverage follows from risk and stop (the default); N >= 1 = the Risk Manager's leverage is fixed at exactly Nx and the
   // position, margin and loss all follow from it (see riskLimitsFor). Never applies on testnet.
   realFixedLeverage: 0,
@@ -139,6 +148,10 @@ export const DEFAULT_AI_TRADING_SCAN = {
   // whole chain (Flow, Critic, Risk, testnet open, then the Position Manager) gets exercised. Every later gate and the risk ceilings are
   // unchanged. Never honoured outside testnet mode; the server switches it off after the first trade it opens.
   testMode: false,
+  // Active profile (persistent, either mode): the Analyst takes the direction the data leans toward instead of defaulting to HOLD, Market Flow needs two
+  // independent adverse signals before it blocks, and the Risk Manager REDUCES (smaller size) an extended-but-valid entry instead of vetoing it. Every
+  // code gate, ceiling and daily limit still applies. Off by default.
+  activeMode: false,
 }
 
 export const DEFAULT_AI_TRADING_CONFIG = {
@@ -210,6 +223,9 @@ export function normalizeAiTradingConfig(raw) {
     autoExecuteReal: realArmed && executionSource.autoExecuteReal === true,
     positionManagerActsOnReal: executionSource.positionManagerActsOnReal === true,
     realFixedLeverage: Math.min(Math.max(Math.round(Number(executionSource.realFixedLeverage)) || 0, 0), AI_TRADING_REAL_FIXED_LEVERAGE_MAX),
+    dailyProfitTargetUsdt: Math.round(clampNumber(executionSource.dailyProfitTargetUsdt, AI_TRADING_EXECUTION_LIMITS.dailyProfitTargetUsdt, 0) * 100) / 100,
+    dailyMaxLossUsdt: Math.round(clampNumber(executionSource.dailyMaxLossUsdt, AI_TRADING_EXECUTION_LIMITS.dailyMaxLossUsdt, 0) * 100) / 100,
+    dailyMaxTrades: Math.round(clampNumber(executionSource.dailyMaxTrades, AI_TRADING_EXECUTION_LIMITS.dailyMaxTrades, 0)),
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,
@@ -232,6 +248,7 @@ export function normalizeAiTradingConfig(raw) {
     symbols: scanSymbols.length ? scanSymbols : [...DEFAULT_AI_TRADING_SCAN.symbols],
     // Honoured in either mode. The server resets it on a mode switch and after the first trade it opens, so it never lingers.
     testMode: scanSource.testMode === true,
+    activeMode: scanSource.activeMode === true,
   }
 
   return { agents, risk, execution, scan }

@@ -83,6 +83,7 @@ import { getFingptStatus } from './ai-trading/fingpt-status.js'
 import { buildMarketSnapshot, riskLimitsFor, runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-trading/exchange-fit.js'
 import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
+import { dailyStatus } from './ai-trading/daily-limits.js'
 import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
@@ -10245,7 +10246,8 @@ const aiTradingRunsInFlight = new Set()
 
 app.get('/api/ai-trading/config', async (_request, response) => {
   const noLogin = () => ({ available: false, loggedIn: false })
-  const [config, quantStats, scanStatus, codex, claude, fingpt] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin), getFingptStatus()])
+  const [config, quantStats, scanStatus, codex, claude, fingpt, aiTrades] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin), getFingptStatus(), getAiTrades()])
+  const daily = dailyStatus({ trades: aiTrades, mode: config.execution.mode, execution: config.execution })
   response.json({
     ok: true,
     config,
@@ -10253,6 +10255,7 @@ app.get('/api/ai-trading/config', async (_request, response) => {
     codex,
     claude,
     fingpt,
+    daily,
     backtestStats: quantStats
       ? { available: true, generatedAt: quantStats.generatedAt, tradeCount: quantStats.tradeCount, source: quantStats.source }
       : { available: false },
@@ -10439,6 +10442,7 @@ app.get('/api/ai-trading/shadow', async (request, response) => {
     if (request.query.refresh === '1') await resolveShadowSignals({ maxSignals: 30 })
     // `?since=<epoch ms>` limits the view to newer signals (e.g. to judge only the signals made after a prompt change).
     const since = Number(request.query.since) || 0
+    const profile = request.query.profile === 'active' ? true : request.query.profile === 'normal' ? false : undefined
     const signals = (await getShadowSignals()).filter((signal) => signal.startedAt >= since)
     const compact = ({ id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, outcome, testMode }) => ({
       id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, testMode, result: outcome?.result ?? null, netPct: outcome?.netPct ?? null, minutes: outcome?.minutes ?? null,
@@ -10446,7 +10450,7 @@ app.get('/api/ai-trading/shadow', async (request, response) => {
     response.json({
       ok: true,
       total: signals.length,
-      summary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT }),
+      summary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, activeMode: profile }),
       testModeSummary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, testMode: true }),
       recent: signals.slice(0, 40).map(compact),
     })
@@ -10553,6 +10557,7 @@ app.post('/api/ai-trading/run', async (request, response) => {
 // Auto-execute applies exactly as for a manual run: testnet when autoExecuteTestnet is on, real money only when armed and autoExecuteReal is on. One cycle at a time:
 // a tick that arrives while the previous cycle is still running is dropped, not queued.
 let aiScanCycleRunning = false
+let aiDailyBlockLogged = ''
 
 async function runAiScanCycle() {
   if (aiScanCycleRunning) return
@@ -10565,11 +10570,19 @@ async function runAiScanCycle() {
     const startedAt = Date.now()
     statusTouched = true
     await updateAiScanStatus((status) => ({ ...status, running: true, lastStartedAt: startedAt, lastError: null }))
+    const cycleTrades = await getAiTrades()
+    // Daily profit lock / loss stop / trade cap (real money): a limit stops NEW automatic entries before any model call is spent.
+    const daily = dailyStatus({ trades: cycleTrades, mode: config.execution.mode, execution: config.execution })
+    if (daily.blocked && aiDailyBlockLogged !== `${daily.dateKey}:${daily.blocked.code}`) {
+      aiDailyBlockLogged = `${daily.dateKey}:${daily.blocked.code}`
+      console.log(`[ai-trading] ${daily.blocked.reason}`)
+    }
     const { toRun, skipped } = planScanCycle({
       symbols: config.scan.symbols,
-      trades: await getAiTrades(),
+      trades: cycleTrades,
       mode: config.execution.mode,
       inFlight: aiTradingRunsInFlight,
+      dailyBlock: daily.blocked,
     })
     const results = {}
     const stamp = Date.now()
