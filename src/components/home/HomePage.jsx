@@ -86,7 +86,7 @@ const STEPS = [
 
 const SAFEGUARDS = [
   { Icon: OctagonX, title: 'Fail closed', body: 'A stage that errors, times out or returns junk means no trade. A missing verdict is never a pass.' },
-  { Icon: ShieldCheck, title: 'Code-enforced risk ceilings', body: 'A model decides stops, size and leverage, but plain code re-checks every number against fixed ceilings. A model can only be stricter than them, never looser.' },
+  { Icon: ShieldCheck, title: 'AI judgment, not a scoring filter', body: 'The Risk Manager decides stop, size and leverage after weighing every earlier agent’s evidence — no earlier verdict auto-blocks it, and no code ceiling resizes its answer. What is enforced is real: the exchange’s minimum order size and the wallet’s actual margin.' },
   { Icon: Wallet, title: 'Paper-first', body: 'Bots trade testnet and simulated wallets. Real-money execution is a separate, explicitly armed switch, off by default.' },
   { Icon: Lock, title: 'Private by design', body: 'Sign-in is restricted to approved accounts, and secrets never leave the server.' },
 ]

@@ -286,8 +286,10 @@ export function PipelineFlow({ run, running, trade = null }) {
   )
 }
 
-// Gates a run can carry today; older runs also have a retired 'decision' gate that is not shown.
-const SHOWN_GATE_IDS = ['analyst', 'flow', 'critic', 'risk']
+// A run carries only 'analyst' and 'risk' gates today (Flow/Critic became evidence for the Risk Manager, not
+// gates of their own). 'flow'/'critic'/'decision' are kept here so already-stored historical runs (saved before
+// this change) still render their gate rows; a fresh run just never has those ids.
+const SHOWN_GATE_IDS = ['analyst', 'flow', 'critic', 'decision', 'risk']
 
 function Gates({ gates }) {
   const shown = (gates || []).filter((gate) => SHOWN_GATE_IDS.includes(gate.id))

@@ -443,8 +443,8 @@ function AgentAssignments({ settings }) {
     >
       <div className="mb-4 text-xs leading-relaxed text-slate-400">
         The <Link to="/ai-trading" className="text-sky-300 hover:underline">AI Trading</Link> pipeline has five AI agents and every one calls a model —
-        four decide the entry (Analyst, Flow, Critic, Risk Manager) and the Position Manager manages the open trade. Pick which provider answers each. The Risk Manager model decides stop, size and leverage; fixed ceilings in code only cap its answer, so it can be stricter
-        but never looser. Keys live on <span className="text-sky-300">Providers &amp; Keys</span> (Codex and Claude need none — they use the server's own login); using a different model for the Critic than for the Analyst
+        four decide the entry (Analyst, Flow, Critic, Risk Manager) and the Position Manager manages the open trade. Pick which provider answers each. Every stage always runs and reaches the Risk Manager — a Flow or Critic verdict is evidence for it, not a filter that skips it. The Risk Manager decides stop, size and leverage; its numbers are used exactly as given, nothing in code
+        caps or resizes them. Keys live on <span className="text-sky-300">Providers &amp; Keys</span> (Codex and Claude need none — they use the server's own login); using a different model for the Critic than for the Analyst
         makes for a better second opinion.
       </div>
       {!draft ? (

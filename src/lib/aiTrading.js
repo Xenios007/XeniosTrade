@@ -1,6 +1,7 @@
 // Shared (client + server) definition of the AI Trading pipeline: the five
-// agents, their default provider assignments, and the fixed risk ceilings the
-// deterministic Risk Manager enforces on the Risk Manager model's answer. No Node builtins here, same as
+// agents, their default provider assignments, and the reference risk numbers shown to the Risk Manager for
+// context (account equity, what a rule-based bot would mechanically do) — not enforced in code; see
+// server/ai-trading/pipeline.js's file header for why. No Node builtins here, same as
 // aiProviders.js / signalModels.js.
 //
 // AI Trading is NOT a bot: it has no signal model and the pipeline itself never
@@ -37,10 +38,13 @@ export const AI_TRADING_AGENTS = [
     id: 'risk',
     name: 'Risk Manager',
     kind: 'ai',
-    // The model chooses stop, target, risk and leverage (or vetoes); code then clamps every number to the
-    // fixed ceilings (AI_TRADING_RISK_LIMITS), so the model can only ever be stricter than them, never looser.
-    guardrail: 'Fixed ceilings enforced in code',
-    role: 'The AI model decides stop-loss, size, risk and leverage, or vetoes. Nothing is set by hand; fixed ceilings in code only cap its answer.',
+    // Receives everything the three agents above produced and makes the final call. The model chooses stop,
+    // target, risk and leverage (or vetoes) and its numbers are used exactly as given — nothing in code widens,
+    // tightens, caps or rejects them. The only checks left are real exchange/account constraints (the minimum
+    // order size, the wallet's actual margin), not opinions on the trade. See AI_TRADING_RISK_LIMITS below: those
+    // numbers are reference context for the model, not a ceiling.
+    guardrail: 'AI judgment only — no code ceiling',
+    role: 'The AI model decides stop-loss, size, risk and leverage, or vetoes. Nothing is set by hand and nothing in code overrides its answer.',
     output: 'Sized trade plan or veto',
   },
   {
@@ -77,9 +81,9 @@ export const AI_TRADING_SYMBOLS = [...AI_TRADING_BASE_SYMBOLS, ...AI_TRADING_TEM
 export const AI_TRADING_SYMBOL_PATTERN = /^[A-Z0-9]{2,20}USDT$/
 
 // Risk is decided by the Risk Manager model, not by the user: there is no risk
-// setting to edit. These are the fixed ceilings (and the accountEquity baseline)
-// that plain code enforces on whatever the model answers, so it can be stricter
-// than them but never looser. `normalizeAiTradingConfig` always resets
+// setting to edit. These are reference numbers only (the accountEquity baseline, and what a rule-based bot
+// would mechanically do, for contrast) shown to the model in its prompt — nothing in code clamps or vetoes
+// against them; see server/ai-trading/pipeline.js's file header. `normalizeAiTradingConfig` always resets
 // `config.risk` to the defaults below, so a bad PUT or a hand-edited file cannot
 // change them; change them here, in code, on purpose.
 export const AI_TRADING_RISK_LIMITS = {

@@ -1,7 +1,7 @@
 // AI Trading entry pipeline — four agents decide whether a trade should exist (a fifth, the Position Manager, manages it after entry;
 // see position-manager.js):
 //
-//   Market data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager (final entry approver) -> Trade / No Trade
+//   Market data -> Market Analyst -> Market Flow Agent -> Critic -> Risk Manager (receives everything above, final judgment) -> Trade / No Trade
 //
 // This is advisory only. Nothing here talks to an exchange, a wallet or the
 // auto-trade loop; the result is a report. Design rules:
@@ -10,15 +10,23 @@
 //    positioning and order flow (flow-data.js) that the Analyst cannot see.
 //    Backtest statistics are background context for the Risk Manager only —
 //    no longer an agent and no longer a gate.
-//  - Fail closed. A stage that errors or has no provider yields HOLD, never a trade.
-//  - There is no separate Decision Agent: the Risk Manager is the final AI for entry
-//    (APPROVE / REDUCE / VETO plus a confidence). Approval requires every deterministic
-//    gate (see evaluateGates) to pass, and later LLMs are not asked once a gate blocked the trade.
-//  - The Risk Manager (an LLM) owns stop / size / leverage; the Analyst only
-//    proposes stop and target percentages. Whatever the Risk Manager answers is
-//    then clamped by deterministic code to the fixed risk ceilings
-//    (reviewRiskProposal / runRiskManager), so the model can be stricter than
-//    the limits but never looser.
+//  - AI Trading, not bot trading: every stage always runs and reaches the Risk Manager (Flow AGAINST and
+//    Critic REJECT are EVIDENCE in its prompt, not pass/fail checkpoints that skip it — a bot scores and
+//    filters; this pipeline lets the AI that is actually built to weigh conflicting evidence see all of it).
+//    Fail closed still applies to a genuine stage failure (no provider, an LLM/parse error, no flow data): that
+//    stops the pipeline, because there is nothing to reason over, not because a verdict disagreed with something.
+//  - There is no separate Decision Agent: the Risk Manager is the sole gate for entry — its own
+//    APPROVE / REDUCE / VETO (see evaluateGates). No other stage's verdict and no confidence threshold in code
+//    overrides that; a lower-confidence APPROVE still opens exactly as the Risk Manager sized it.
+//  - The Risk Manager (an LLM) owns entry / stop / target / size / leverage outright — not "proposes, then code
+//    clamps." Whatever it answers is what gets sized into a plan (buildRiskPlan does the $ arithmetic only: risk%
+//    and stop% into notional, leverage into margin — it does not widen, tighten, cap or veto). The only checks
+//    left are real external constraints, not opinions on trade quality: the exchange's minimum order size and the
+//    wallet's actual available margin (reviewRiskProposal / fitPlanToExchangeMinimum), because those aren't a
+//    ceiling on the AI's judgment, they're what can and cannot literally be submitted to Binance.
+//  - config.risk (accountEquityUsdt, riskPerTradePct, maxLeverage, ...) is no longer enforced. It is shown to the
+//    Risk Manager as reference numbers (what a rule-based bot would mechanically do, for contrast) and used to
+//    convert its riskPercent into dollars; nothing in code clamps or vetoes against it anymore.
 
 import { AI_TRADING_AGENTS, AI_TRADING_TEST_MODE_MIN_LEVERAGE } from '../../src/lib/aiTrading.js'
 import { indicatorBundle } from '../strategy/shared-signals.js'
@@ -211,12 +219,14 @@ export function parseRiskProposal(json) {
 // -------------------------------------------------------------- Risk Manager
 
 /**
- * Deterministic limit enforcement. Takes a proposed direction/stop/target and either
- * returns a sized trade plan inside the configured limits or vetoes it. This is the
- * code that has the final word; the AI Risk Manager's numbers are fed through it
- * (see reviewRiskProposal) and are never used unchecked.
+ * What a rule-based bot would mechanically do with this stop/target: widen to the ATR floor, tighten to the max
+ * stop, reject a thin reward:risk, cap leverage/notional at the configured ceiling, floor leverage in test mode,
+ * veto if liquidation sits too close to the stop. Used ONLY to build the reference line shown to the Risk Manager
+ * in its prompt (riskPrompts' "plain rule-based sizing" line) — a deliberate contrast, since that mechanical
+ * formula is exactly what a bot's signal model does and this pipeline exists to do something else. Not applied
+ * to the AI's own plan; see buildRiskPlan for that.
  */
-export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct, limits }) {
+export function mechanicalBaselinePlan({ side, price, atrPct, stopLossPct, takeProfitPct, limits }) {
   const vetoReasons = []
   const adjustments = []
   const {
@@ -289,12 +299,41 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
 }
 
 /**
- * Turns the AI Risk Manager's answer into the final risk result. A VETO stands as-is. An APPROVE is
- * re-run through runRiskManager with the model's numbers, capped at the configured limits: the model
- * may ask for less risk, lower leverage, a wider or tighter stop, but anything beyond a limit is clamped
- * (and noted) and a plan that still breaks a limit is vetoed.
+ * Turns the Risk Manager AI's own stop/target/riskPercent/leverage into a dollar trade plan. Pure arithmetic —
+ * translates percentages into notional, margin and quantity — with no ceiling, floor or veto of its own: the
+ * numbers are used exactly as the AI chose them. (There used to be a mechanicalBaselinePlan-style clamp here;
+ * removed on purpose — see the file header. The Risk Manager's APPROVE/REDUCE/VETO is the only gate.)
  */
-export function reviewRiskProposal({ proposal, side, price, atrPct, limits, constraints = null }) {
+export function buildRiskPlan({ side, price, stopLossPct, takeProfitPct, riskPercent, leverage, accountEquityUsdt }) {
+  if (!(price > 0) || !(stopLossPct > 0) || !(takeProfitPct > 0) || !(riskPercent > 0) || !(leverage > 0)) return null
+  const isLong = side === 'LONG'
+  const roundedLeverage = Math.max(1, Math.round(leverage))
+  const intendedRiskUsdt = (accountEquityUsdt * riskPercent) / 100
+  const notional = intendedRiskUsdt / (stopLossPct / 100)
+  return {
+    side,
+    entryPrice: price,
+    stopLoss: price * (isLong ? 1 - stopLossPct / 100 : 1 + stopLossPct / 100),
+    takeProfit: price * (isLong ? 1 + takeProfitPct / 100 : 1 - takeProfitPct / 100),
+    stopLossPct: round(stopLossPct),
+    takeProfitPct: round(takeProfitPct),
+    rewardRisk: round(takeProfitPct / stopLossPct),
+    notionalUsdt: round(notional),
+    marginUsdt: round(notional / roundedLeverage),
+    leverage: roundedLeverage,
+    quantity: notional / price,
+    maxLossUsdt: round(notional * (stopLossPct / 100)),
+    riskPctOfEquity: round(riskPercent),
+  }
+}
+
+/**
+ * Turns the AI Risk Manager's answer into the final risk result. A VETO stands as-is. An APPROVE/REDUCE is sized
+ * by buildRiskPlan using the AI's own numbers — nothing here second-guesses stop, target, risk% or leverage. The
+ * only reason a plan can still fail past this point is a real exchange constraint (fitPlanToExchangeMinimum,
+ * below): the wallet's actual margin and Binance's minimum order size, not an opinion about the trade.
+ */
+export function reviewRiskProposal({ proposal, side, price, limits, constraints = null }) {
   if (proposal.decision === 'VETO') {
     return {
       approved: false,
@@ -306,36 +345,34 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits, cons
     }
   }
 
-  const notes = []
-  const riskPerTradePct = Math.min(proposal.riskPercent, limits.riskPerTradePct)
-  if (proposal.riskPercent > limits.riskPerTradePct) {
-    notes.push(`Risk Manager asked to risk ${fx(proposal.riskPercent)}% of equity; capped at the ${fx(limits.riskPerTradePct)}% limit.`)
-  }
-  const maxLeverage = Math.min(Math.max(Math.floor(proposal.leverage), Math.floor(limits.minLeverage) || 1, 1), limits.maxLeverage)
-  if (proposal.leverage > limits.maxLeverage) {
-    notes.push(`Risk Manager asked for ${fx(proposal.leverage, 0)}x leverage; capped at the ${limits.maxLeverage}x limit.`)
-  }
-
-  const result = runRiskManager({
+  const plan = buildRiskPlan({
     side,
     price,
-    atrPct,
     stopLossPct: proposal.stopLossPercent,
     takeProfitPct: proposal.takeProfitPercent,
-    limits: { ...limits, riskPerTradePct, maxLeverage },
+    riskPercent: proposal.riskPercent,
+    leverage: proposal.leverage,
+    accountEquityUsdt: limits.accountEquityUsdt,
   })
 
-  const reviewed = { ...result, adjustments: [...notes, ...result.adjustments], limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
+  if (!plan) {
+    return { approved: false, vetoReasons: ['The Risk Manager did not return a usable plan (missing price, stop, target, risk% or leverage).'], adjustments: [], plan: null, limits, ai: proposal }
+  }
 
-  // The wallet margin cap can shrink the position below the exchange's minimum order. Leverage can make up the difference (the
-  // executor applies the same rule), so say so here, and veto now, with the reason, when even the ceiling cannot reach it.
+  const reviewed = { approved: true, vetoReasons: [], adjustments: [], plan, limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
+
+  // The wallet margin cap can shrink the position below the exchange's minimum order — a real Binance constraint,
+  // not an opinion about the trade. Leverage can make up the difference (the executor applies the same rule), so
+  // say so here, and veto now, with the reason, when even a generous leverage stretch cannot reach it. maxLeverage
+  // here bounds only this stretch (config.risk.maxLeverage, kept for this one purpose); it never caps the AI's own
+  // chosen leverage above — that was already applied unclamped in buildRiskPlan.
   if (reviewed.approved && reviewed.plan && constraints?.minOrderUsdt > 0) {
     const fit = fitPlanToExchangeMinimum({
       planNotional: reviewed.plan.notionalUsdt,
       planLeverage: reviewed.plan.leverage,
       marginCap: constraints.marginCapUsdt,
       minOrderUsdt: constraints.minOrderUsdt,
-      maxLeverage: limits.maxLeverage,
+      maxLeverage: Math.max(limits.maxLeverage, reviewed.plan.leverage),
       stopLossPct: reviewed.plan.stopLossPct,
     })
     reviewed.exchangeFit = fit
@@ -351,28 +388,28 @@ export function reviewRiskProposal({ proposal, side, price, atrPct, limits, cons
 
 const SYSTEM_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). Be rigorous and skeptical: HOLD / rejecting is a good outcome when the edge is not clear. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 
-// Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes here; Flow keeps its
-// full skepticism and the code ceilings still cap every number, so this only lets a modest lean reach them.
+// Testnet pipeline-check wording (config.scan.testMode). Only the Analyst changes here; Flow keeps its full
+// skepticism — its verdict is evidence for the Risk Manager either way, not something this wording needs to soften.
 // The Critic's preamble is deliberately NOT the skeptical one the other stages share ("HOLD / rejecting is a good outcome"): a Critic told
 // that, and told its only job is to reject, rejected 27 of 27 setups in normal mode. It is an adversarial reviewer, not a veto machine.
 const CRITIC_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 
 const TEST_MODE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): the goal right now is to exercise the whole pipeline, so do NOT default to HOLD. Later stages will still vet and can reject the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
-// Test mode also relaxes the Critic, or its ordinary objections (late entry, modest volume) block every run before the Risk
-// Manager is ever reached. It still lists every real objection; REJECT is kept for a clearly bad trade.
+// Test mode also relaxes the Critic, or its ordinary objections (late entry, modest volume) would otherwise read as reasons to REJECT
+// on every run. It still lists every real objection; REJECT is kept for a clearly bad trade, and the Risk Manager still sees it either way.
 const TEST_MODE_CRITIC_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline. The Risk Manager still vets the trade after you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 const TEST_MODE_CRITIC_INSTRUCTION = 'TEST MODE: still list every real objection with an honest severity, but use REJECT only for a serious flaw that makes the trade clearly bad (for example it fights strong trend or flow evidence, or the data is broken). Ordinary weaknesses such as a late entry, modest volume or a stretched but plausible range position are CAUTION.'
 // Risk Manager in test mode: without this it vetoes almost every modest setup (negative backtest
-// background, a Critic CAUTION), so the run never reaches the testnet order. The code ceilings and gates after them are unchanged.
-const TEST_MODE_RISK_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline through to a testnet order. Fixed ceilings and gates are enforced in code around you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
-const TEST_MODE_RISK_INSTRUCTION = 'TEST MODE: VETO only if the trade is clearly unacceptable or you cannot form any plan inside the fixed ceilings. A weak edge, the negative backtest background, a Critic CAUTION or crowded flow are reasons to size SMALL (for example a low riskPercent and 1-2x leverage), not to veto. Choose a stop at or beyond the ATR floor and a target that gives at least the required reward:risk. Report the confidence you actually hold that the trade should be taken.'
+// background, a Critic CAUTION), so the run never reaches the testnet order.
+const TEST_MODE_RISK_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). TEST MODE (testnet, fake money): this run exists to exercise the whole pipeline through to a testnet order. Your own stop/target/size/leverage are used exactly as you set them; no code ceiling or gate sits around you. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+const TEST_MODE_RISK_INSTRUCTION = 'TEST MODE: VETO only if the trade is clearly unacceptable or you cannot form any defensible plan. A weak edge, the negative backtest background, a Critic CAUTION or crowded flow are reasons to size SMALL (for example a low riskPercent and 1-2x leverage), not to veto. Report the confidence you actually hold that the trade should be taken.'
 const TEST_MODE_INSTRUCTION = 'TEST MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it, and propose a realistic stop and target.'
 
-// Active profile (config.scan.activeMode): the persistent, real-money-capable counterpart of test mode. It changes wording only (never a code gate,
-// ceiling or daily limit): the Analyst takes a modest lean instead of defaulting to HOLD, Market Flow needs two independent adverse signals before it
-// blocks (a lopsided long/short ratio alone is what blocked most uptrend longs), and the Risk Manager REDUCES an extended-but-valid entry instead of
-// vetoing it. The Critic already reserves REJECT for fatal flaws, so it needs no separate wording.
-const ACTIVE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). ACTIVE MODE: the account owner wants this pipeline to find tradable setups rather than default to HOLD. Later stages still vet the trade and fixed limits still apply. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
+// Active profile (config.scan.activeMode): the persistent, real-money-capable counterpart of test mode. It changes wording only (never a
+// code gate or daily limit): the Analyst takes a modest lean instead of defaulting to HOLD, Market Flow needs two independent adverse
+// signals before AGAINST is warranted (a lopsided long/short ratio alone is what blocked most uptrend longs), and the Risk Manager
+// REDUCES an extended-but-valid entry instead of vetoing it. The Critic already reserves REJECT for fatal flaws, so it needs no separate wording.
+const ACTIVE_PREAMBLE = 'You are one agent in a four-stage crypto perpetual-futures trade-entry pipeline (Market Analyst, Market Flow, Critic, Risk Manager, the final approver). ACTIVE MODE: the account owner wants this pipeline to find tradable setups rather than default to HOLD. Later stages still vet the trade. No real orders are placed by you. Respond with a single JSON object only, no prose outside it.'
 const ACTIVE_ANALYST_INSTRUCTION = 'ACTIVE MODE: choose the direction the data leans toward even if the edge is modest; return HOLD only if the data is genuinely balanced with no lean at all. Be honest about weak leans: give them a modest confidence (about 55-65) rather than inflating it. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol ATR and realistic for the next few 5M candles.'
 const ACTIVE_FLOW_INSTRUCTION = 'ACTIVE MODE: AGAINST needs at least two independent adverse signals (for example open interest moving against the trade, taker flow against it, or extreme funding or basis). A persistently lopsided long/short account ratio on its own is NOT enough: report crowding HIGH if it is, but the verdict is NEUTRAL (or SUPPORTS) unless something else is also against the trade.'
 const ACTIVE_RISK_INSTRUCTION = 'ACTIVE MODE: an extended or late entry in a valid trend is a reason to REDUCE (smaller size, tighter stop, nearer target), not to VETO. VETO only for a clearly unacceptable trade: no defensible stop, a fatal flaw the Critic raised, liquidation too close to the stop, broken data, or negative evidence specific to this setup. Background statistics from unrelated bots are weak evidence, not a veto.'
@@ -440,7 +477,7 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
   }
 }
 
-/** The configured ceilings, plus the leverage floor (and a ceiling to match) while testnet test mode is on. */
+/** config.risk's reference numbers (not enforced — see the file header), with the mechanical-baseline leverage floor raised while testnet test mode is on, so that reference plan looks like a real testnet trade. */
 export function riskLimitsFor(config) {
   const limits = config.risk
   if (config.scan?.testMode !== true || config.execution?.mode !== 'testnet') return limits
@@ -453,20 +490,20 @@ export function riskLimitsFor(config) {
 
 /** The wallet's balance and open AI positions, so the Risk Manager can weigh portfolio exposure (empty when unknown). */
 /**
- * Advisory only, never a ceiling: the account owner's target USDT profit on a winning trade (execution.targetProfitPerTradeUsdt,
- * 0 = no goal stated). Gives concrete numbers so the Risk Manager can reason toward it with its own sizing, inside the same
- * ceilings as always; it must never take a bad setup, or exceed a ceiling, just to reach this number.
+ * Advisory only, never enforced: the account owner's target USDT profit on a winning trade (execution.targetProfitPerTradeUsdt,
+ * 0 = no goal stated). Gives concrete numbers so the Risk Manager can reason toward it with its own sizing; it must never take
+ * a bad setup just to reach this number.
  */
 function profitGoalLines({ target, constraints, limits }) {
   if (!(target > 0)) return []
   const lines = [
-    `- The account owner's goal is roughly ${fx(target)} USDT profit on a winning trade (after fees) - not a requirement. Do not take a setup you would otherwise reject, or exceed any ceiling above, just to reach it. When the setup and the ceilings allow it, size (riskPercent, leverage, takeProfitPercent) toward this rather than a much smaller profit; a weak or uncertain setup should still be sized small (or vetoed) even if that misses the goal.`,
+    `- The account owner's goal is roughly ${fx(target)} USDT profit on a winning trade (after fees) - not a requirement. Do not take a setup you would otherwise reject just to reach it. When the setup allows it, size (riskPercent, leverage, takeProfitPercent) toward this rather than a much smaller profit; a weak or uncertain setup should still be sized small (or vetoed) even if that misses the goal.`,
   ]
   const cap = constraints?.marginCapUsdt
   if (cap > 0) {
     const largest = cap * limits.maxLeverage
     const neededPct = (target / largest) * 100
-    lines.push(`- Example at the ${limits.maxLeverage}x ceiling and your ${fx(cap)} USDT margin cap (largest position ${fx(largest)} USDT): a ${fx(neededPct)}% take-profit would net about ${fx(target)} USDT. A smaller position or lower leverage needs a larger take-profit percent (still >= the reward:risk minimum below) to reach the same USDT profit.`)
+    lines.push(`- Example at up to ${limits.maxLeverage}x (a bot-baseline reference leverage, not a ceiling on you) and your ${fx(cap)} USDT margin cap (position ${fx(largest)} USDT): a ${fx(neededPct)}% take-profit would net about ${fx(target)} USDT. A smaller position or lower leverage needs a larger take-profit percent to reach the same USDT profit.`)
   }
   return lines
 }
@@ -490,7 +527,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   if (!(constraints?.minOrderUsdt > 0)) return []
   const lines = [
     `- Exchange minimum order for ${symbol}: ${fx(constraints.minOrderUsdt)} USDT of position size. Margin you may use on this trade: ${fx(constraints.marginCapUsdt)} USDT${constraints.mode === 'real' ? ' (the real-money margin cap / available balance)' : ''}.`,
-    `- If your sized position is below that minimum, the code raises leverage to reach it: only as far as needed, up to the ${limits.maxLeverage}x ceiling, never beyond the position you sized, and only while your stop stays safely inside the liquidation distance. If that is impossible the trade is vetoed. Choose riskPercent, stop and leverage knowing the position has to clear the minimum.`,
+    `- If your sized position is below that minimum, the code raises leverage to reach it: only as far as needed (at least ${limits.maxLeverage}x is available for this, and never less than the leverage you yourself chose), never beyond the position you sized, and only while your stop stays safely inside the liquidation distance. If that is impossible the trade is vetoed. Choose riskPercent, stop and leverage knowing the position has to clear the minimum.`,
   ]
   if (baseline.approved && baseline.plan) {
     const fit = fitPlanToExchangeMinimum({
@@ -512,7 +549,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
 
 function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0 }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
-  const baseline = runRiskManager({
+  const baseline = mechanicalBaselinePlan({
     side: analyst.action,
     price: snapshot.price,
     atrPct: snapshot.atrPct,
@@ -531,25 +568,22 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       backtestLine(backtest),
       `Critic: ${critic.verdict}. ${critic.objections.map((item) => `[${item.severity}] ${item.issue}`).join(' ') || 'No objections.'}`,
       '',
-      'Fixed ceilings (enforced in code; the choice within them is yours):',
-      `- Account equity ${limits.accountEquityUsdt} USDT; risk per trade at most ${limits.riskPerTradePct}% of equity`,
-      limits.minLeverage > 1
-        ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
-        : `- Leverage at most ${limits.maxLeverage}x`,
-      `- Stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%`,
-      `- Reward:risk at least ${limits.minRewardRisk}`,
+      'Reference numbers (nothing below is enforced by code — you decide the trade fully; account equity is here so you can convert riskPercent into dollars):',
+      `- Account equity ${limits.accountEquityUsdt} USDT; a rule-based bot here would risk at most ${limits.riskPerTradePct}% of equity per trade`,
+      `- A rule-based bot here would use at most ${limits.maxLeverage}x leverage`,
+      `- A rule-based bot would keep stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%, and would require reward:risk of at least ${limits.minRewardRisk}`,
       ...constraintLines({ constraints, baseline, limits, symbol: snapshot.symbol }),
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
-        : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
+        : `a veto (${baseline.vetoReasons.join(' ')})`}. That is what a bot's fixed formula gives you; you are not a bot — use it as one data point, not a template.`,
       ...profitGoalLines({ target: targetProfitUsdt, constraints, limits }),
       ...portfolioLines({ constraints }),
       ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
-      'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
-      'riskLevel: classify what you are actually about to risk — LOW, MEDIUM or HIGH — driven by how confident you genuinely are in THIS setup, not a fixed rule. HIGH only when the evidence is unusually strong and you would stake more of your own capital on it: a larger riskPercent and/or leverage, still inside the ceilings above. LOW when the case is real but you are not that confident, the evidence is mixed, or several factors are working against it: a small riskPercent and low leverage (1-2x). MEDIUM is the ordinary, decent setup. The tier must match the riskPercent/leverage you actually choose — do not call a trade HIGH and then size it small, or LOW and size it at the ceiling.',
+      'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive. Your numbers are used exactly as you give them — nothing in code widens a stop, caps leverage or resizes the position afterward, so choose numbers you would actually stake, not a maximum-allowed request.',
+      'riskLevel: classify what you are actually about to risk — LOW, MEDIUM or HIGH — driven by how confident you genuinely are in THIS setup, not a fixed rule. HIGH only when the evidence is unusually strong and you would stake more of your own capital on it: a larger riskPercent and/or leverage. LOW when the case is real but you are not that confident, the evidence is mixed, or several factors are working against it: a small riskPercent and low leverage (1-2x). MEDIUM is the ordinary, decent setup. The tier must match the riskPercent/leverage you actually choose — do not call a trade HIGH and then size it small, or LOW and size it large.',
       ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : activeMode ? [ACTIVE_RISK_INSTRUCTION] : []),
-      `confidence (0-100) is your final confidence that this trade should be taken; opening needs at least ${limits.minConfidence}. A VETO may omit it.`,
+      `confidence (0-100) is your final confidence that this trade should be taken. It is not gated by code at any threshold — whatever you state is used as-is (shown to the account owner) — so give your genuine assessment; a low-confidence APPROVE still opens exactly as you sized it, which is more reason to size it small rather than inflate the number. As a loose reference, past setups here typically wanted upward of ${limits.minConfidence}% conviction before opening. A VETO may omit it.`,
       'Reply with exactly: {"decision":"APPROVE|REDUCE|VETO","riskLevel":"LOW|MEDIUM|HIGH","confidence":0-100,"stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
     ].join('\n'),
   }
@@ -591,29 +625,25 @@ async function runLlmStage({ id, agentConfig, callAgent, prompts, parse }) {
 // -------------------------------------------------------------------- gates
 
 /**
- * Every condition that must hold for a trade to be approved. The Risk Manager's answer is the final AI judgment; the code
- * gates around it (and its clamped plan) are deterministic.
+ * The only two real decision points left, both the AI agents' own: did the Analyst see a directional setup at
+ * all (if it said HOLD there is nothing to evaluate further), and did the Risk Manager approve or reduce (vs.
+ * veto). Flow and Critic are not gates — their verdicts are evidence in the Risk Manager's prompt, and it is the
+ * one agent whose job is to weigh them, not a piece of code checking a verdict string. No confidence threshold
+ * either: the Risk Manager's own stated confidence stands, whatever it is.
  */
-export function evaluateGates({ analyst, flow, critic, risk, config }) {
+export function evaluateGates({ analyst, risk }) {
   const gate = (id, label, passed, detail) => ({ id, label, passed: Boolean(passed), detail })
   const directional = analyst && analyst.action !== 'HOLD'
 
   return [
     gate('analyst', 'Analyst sees a directional setup', directional, analyst ? `${analyst.action} at ${analyst.confidence}% confidence.` : 'Analyst stage did not complete.'),
     gate(
-      'flow',
-      'Market flow does not contradict the trade',
-      flow && flow.verdict !== 'AGAINST',
-      flow ? `${flow.verdict}${flow.crowding ? `, crowding ${flow.crowding}` : ''}${flow.flags.length ? ` — ${flow.flags.length} flag(s)` : ''}.` : 'Market Flow stage did not run or complete.',
-    ),
-    gate('critic', 'Critic does not reject', critic && critic.verdict !== 'REJECT', critic ? `${critic.verdict}${critic.objections.length ? ` — ${critic.objections.length} objection(s)` : ''}.` : 'Critic stage did not complete.'),
-    gate(
       'risk',
-      'Risk Manager approves the entry with enough confidence',
-      risk?.approved && risk.ai && risk.ai.confidence >= config.risk.minConfidence,
+      'Risk Manager approves the entry',
+      Boolean(risk?.approved),
       risk
         ? (risk.approved
-          ? `${risk.reduced ? 'Reduced' : 'Approved'} at ${risk.ai?.confidence ?? 'n/a'}% confidence (needs >= ${config.risk.minConfidence}%)${risk.ai?.riskLevel ? `, ${risk.ai.riskLevel} risk` : ''}, ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.`
+          ? `${risk.reduced ? 'Reduced' : 'Approved'} at ${risk.ai?.confidence ?? 'n/a'}% confidence${risk.ai?.riskLevel ? `, ${risk.ai.riskLevel} risk` : ''}, ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.`
           : risk.vetoReasons.join(' '))
         : 'Risk stage did not run.',
     ),
@@ -625,10 +655,10 @@ export function evaluateGates({ analyst, flow, critic, risk, config }) {
 /**
  * @param {object} args
  * @param {string} args.symbol
- * @param {object} args.config       normalized AI Trading config (agent assignments + fixed risk ceilings)
+ * @param {object} args.config       normalized AI Trading config (agent assignments + reference risk numbers, not enforced — see the file header)
  * @param {(symbol: string) => Promise<{ entry: object[], bias: object[], higher?: object[], marketContext?: object }>} args.getMarketInputs
  * @param {(call: { providerId: string, model: string, systemPrompt: string, userPrompt: string }) => Promise<{ json: object, providerId: string, model: string }>} args.callAgent
- * @param {(symbol: string, snapshot: object) => Promise<{ metrics: object, sources: object }>} args.getFlowData  derivatives/order-flow evidence (flow-data.js); throwing fails the Market Flow stage closed
+ * @param {(symbol: string, snapshot: object) => Promise<{ metrics: object, sources: object }>} args.getFlowData  derivatives/order-flow evidence (flow-data.js); throwing fails the Market Flow stage closed
  * @param {(symbol: string, snapshot: object) => Promise<{ mode: string, minOrderUsdt: number, marginCapUsdt: number, availableUsdt: number } | null>} [args.getTradeConstraints]  exchange minimum order and the margin the wallet allows; lets the Risk Manager size for them
  * @param {object|null} args.backtestStats  aggregated backtest table (loadQuantStats) — background context only
  */
@@ -696,7 +726,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   }
   if (analyst.action === 'HOLD') {
     run.stages.push(...['flow', 'critic', 'risk'].map((id) => skipped(id, 'Market Analyst returned HOLD — nothing to vet.')))
-    return hold(analyst.reasoning || 'Market Analyst returned HOLD.', evaluateGates({ analyst, config }))
+    return hold(analyst.reasoning || 'Market Analyst returned HOLD.', evaluateGates({ analyst, risk: null }))
   }
 
   // Background context for the Risk Manager; not a stage, not a gate.
@@ -706,14 +736,6 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     stopLossPct: analyst.stopLossPercent,
     takeProfitPct: analyst.takeProfitPercent,
   })
-
-  // The LLM stages after a blocked gate cost money for nothing, so they are skipped rather than consulted.
-  const skipRest = (blockers, ids, gates) => {
-    for (const id of ids) {
-      run.stages.push({ ...baseStage(id), status: 'skipped', summary: 'Not consulted — a gate already blocked this trade.' })
-    }
-    return hold(`Blocked before the ${AGENT_BY_ID[ids[0]].name} — failed: ${blockers.map((item) => item.label).join('; ')}.`, gates)
-  }
 
   // 2. Market Flow Agent (LLM over derivatives positioning and order flow)
   const flowStarted = Date.now()
@@ -741,9 +763,13 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   if (flow) flowStage.summary = `${flow.verdict}${flow.crowding ? ` · crowding ${flow.crowding}` : ''} · ${flow.flags.length} flag(s)`
   run.stages.push(flowStage)
 
-  const flowGates = evaluateGates({ analyst, flow, critic: null, risk: null, config })
-  const flowBlockers = flowGates.filter((item) => ['analyst', 'flow'].includes(item.id) && !item.passed)
-  if (flowBlockers.length) return skipRest(flowBlockers, ['critic', 'risk'], flowGates)
+  // AI Trading, not bot trading: Flow's verdict — even AGAINST — is evidence handed to the Risk Manager (see
+  // flowSummary in riskPrompts), not a checkpoint that skips it. Only a genuine stage failure stops the pipeline
+  // here (fail closed): there is no flow evidence at all to hand forward.
+  if (!flow) {
+    run.stages.push(...['critic', 'risk'].map((id) => skipped(id, 'Market Flow Agent did not return a usable call.')))
+    return hold(`Market Flow Agent failed: ${flowStage.error}`, evaluateGates({ analyst, risk: null }))
+  }
 
   // 3. Critic
   const criticStage = await runLlmStage({
@@ -757,11 +783,15 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   if (critic) criticStage.summary = `${critic.verdict} · ${critic.objections.length} objection(s)`
   run.stages.push(criticStage)
 
-  const earlyBlockers = evaluateGates({ analyst, flow, critic, risk: null, config })
-    .filter((item) => ['analyst', 'flow', 'critic'].includes(item.id) && !item.passed)
-  if (earlyBlockers.length) return skipRest(earlyBlockers, ['risk'], evaluateGates({ analyst, flow, critic, risk: null, config }))
+  // Same principle as Flow: the Critic's verdict — even REJECT — is evidence for the Risk Manager, not its own
+  // checkpoint. Only a genuine stage failure stops the pipeline here.
+  if (!critic) {
+    run.stages.push(skipped('risk', 'Critic did not return a usable call.'))
+    return hold(`Critic failed: ${criticStage.error}`, evaluateGates({ analyst, risk: null }))
+  }
 
-  // 4. Risk Manager (LLM proposes; code clamps to the configured limits)
+  // 4. Risk Manager — receives everything above and makes the final AI judgment: APPROVE / REDUCE / VETO, and
+  // its own entry / stop / target / size / leverage. The only remaining gate (evaluateGates, below).
   const riskLimits = riskLimitsFor(config)
   const riskStage = await runLlmStage({
     id: 'risk',
@@ -772,7 +802,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   })
   const riskProposal = riskStage.output
   const risk = riskProposal
-    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, atrPct: snapshot.atrPct, limits: riskLimits, constraints })
+    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, limits: riskLimits, constraints })
     // No usable Risk Manager answer is a veto: sizing must never fall back to "unchecked".
     : { approved: false, vetoReasons: [`Risk Manager unavailable: ${riskStage.error}`], adjustments: [], plan: null, limits: riskLimits, ai: null }
   risk.backtest = backtest
@@ -782,8 +812,8 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     : riskStage.summary
   run.stages.push(riskStage)
 
-  // The Risk Manager is the final entry approver: every gate (including its own confidence) decides the verdict.
-  const gates = evaluateGates({ analyst, flow, critic, risk, config })
+  // The Risk Manager is the sole gate for entry: its own APPROVE/REDUCE (vs VETO) is the verdict.
+  const gates = evaluateGates({ analyst, risk })
   const approved = gates.every((item) => item.passed)
 
   if (!approved) {

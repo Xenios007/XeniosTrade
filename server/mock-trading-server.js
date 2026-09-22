@@ -10748,13 +10748,16 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
       throw new AiExecutionError(`No futures symbol rules found for ${run.symbol}.`, 400)
     }
     // The margin cap can leave the position under the exchange's minimum order. Raise leverage just enough to reach it (the rule the
-    // Risk Manager was shown), or refuse with the reason. Never above the leverage ceiling or the position the Risk Manager sized.
+    // Risk Manager was shown), or refuse with the reason. Never above the position the Risk Manager sized. maxLeverage here is a real
+    // exchange-reachability bound, not the Risk Manager's own leverage ceiling (there isn't one - AI Trading, not bot trading; see
+    // pipeline.js's file header): it must be at least as high as the leverage the Risk Manager already chose, or this would reject a
+    // trade that was already fine, just because config.risk.maxLeverage (a reference number, no longer enforced) happens to be lower.
     const fit = fitPlanToExchangeMinimum({
       planNotional: plan.notionalUsdt,
       planLeverage: plan.leverage,
       marginCap: scaled.marginCap,
       minOrderUsdt: getMinOrderUsdt(symbolInfo, plan.entryPrice),
-      maxLeverage: riskLimitsFor(config).maxLeverage,
+      maxLeverage: Math.max(riskLimitsFor(config).maxLeverage, plan.leverage),
       stopLossPct: plan.stopLossPct,
     })
     if (!fit.ok) {

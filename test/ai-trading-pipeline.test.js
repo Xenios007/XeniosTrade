@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_AI_TRADING_CONFIG, normalizeAiTradingConfig } from '../src/lib/aiTrading.js'
 import {
-  buildMarketSnapshot, evaluateGates, parseAnalystOutput, parseCriticOutput, parseFlowOutput, parseRiskProposal, runAiTradingPipeline, runRiskManager,
+  buildMarketSnapshot, buildRiskPlan, evaluateGates, mechanicalBaselinePlan, parseAnalystOutput, parseCriticOutput, parseFlowOutput, parseRiskProposal, runAiTradingPipeline,
 } from '../server/ai-trading/pipeline.js'
 import { classifyOiPriceRegime, collectFlowData, describeFlow, summarizeFlow } from '../server/ai-trading/flow-data.js'
 import { createQuantStatsAccumulator, lookupQuantEdge, stopLossBucket } from '../server/ai-trading/quant-stats.js'
@@ -31,7 +31,7 @@ test('normalizeAiTradingConfig: defaults, unknown providers, risk is not user-co
   assert.equal(cleaned.agents.decision, undefined, 'the Decision Agent no longer exists')
   assert.equal(normalizeAiTradingConfig({ agents: { decision: { providerId: 'claude', model: 'm' } } }).agents.manager.providerId, 'claude', 'a saved Decision assignment is inherited by the Position Manager')
   assert.equal(normalizeAiTradingConfig({ agents: { decision: { providerId: 'claude' }, manager: { providerId: 'openai' } } }).agents.manager.providerId, 'openai', 'an explicit manager entry wins')
-  assert.deepEqual(cleaned.risk, DEFAULT_AI_TRADING_CONFIG.risk, 'a client-supplied risk block is ignored: the ceilings are fixed in code')
+  assert.deepEqual(cleaned.risk, DEFAULT_AI_TRADING_CONFIG.risk, 'a client-supplied risk block is ignored: these are fixed reference numbers, not something a client can inject into the Risk Manager\'s prompt')
   assert.equal(cleaned.risk.vetoOnNegativeEv, undefined, 'the backtest veto setting no longer exists')
   assert.deepEqual(normalizeAiTradingConfig({ risk: { riskPerTradePct: 50, maxLeverage: 99 } }).risk, DEFAULT_AI_TRADING_CONFIG.risk)
 })
@@ -95,9 +95,13 @@ test('lookupQuantEdge: falls back to broader buckets, and reports no data rather
 })
 
 // ---- risk manager ---------------------------------------------------------
+// mechanicalBaselinePlan (formerly runRiskManager) is now ONLY the "what a rule-based bot would mechanically do"
+// reference line shown in the Risk Manager's prompt for contrast — it still clamps/vetoes, on purpose, since a
+// bot's fixed formula is exactly the point of the comparison. buildRiskPlan is what actually prices the AI's own
+// plan, and it is asserted below to do no such thing.
 
-test('runRiskManager: sizes to the risk budget and places stop/target on the right side', () => {
-  const long = runRiskManager({ side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
+test('mechanicalBaselinePlan: sizes to the risk budget and places stop/target on the right side', () => {
+  const long = mechanicalBaselinePlan({ side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
   assert.equal(long.approved, true)
   assert.equal(long.plan.maxLossUsdt, 10) // 1% of 1000
   assert.equal(long.plan.notionalUsdt, 1000) // 10 / 1%
@@ -106,39 +110,59 @@ test('runRiskManager: sizes to the risk budget and places stop/target on the rig
   assert.equal(long.plan.takeProfit, 102)
   assert.equal(long.plan.rewardRisk, 2)
 
-  const short = runRiskManager({ side: 'SHORT', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
+  const short = mechanicalBaselinePlan({ side: 'SHORT', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
   assert.equal(short.plan.stopLoss, 101)
   assert.equal(short.plan.takeProfit, 98)
 })
 
-test('runRiskManager: widens a stop inside the ATR floor and re-checks reward:risk', () => {
-  const widened = runRiskManager({ side: 'LONG', price: 100, atrPct: 1, stopLossPct: 0.3, takeProfitPct: 2, limits: LIMITS })
+test('mechanicalBaselinePlan: widens a stop inside the ATR floor and re-checks reward:risk', () => {
+  const widened = mechanicalBaselinePlan({ side: 'LONG', price: 100, atrPct: 1, stopLossPct: 0.3, takeProfitPct: 2, limits: LIMITS })
   assert.equal(widened.approved, true)
   assert.equal(widened.plan.stopLossPct, 1)
   assert.ok(widened.adjustments.some((note) => note.includes('widened')))
 
-  const tooTight = runRiskManager({ side: 'LONG', price: 100, atrPct: 1, stopLossPct: 0.3, takeProfitPct: 1, limits: LIMITS })
+  const tooTight = mechanicalBaselinePlan({ side: 'LONG', price: 100, atrPct: 1, stopLossPct: 0.3, takeProfitPct: 1, limits: LIMITS })
   assert.equal(tooTight.approved, false, 'after widening to 1%, a 1% target is only 1:1')
   assert.match(tooTight.vetoReasons[0], /Reward:risk/)
 })
 
-test('runRiskManager: caps leverage, and vetoes when volatility forces a stop past the max', () => {
-  const capped = runRiskManager({ side: 'LONG', price: 100, atrPct: 0.05, stopLossPct: 0.1, takeProfitPct: 0.3, limits: LIMITS })
+test('mechanicalBaselinePlan: caps leverage, and vetoes when volatility forces a stop past the max', () => {
+  const capped = mechanicalBaselinePlan({ side: 'LONG', price: 100, atrPct: 0.05, stopLossPct: 0.1, takeProfitPct: 0.3, limits: LIMITS })
   assert.equal(capped.approved, true)
   assert.equal(capped.plan.leverage, LIMITS.maxLeverage)
   assert.equal(capped.plan.notionalUsdt, LIMITS.accountEquityUsdt * LIMITS.maxLeverage)
   assert.ok(capped.plan.maxLossUsdt < 10, 'risk shrinks when the leverage cap binds')
   assert.ok(capped.adjustments.some((note) => note.includes('capped')))
 
-  const volatile = runRiskManager({ side: 'LONG', price: 100, atrPct: 4, stopLossPct: 2, takeProfitPct: 6, limits: LIMITS })
+  const volatile = mechanicalBaselinePlan({ side: 'LONG', price: 100, atrPct: 4, stopLossPct: 2, takeProfitPct: 6, limits: LIMITS })
   assert.equal(volatile.approved, false)
   assert.match(volatile.vetoReasons[0], /Volatility too high/)
   assert.equal(volatile.plan, null)
 })
 
-test('runRiskManager: vetoes on missing inputs instead of guessing', () => {
-  const result = runRiskManager({ side: 'LONG', price: 0, atrPct: 1, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
+test('mechanicalBaselinePlan: vetoes on missing inputs instead of guessing', () => {
+  const result = mechanicalBaselinePlan({ side: 'LONG', price: 0, atrPct: 1, stopLossPct: 1, takeProfitPct: 2, limits: LIMITS })
   assert.equal(result.approved, false)
+})
+
+test('buildRiskPlan: prices the AI\'s own numbers with no ceiling, floor or veto — including well past config.risk', () => {
+  // riskPercent 25 (vs. config's 1% max), leverage 100 (vs. config's 10x max), reward:risk under 1 (vs. config's 1.5 min):
+  // all honoured exactly, because AI Trading is not bot trading and there is no code gate on trade quality any more.
+  const wild = buildRiskPlan({ side: 'LONG', price: 100, stopLossPct: 2, takeProfitPct: 1, riskPercent: 25, leverage: 100, accountEquityUsdt: 1000 })
+  assert.ok(wild, 'a plan is still built, not vetoed')
+  assert.equal(wild.leverage, 100)
+  assert.equal(wild.rewardRisk, 0.5)
+  assert.equal(wild.maxLossUsdt, 250) // 25% of 1000, not clamped to the 1% ceiling
+  assert.equal(wild.notionalUsdt, 12500) // 250 / 2%
+  assert.equal(wild.marginUsdt, 125) // 12500 / 100x
+
+  const short = buildRiskPlan({ side: 'SHORT', price: 100, stopLossPct: 1, takeProfitPct: 2, riskPercent: 1, leverage: 5, accountEquityUsdt: 1000 })
+  assert.equal(short.stopLoss, 101)
+  assert.equal(short.takeProfit, 98)
+  assert.equal(short.leverage, 5)
+
+  assert.equal(buildRiskPlan({ side: 'LONG', price: 0, stopLossPct: 1, takeProfitPct: 2, riskPercent: 1, leverage: 5, accountEquityUsdt: 1000 }), null, 'still refuses to size against a missing price, not a quality opinion')
+  assert.equal(buildRiskPlan({ side: 'LONG', price: 100, stopLossPct: 1, takeProfitPct: 2, riskPercent: 0, leverage: 5, accountEquityUsdt: 1000 }), null, 'and a non-positive riskPercent/leverage — data validity, not a ceiling')
 })
 
 // ---- parsing --------------------------------------------------------------
@@ -242,22 +266,36 @@ test('pipeline: Analyst HOLD ends the run without spending on later agents', asy
   assert.deepEqual(result.stages.slice(1).map((stage) => stage.status), ['skipped', 'skipped', 'skipped'])
 })
 
-test('pipeline: Critic REJECT blocks the trade and the Risk Manager is never consulted', async () => {
-  const { result, calls } = await run({ agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'Chasing an extended move', severity: 'high' }], reasoning: 'No.' } } })
-  assert.deepEqual(calls, ['analyst', 'flow', 'critic'])
-  assert.equal(result.final.action, 'HOLD')
-  assert.equal(result.stages.find((stage) => stage.id === 'risk').status, 'skipped')
-  assert.equal(result.final.gates.find((gate) => gate.id === 'critic').passed, false)
+test('pipeline: AI Trading, not bot trading — Critic REJECT is evidence for the Risk Manager, not a gate that skips it', async () => {
+  const { result, calls, prompts } = await run({ agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'Chasing an extended move', severity: 'high' }], reasoning: 'No.' } } })
+  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'], 'the Risk Manager is still consulted after a Critic REJECT')
+  assert.match(prompts.risk, /Critic: REJECT/, 'and is told the REJECT verdict as evidence')
+  assert.equal(result.stages.find((stage) => stage.id === 'critic').status, 'ok')
+  assert.equal(result.stages.find((stage) => stage.id === 'risk').status, 'ok')
+  // The default fake Risk Manager reply still APPROVEs: a REJECT alone does not auto-veto, the Risk Manager's own judgment does.
+  assert.equal(result.final.approved, true)
+  assert.equal(result.final.action, 'LONG')
 })
 
-test('pipeline: Market Flow AGAINST blocks the trade and no later paid stage is consulted', async () => {
-  const { result, calls } = await run({ agents: { flow: { verdict: 'AGAINST', crowding: 'HIGH', flags: [{ issue: 'Longs crowded: 2.9 ratio, funding 0.09%', severity: 'high' }], reasoning: 'Squeeze risk.' } } })
-  assert.deepEqual(calls, ['analyst', 'flow'])
-  assert.equal(result.final.action, 'HOLD')
-  assert.equal(result.final.gates.find((gate) => gate.id === 'flow').passed, false)
-  assert.deepEqual(result.stages.slice(2).map((stage) => stage.status), ['skipped', 'skipped'])
-  assert.match(result.final.reason, /Market Flow Agent|Critic Agent/)
-  assert.match(result.final.reason, /Blocked before the Critic Agent/)
+test('pipeline: AI Trading, not bot trading — Market Flow AGAINST is evidence for the Risk Manager, not a gate that skips Critic/Risk', async () => {
+  const { result, calls, prompts } = await run({ agents: { flow: { verdict: 'AGAINST', crowding: 'HIGH', flags: [{ issue: 'Longs crowded: 2.9 ratio, funding 0.09%', severity: 'high' }], reasoning: 'Squeeze risk.' } } })
+  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'], 'Critic and the Risk Manager both still run after a Flow AGAINST')
+  assert.match(prompts.critic, /Market Flow Agent: AGAINST/, 'the Critic sees the AGAINST verdict')
+  assert.match(prompts.risk, /Market Flow Agent: AGAINST/, 'and so does the Risk Manager')
+  assert.equal(result.final.approved, true, 'a Flow AGAINST alone does not auto-veto — the Risk Manager still decides')
+})
+
+test('pipeline: the Risk Manager can still veto after weighing a Flow AGAINST or Critic REJECT it was shown as evidence', async () => {
+  const { result } = await run({
+    agents: {
+      flow: { verdict: 'AGAINST', crowding: 'HIGH', flags: [{ issue: 'Crowded', severity: 'high' }], reasoning: 'Squeeze risk.' },
+      critic: { verdict: 'REJECT', objections: [{ issue: 'Extended', severity: 'high' }], reasoning: 'No.' },
+      risk: { decision: 'VETO', concerns: ['Flow and Critic both against it'], reasoning: 'Too much stacked against this one.' },
+    },
+  })
+  assert.equal(result.final.approved, false)
+  assert.equal(result.final.trade, null)
+  assert.match(result.stages.find((stage) => stage.id === 'risk').summary, /Veto/)
 })
 
 test('pipeline: the Market Flow stage records the evidence next to its verdict, and the agent is shown the numbers', async () => {
@@ -301,22 +339,19 @@ test('backtest stats are background only: a negative history no longer blocks, a
   assert.equal(none.result.final.approved, true)
 })
 
-test('pipeline: a Risk Manager veto blocks the trade even with every agent in favour', async () => {
-  const { result } = await run({ agents: { analyst: { ...ANALYST_LONG, stopLossPercent: 1, takeProfitPercent: 1.1 } } })
+test('pipeline: an explicit Risk Manager VETO blocks the trade even with every other agent in favour', async () => {
+  // Analyst LONG, Flow SUPPORTS, Critic PASS (the fakeAgents defaults) - only the Risk Manager itself objects.
+  const { result } = await run({ agents: { risk: { decision: 'VETO', concerns: ['Not convinced despite the setup'], reasoning: 'I do not like this one, regardless of what came before.' } } })
   assert.equal(result.final.action, 'HOLD')
   assert.equal(result.final.trade, null)
   assert.match(result.stages.find((stage) => stage.id === 'risk').summary, /Veto/)
 })
 
-test('pipeline: the Risk Manager confidence is the entry gate; REDUCE opens a smaller trade; there is no second AI after it', async () => {
-  const timid = await run({ agents: { risk: { decision: 'APPROVE', confidence: 40, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Meh.' } } })
-  assert.equal(timid.result.final.approved, false, 'approved sizing is not enough: the confidence must reach the minimum')
-  assert.equal(timid.result.final.trade, null)
-  assert.equal(timid.result.final.gates.find((gate) => gate.id === 'risk').passed, false)
-  assert.match(timid.result.final.reason, /confidence/i)
-
-  const atMinimum = await run({ agents: { risk: { decision: 'APPROVE', confidence: config.risk.minConfidence, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Just enough.' } } })
-  assert.equal(atMinimum.result.final.approved, true, 'a confidence exactly at the minimum passes')
+test('pipeline: there is no code-level confidence gate — a low-confidence APPROVE still opens; REDUCE opens a smaller trade; there is no second AI after the Risk Manager', async () => {
+  const lowConfidence = await run({ agents: { risk: { decision: 'APPROVE', confidence: 40, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Meh, but I\'ll take it.' } } })
+  assert.equal(lowConfidence.result.final.approved, true, 'a 40% confidence APPROVE is not blocked by any code threshold any more')
+  assert.equal(lowConfidence.result.final.confidence, 40, 'the low confidence is reported exactly as the Risk Manager gave it')
+  assert.ok(lowConfidence.result.final.trade, 'and the trade opens at the Risk Manager\'s own numbers')
 
   const reduce = await run({ agents: { risk: { decision: 'REDUCE', confidence: 68, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.3, leverage: 2, concerns: ['Crowded'], reasoning: 'Real but weaker.' } } })
   assert.equal(reduce.result.final.approved, true)
@@ -358,25 +393,26 @@ test('AI Risk Manager: a VETO blocks the trade (and needs no confidence)', async
   assert.equal(risk.output.ai.decision, 'VETO')
 })
 
-test('AI Risk Manager: asking for more risk or leverage than the limits allow is clamped, never honoured', async () => {
-  const { result } = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 25, leverage: 100, concerns: [], reasoning: 'YOLO.' } } })
+test('AI Risk Manager: asking for far more risk or leverage than config.risk\'s reference numbers is honoured exactly, not clamped', async () => {
+  const { result } = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 25, leverage: 100, concerns: [], reasoning: 'High conviction, sizing accordingly.' } } })
   const risk = result.stages.find((stage) => stage.id === 'risk').output
   assert.equal(risk.approved, true)
-  assert.ok(risk.plan.maxLossUsdt <= config.risk.accountEquityUsdt * config.risk.riskPerTradePct / 100 + 0.01, `max loss ${risk.plan.maxLossUsdt} exceeds the risk cap`)
-  assert.ok(risk.plan.leverage <= config.risk.maxLeverage)
-  assert.ok(risk.adjustments.some((note) => note.includes('capped at the')), 'the clamp is reported')
-  assert.equal(risk.ai.riskPercent, 25, 'what the model actually asked for is kept for the audit trail')
+  assert.equal(risk.plan.leverage, 100, 'leverage is used exactly as the model chose it, well past config.risk.maxLeverage')
+  assert.equal(risk.plan.riskPctOfEquity, 25, 'risk% is used exactly as chosen, well past config.risk.riskPerTradePct')
+  assert.equal(risk.plan.maxLossUsdt, config.risk.accountEquityUsdt * 0.25, '25% of equity, not capped to the reference 1%')
+  assert.equal(risk.adjustments.length, 0, 'nothing is clamped, so there is nothing to report')
+  assert.equal(risk.ai.riskPercent, 25)
 })
 
-test('AI Risk Manager: it can size below the cap, and a plan that still breaks a limit is rejected', async () => {
+test('AI Risk Manager: it can size below the reference numbers, and a reward:risk below the reference minimum is honoured too (no code veto on trade quality)', async () => {
   const cautious = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.25, leverage: 2, concerns: [], reasoning: 'Weak conviction.' } } })
   assert.equal(cautious.result.final.approved, true)
   assert.equal(cautious.result.final.trade.maxLossUsdt, 2.5) // 0.25% of 1000
-  assert.ok(cautious.result.final.trade.leverage <= 2)
+  assert.equal(cautious.result.final.trade.leverage, 2)
 
-  const tooTight = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Tiny target.' } } })
-  assert.equal(tooTight.result.final.action, 'HOLD', 'reward:risk below the minimum is vetoed by code even though the model approved')
-  assert.match(tooTight.result.stages.find((stage) => stage.id === 'risk').output.vetoReasons[0], /Reward:risk/)
+  const thinReward = await run({ agents: { risk: { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Tiny target, but I still like it.' } } })
+  assert.equal(thinReward.result.final.approved, true, 'a reward:risk under config.risk.minRewardRisk (now just a reference number) is no longer vetoed by code')
+  assert.equal(thinReward.result.final.trade.rewardRisk, Math.round((1.6 / 1.5) * 100) / 100)
 })
 
 test('AI Risk Manager: no usable answer is a veto, never unchecked sizing', async () => {
@@ -389,11 +425,11 @@ test('AI Risk Manager: no usable answer is a veto, never unchecked sizing', asyn
   assert.match(malformed.result.stages.find((stage) => stage.id === 'risk').error, /positive/)
 })
 
-test('AI Risk Manager: is not called (and not paid for) once an earlier gate has blocked the trade', async () => {
+test('AI Risk Manager: is always called and paid for once the Analyst is directional — no earlier verdict skips it any more', async () => {
   const { calls } = await run({ agents: { critic: { verdict: 'REJECT', objections: [], reasoning: 'No.' } } })
-  assert.ok(!calls.includes('risk'))
+  assert.ok(calls.includes('risk'), 'a Critic REJECT no longer skips the Risk Manager')
   const flowAgainst = await run({ agents: { flow: { verdict: 'AGAINST', crowding: 'HIGH', flags: [], reasoning: 'Crowded.' } } })
-  assert.ok(!flowAgainst.calls.includes('risk') && !flowAgainst.calls.includes('critic'))
+  assert.ok(flowAgainst.calls.includes('risk') && flowAgainst.calls.includes('critic'), 'a Flow AGAINST no longer skips Critic or the Risk Manager')
 })
 
 test('parseRiskProposal + legacy config', () => {
@@ -410,11 +446,20 @@ test('parseRiskProposal + legacy config', () => {
   assert.equal(normalizeAiTradingConfig({ agents: { risk: { providerId: 'xai' } } }).agents.risk.providerId, 'xai')
 })
 
-test('evaluateGates: an absent stage never passes its gate by default', () => {
-  const gates = evaluateGates({ analyst: { action: 'LONG', confidence: 70 }, config })
-  assert.equal(gates.find((gate) => gate.id === 'critic').passed, false)
+test('evaluateGates: only analyst and risk are gates now; an absent risk stage never passes by default', () => {
+  const gates = evaluateGates({ analyst: { action: 'LONG', confidence: 70 }, risk: null })
+  assert.equal(gates.length, 2, 'Flow and Critic are no longer gates of their own')
+  assert.equal(gates.find((gate) => gate.id === 'analyst').passed, true)
   assert.equal(gates.find((gate) => gate.id === 'risk').passed, false)
+  assert.equal(gates.find((gate) => gate.id === 'flow'), undefined, 'Flow is evidence for the Risk Manager, not a gate')
+  assert.equal(gates.find((gate) => gate.id === 'critic'), undefined, 'Critic is evidence for the Risk Manager, not a gate')
   assert.equal(gates.find((gate) => gate.id === 'decision'), undefined, 'the Decision gate no longer exists')
+
+  const holdOnAnalyst = evaluateGates({ analyst: { action: 'HOLD', confidence: 30 }, risk: null })
+  assert.equal(holdOnAnalyst.find((gate) => gate.id === 'analyst').passed, false)
+
+  const approved = evaluateGates({ analyst: { action: 'LONG', confidence: 70 }, risk: { approved: true, ai: { confidence: 5 }, plan: { leverage: 1, maxLossUsdt: 1 } } })
+  assert.equal(approved.find((gate) => gate.id === 'risk').passed, true, 'a low AI-stated confidence still passes the risk gate — there is no code threshold on it')
 })
 
 // ---- provider caller (against local fake servers, no real network) --------
@@ -962,8 +1007,8 @@ test('test mode: changes the Analyst, Critic and Risk prompts; Flow wording and 
   assert.match(seen.test.risk, /TEST MODE[\s\S]*VETO only if the trade is clearly unacceptable[\s\S]*size SMALL/)
   assert.doesNotMatch(seen.test.risk, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
   assert.doesNotMatch(seen.normal.risk, /TEST MODE/)
-  assert.match(seen.test.risk, /Fixed ceilings and gates are enforced in code/)
-  assert.match(seen.test.risk, /Fixed ceilings \(enforced in code/, 'the ceilings are still listed to the Risk Manager')
+  assert.match(seen.test.risk, /no code ceiling or gate sits around you/)
+  assert.match(seen.test.risk, /Reference numbers \(nothing below is enforced by code/, 'the reference numbers are still listed to the Risk Manager, just not as an enforced ceiling')
   assert.match(seen.test.critic, /TEST MODE[\s\S]*REJECT only for a serious flaw/)
   assert.doesNotMatch(seen.test.critic, /rejecting is a good outcome/, 'the skeptical preamble is replaced, not stacked')
   assert.doesNotMatch(seen.normal.critic, /TEST MODE/)
@@ -981,28 +1026,25 @@ test('critic prompt: the Analyst\'s stop/target are provisional (the Risk Manage
   assert.doesNotMatch(prompts.critic, /stops that sit inside normal noise/)
 })
 
-test('test mode: a Critic REJECT still blocks the trade (only the Analyst is relaxed)', async () => {
+test('test mode: a Critic REJECT no longer blocks the trade either — it is still evidence for the Risk Manager, in test mode or not', async () => {
   const cfg = normalizeAiTradingConfig({ scan: { testMode: true } })
-  const { result } = await run({ cfg, agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'x', severity: 'high' }], reasoning: 'No.' } } })
-  assert.equal(result.final.approved, false)
+  const { result, calls } = await run({ cfg, agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'x', severity: 'high' }], reasoning: 'No.' } } })
+  assert.ok(calls.includes('risk'), 'the Risk Manager is still consulted')
+  assert.equal(result.final.approved, true, 'the default fake Risk Manager reply still approves — REJECT alone is not a veto')
 })
 
-test('test mode: the code ceilings still cap a permissive Risk Manager (leverage/risk clamped, weak reward:risk rejected)', async () => {
+test('test mode: there is no code ceiling on a permissive Risk Manager either — leverage/risk and a weak reward:risk are all honoured exactly', async () => {
   const cfg = normalizeAiTradingConfig({ scan: { testMode: true } })
   const greedy = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 50, leverage: 100, concerns: [], reasoning: 'Go big.' }
   const { result } = await run({ cfg, agents: { risk: greedy } })
   const plan = result.stages.find((stage) => stage.id === 'risk').output.plan
-  // Test mode raises the leverage ceiling to 10x (and floors leverage at it), so 100x is clamped to that, not to the normal 5x.
-  const { riskLimitsFor } = await import('../server/ai-trading/pipeline.js')
-  const testCeiling = riskLimitsFor(cfg).maxLeverage
-  assert.equal(testCeiling, 10)
-  assert.equal(plan.leverage, testCeiling, `leverage ${plan.leverage} must be clamped to the ${testCeiling}x test-mode ceiling`)
-  assert.ok(plan.riskPctOfEquity <= LIMITS.riskPerTradePct + 1e-9, `risk ${plan.riskPctOfEquity}% must be clamped to ${LIMITS.riskPerTradePct}%`)
+  assert.equal(plan.leverage, 100, 'leverage is used exactly as given, test mode or not — there is no ceiling to clamp to any more')
+  assert.equal(plan.riskPctOfEquity, 50)
 
-  const poorRr = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 2, concerns: [], reasoning: 'Tiny target.' }
-  const rejected = await run({ cfg, agents: { risk: poorRr } })
-  assert.equal(rejected.result.stages.find((stage) => stage.id === 'risk').output.approved, false, 'reward:risk below the ceiling is still rejected in test mode')
-  assert.equal(rejected.result.final.approved, false)
+  const poorRr = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1.5, takeProfitPercent: 1.6, riskPercent: 1, leverage: 2, concerns: [], reasoning: 'Tiny target, still taking it.' }
+  const accepted = await run({ cfg, agents: { risk: poorRr } })
+  assert.equal(accepted.result.stages.find((stage) => stage.id === 'risk').output.approved, true, 'a thin reward:risk is no longer rejected by code, in test mode or not')
+  assert.equal(accepted.result.final.approved, true)
 })
 
 // ---- Custom OpenAI-compatible slots ---------------------------------------------------------------------------------
@@ -1034,7 +1076,7 @@ test('custom slots: the API key is optional, no Authorization header is sent wit
 
 // ---- Test-mode minimum leverage ---------------------------------------------------------------------------------------
 
-test('test mode: leverage is floored at 10x on testnet only, with the same risk and a smaller margin', async () => {
+test('test mode: riskLimitsFor still raises the reference leverage numbers (used in mechanicalBaselinePlan and the prompt), but the AI\'s own plan is never floored or capped by them', async () => {
   const { riskLimitsFor, reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
 
   const off = normalizeAiTradingConfig(null)
@@ -1046,24 +1088,22 @@ test('test mode: leverage is floored at 10x on testnet only, with the same risk 
   assert.equal(riskLimitsFor(on).minLeverage, 10)
   assert.equal(riskLimitsFor(on).maxLeverage, 10)
 
+  // mechanicalBaselinePlan (the "what a bot would do" reference line only) still floors to it in test mode.
   const base = { side: 'LONG', price: 100, atrPct: 0.3, stopLossPct: 1, takeProfitPct: 2 }
-  const normal = runRiskManager({ ...base, limits: riskLimitsFor(off) })
-  const floored = runRiskManager({ ...base, limits: riskLimitsFor(on) })
+  const normal = mechanicalBaselinePlan({ ...base, limits: riskLimitsFor(off) })
+  const floored = mechanicalBaselinePlan({ ...base, limits: riskLimitsFor(on) })
   assert.equal(normal.plan.leverage, 1)
   assert.equal(floored.plan.leverage, 10)
-  assert.equal(floored.plan.notionalUsdt, normal.plan.notionalUsdt, 'position size unchanged')
-  assert.equal(floored.plan.maxLossUsdt, normal.plan.maxLossUsdt, 'risk unchanged')
-  assert.equal(floored.plan.marginUsdt, normal.plan.marginUsdt / 10)
   assert.ok(floored.adjustments.some((note) => /minimum/.test(note)))
 
-  // A model that answers leverage 0 (or asks for less) still ends up at the floor; one that asks for more is capped at the ceiling.
-  const proposal = (leverage) => ({ decision: 'APPROVE', stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage, concerns: [], reasoning: 'x' })
-  for (const [asked, expected] of [[0, 10], [3, 10], [10, 10], [50, 10]]) {
-    const result = reviewRiskProposal({ proposal: proposal(asked), side: 'LONG', price: 100, atrPct: 0.3, limits: riskLimitsFor(on) })
-    assert.equal(result.plan.leverage, expected, `asked ${asked}x`)
+  // But the AI's own plan (buildRiskPlan, via reviewRiskProposal) is never floored or capped, test mode or not: a model
+  // that answers leverage 0.4 rounds to the nearest whole number and nothing more; whatever it asks for is what it gets.
+  const proposal = (leverage) => ({ decision: 'APPROVE', confidence: 70, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage, concerns: [], reasoning: 'x' })
+  for (const asked of [1, 3, 10, 50]) {
+    const result = reviewRiskProposal({ proposal: proposal(asked), side: 'LONG', price: 100, limits: riskLimitsFor(on) })
+    assert.equal(result.plan.leverage, asked, `asked ${asked}x in test mode`)
   }
-  // Off: the model's number is only a ceiling and the plan stays at the sized 1x.
-  assert.equal(reviewRiskProposal({ proposal: proposal(0), side: 'LONG', price: 100, atrPct: 0.3, limits: riskLimitsFor(off) }).plan.leverage, 1)
+  assert.equal(reviewRiskProposal({ proposal: proposal(50), side: 'LONG', price: 100, limits: riskLimitsFor(off) }).plan.leverage, 50, 'and the same outside test mode')
 })
 
 // ---- Exchange minimum order: what the Risk Manager is told, and the early veto ----------------------------------------
@@ -1081,9 +1121,12 @@ test('exchange minimum: the Risk Manager is told the minimum order and margin, a
   assert.match(fake.prompts.risk, /the code raises leverage to reach it/)
   assert.equal(result.constraints.minOrderUsdt, 21)
 
-  // review level: an approved plan below the minimum gets a leverage-raise note and stays approved
-  const proposal = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'x' }
-  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, atrPct: 0.3, limits: LIMITS, constraints })
+  // review level: an approved plan whose OWN leverage (1x) leaves it below the minimum at the margin cap
+  // (9.99 USDT) gets a leverage-raise note and stays approved. A plan that already chose enough leverage to
+  // clear the minimum on its own (buildRiskPlan uses the AI's leverage directly, unlike the old derived-from-
+  // notional model) would see no raise at all - this fixture deliberately picks a low leverage to exercise it.
+  const proposal = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 1, concerns: [], reasoning: 'x' }
+  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, limits: LIMITS, constraints })
   assert.equal(reviewed.approved, true)
   assert.equal(reviewed.exchangeFit.changed, true)
   assert.ok(reviewed.adjustments.some((note) => /leverage raised to \dx/.test(note)))
@@ -1094,7 +1137,7 @@ test('exchange minimum: an unreachable trade is vetoed by the Risk Manager stage
   const proposal = { decision: 'APPROVE', confidence: 75, stopLossPercent: 1, takeProfitPercent: 2, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'x' }
   // an 83 USDT minimum on a 9.99 margin cap needs 9x; the ceiling is 5x
   const constraints = { mode: 'real', minOrderUsdt: 83, marginCapUsdt: 9.99, availableUsdt: 40 }
-  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, atrPct: 0.3, limits: LIMITS, constraints })
+  const reviewed = reviewRiskProposal({ proposal, side: 'LONG', price: 100, limits: LIMITS, constraints })
   assert.equal(reviewed.approved, false)
   assert.equal(reviewed.plan, null)
   assert.match(reviewed.vetoReasons[0], /needs \d+x leverage, above the 5x ceiling/)
@@ -1153,9 +1196,9 @@ test('risk manager: gets the full role prompt plus the pipeline notes; the other
   assert.match(system, /finalConfidence is the `confidence` field/)
   assert.match(system, /There is no quantity field/)
   assert.doesNotMatch(system, /TEST MODE/, 'no test-mode wording in a normal run')
-  // it is still the requested reply shape, and the ceilings/evidence stay in the user message
+  // it is still the requested reply shape, and the reference numbers/evidence stay in the user message
   assert.match(seen.risk.userPrompt, /Reply with exactly: \{"decision":"APPROVE\|REDUCE\|VETO"/)
-  assert.match(seen.risk.userPrompt, /Fixed ceilings/)
+  assert.match(seen.risk.userPrompt, /Reference numbers/)
   for (const role of ['analyst', 'flow', 'critic']) {
     assert.doesNotMatch(seen[role].systemPrompt, /Risk Manager AI for XeniosTrade/, `${role} must not get the Risk Manager role text`)
   }
@@ -1248,11 +1291,12 @@ test('critic: CAUTION is the default for ordinary weaknesses and REJECT is reser
   assert.match(analystSystem, /rejecting is a good outcome/)
 })
 
-test('critic: a CAUTION verdict passes the gate (only REJECT blocks), and the Risk Manager is told about it', async () => {
+test('critic: a CAUTION verdict is not a gate at all any more (Critic has none) — the Risk Manager is told about it and still decides', async () => {
   const cautious = { verdict: 'CAUTION', objections: [{ issue: 'late entry at 0.7 of the range', severity: 'medium' }], reasoning: 'Ordinary concerns.' }
   const fake = fakeAgents({ critic: cautious })
   const result = await runAiTradingPipeline({ symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA, callAgent: fake.callAgent, backtestStats: positiveStats })
-  assert.equal(result.final.gates.find((gate) => gate.id === 'critic').passed, true)
+  assert.equal(result.final.gates.find((gate) => gate.id === 'critic'), undefined, 'Critic has no gate of its own')
+  assert.equal(result.final.approved, true, 'the default fake Risk Manager reply still approves')
   assert.ok(fake.calls.includes('risk'), 'the Risk Manager was reached')
   assert.match(fake.prompts.risk, /Critic: CAUTION\./)
 })
@@ -1340,32 +1384,24 @@ test('parseRiskProposal: riskLevel is parsed and normalized, but never required 
   assert.equal(parseRiskProposal({ decision: 'VETO', reasoning: 'no' }).riskLevel, null)
 })
 
-test('risk manager: the leverage the model returns is a ceiling again, not fixed - it can size low OR high confidence appropriately', async () => {
+test('risk manager: the leverage the model returns is used exactly as-is, however low or high — never pushed up, never pinned, never clamped down', async () => {
   const { reviewRiskProposal } = await import('../server/ai-trading/pipeline.js')
 
   // Low confidence: a wide stop and a small riskPercent/leverage is honoured as-is, never pushed up.
   const low = reviewRiskProposal({
     proposal: { decision: 'APPROVE', riskLevel: 'LOW', confidence: 62, stopLossPercent: 1.5, takeProfitPercent: 2.5, riskPercent: 0.3, leverage: 1, concerns: [], reasoning: 'Not confident enough for more.' },
-    side: 'LONG', price: 100, atrPct: 0.3, limits: LIMITS,
+    side: 'LONG', price: 100, limits: LIMITS,
   })
   assert.equal(low.ai.riskLevel, 'LOW')
   assert.equal(low.plan.leverage, 1, 'a low-confidence answer stays at 1x, not forced up')
 
-  // High confidence: a tight stop the model is genuinely willing to size can reach the normal ceiling - never pinned to a fixed value.
+  // High confidence: whatever leverage the model is genuinely willing to size at is used exactly, including well past config.risk.maxLeverage.
   const high = reviewRiskProposal({
-    proposal: { decision: 'APPROVE', riskLevel: 'HIGH', confidence: 85, stopLossPercent: 0.2, takeProfitPercent: 0.6, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Strong, high-conviction setup.' },
-    side: 'LONG', price: 100, atrPct: 0.05, limits: LIMITS,
+    proposal: { decision: 'APPROVE', riskLevel: 'HIGH', confidence: 85, stopLossPercent: 0.1, takeProfitPercent: 0.3, riskPercent: 1, leverage: 50, concerns: [], reasoning: 'Max conviction, sizing to match.' },
+    side: 'LONG', price: 100, limits: LIMITS,
   })
   assert.equal(high.ai.riskLevel, 'HIGH')
-  assert.equal(high.plan.leverage, 5, 'a confident answer can reach the normal 5x ceiling - never pinned to 10x')
-  assert.ok(high.plan.leverage <= LIMITS.maxLeverage)
-
-  // asking for more than the ceiling is still clamped, same as before
-  const greedy = reviewRiskProposal({
-    proposal: { decision: 'APPROVE', riskLevel: 'HIGH', confidence: 85, stopLossPercent: 0.1, takeProfitPercent: 0.3, riskPercent: 1, leverage: 50, concerns: [], reasoning: 'Max it.' },
-    side: 'LONG', price: 100, atrPct: 0.02, limits: LIMITS,
-  })
-  assert.equal(greedy.plan.leverage, LIMITS.maxLeverage)
+  assert.equal(high.plan.leverage, 50, `50x is used exactly as asked, well past the reference ${LIMITS.maxLeverage}x — there is no code ceiling any more`)
 })
 
 test('risk manager: is told to classify riskLevel from its own confidence, and the fixed-10x wording is gone', async () => {
@@ -1383,7 +1419,7 @@ test('risk manager: is told to classify riskLevel from its own confidence, and t
   assert.match(risk.systemPrompt, /`riskLevel` \(LOW\/MEDIUM\/HIGH\) is your own summary of how much you are risking here, driven by genuine confidence/)
   assert.doesNotMatch(risk.userPrompt, /FIXED at|fixed at 10x|account owner's setting/)
   assert.doesNotMatch(risk.systemPrompt, /FIXED at.*for this wallet/)
-  // and there is no way left to pin it - the config field is gone, so riskLimitsFor only ever applies the normal ceiling (or test mode's floor)
+  // and there is no way left to pin it - the config field is gone; riskLimitsFor's numbers are reference-only now (used by mechanicalBaselinePlan and the prompt), never enforced on the AI's own plan
   const { riskLimitsFor } = await import('../server/ai-trading/pipeline.js')
   assert.equal(normalizeAiTradingConfig({ execution: { realFixedLeverage: 10 } }).execution.realFixedLeverage, undefined)
   assert.equal(riskLimitsFor(config).maxLeverage, LIMITS.maxLeverage)
@@ -1422,10 +1458,10 @@ test('risk manager: is told the profit goal with concrete numbers, and that it m
     backtestStats: positiveStats,
   })
   assert.match(risk.userPrompt, /The account owner's goal is roughly 1\.00 USDT profit on a winning trade \(after fees\) - not a requirement/)
-  assert.match(risk.userPrompt, /Do not take a setup you would otherwise reject, or exceed any ceiling above, just to reach it/)
-  // margin cap known: a concrete example is given (40 USDT cap x 5x ceiling = 200 USDT position)
-  assert.match(risk.userPrompt, /Example at the 5x ceiling and your 40\.00 USDT margin cap \(largest position 200\.00 USDT\): a 0\.50% take-profit would net about 1\.00 USDT/)
-  assert.match(risk.systemPrompt, /If the user message states a target\s*\n\s*profit per trade, that is the same kind of guidance/)
+  assert.match(risk.userPrompt, /Do not take a setup you would otherwise reject just to reach it/)
+  // margin cap known: a concrete example is given (40 USDT cap x 5x reference leverage = 200 USDT position)
+  assert.match(risk.userPrompt, /Example at up to 5x \(a bot-baseline reference leverage, not a ceiling on you\) and your 40\.00 USDT margin cap \(position 200\.00 USDT\): a 0\.50% take-profit would net about 1\.00 USDT/)
+  assert.match(risk.systemPrompt, /If the user message states a target profit per trade, that is the same kind of[\s\S]*guidance/)
 
   // 0 = off: no goal line at all
   const off = normalizeAiTradingConfig({ execution: { targetProfitPerTradeUsdt: 0 } })
