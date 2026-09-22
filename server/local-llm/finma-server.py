@@ -17,9 +17,17 @@ Also note: LLaMA-1's native context is 2048 tokens, well short of FinGPT's 8k (L
 (the Risk Manager call in particular, ~4.5-5k tokens per docs/AI_TRADING.md) will be truncated by the tokenizer for
 this model; expect FinMA to do worse on those calls than FinGPT/Llama-3 unless the prompt is shortened for it.
 
+The repo also only ships a legacy `pytorch_model.bin` (27 GB, fp32 — no `.safetensors`), and current `transformers`
+refuses to `torch.load` that format unless torch >= 2.6 (CVE-2025-32434 guard); upgrading the shared venv's torch
+risked breaking the already-working FinGPT server, so this machine converted it once to fp16 safetensors instead
+(~12.5 GB) into `server/local-llm/models/finma-7b-full/`. BASE below picks that up automatically when present; on a
+machine without that local conversion it falls back to downloading straight from the (gated, fp32, torch>=2.6-only)
+HF repo, which needs a newer torch to succeed.
+
 Env (all optional):
     FINMA_PORT            default 8012
-    FINMA_BASE            default ChanceFocus/finma-7b-full   (mirrored at TheFinAI/finma-7b-full)
+    FINMA_BASE            default: server/local-llm/models/finma-7b-full if that local conversion exists, else
+                           ChanceFocus/finma-7b-full (mirrored at TheFinAI/finma-7b-full) straight from the Hub
     FINMA_GPU_MEM_GIB     default 5.0   VRAM budget for weights; the rest of the model goes to RAM
     FINMA_CPU_MEM_GIB     default 18
     FINMA_MAX_NEW_TOKENS  default 700   hard cap per reply (the client asks for far more)
@@ -42,7 +50,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StoppingCriteria, StoppingCriteriaList
 
-BASE = os.environ.get("FINMA_BASE", "ChanceFocus/finma-7b-full")
+_LOCAL_CONVERTED = os.path.join(os.path.dirname(__file__), "models", "finma-7b-full")
+_DEFAULT_BASE = _LOCAL_CONVERTED if os.path.isdir(_LOCAL_CONVERTED) else "ChanceFocus/finma-7b-full"
+BASE = os.environ.get("FINMA_BASE", _DEFAULT_BASE)
 GPU_MEM_GIB = float(os.environ.get("FINMA_GPU_MEM_GIB", "5.0"))
 CPU_MEM_GIB = float(os.environ.get("FINMA_CPU_MEM_GIB", "18"))
 MAX_NEW_TOKENS = int(os.environ.get("FINMA_MAX_NEW_TOKENS", "700"))
