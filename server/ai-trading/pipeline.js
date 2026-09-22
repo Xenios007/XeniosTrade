@@ -185,8 +185,12 @@ export function parseRiskProposal(json) {
   const decision = String(json?.decision || '').toUpperCase().replace('REJECT', 'VETO')
   if (!['APPROVE', 'REDUCE', 'VETO'].includes(decision)) throw new Error(`Risk Manager returned an invalid decision: ${json?.decision}`)
   const number = (value) => (value == null || value === '' ? Number.NaN : Number(value))
+  const riskLevel = String(json?.riskLevel || '').toUpperCase()
   const proposal = {
     decision,
+    // The Risk Manager's own classification of how much it is risking, driven by its confidence in this specific setup (not a fixed
+    // rule) - see riskPrompts. Informational, not a gate: an older/omitted value never blocks a trade.
+    riskLevel: ['LOW', 'MEDIUM', 'HIGH'].includes(riskLevel) ? riskLevel : null,
     stopLossPercent: number(json?.stopLossPercent),
     takeProfitPercent: number(json?.takeProfitPercent),
     riskPercent: number(json?.riskPercent),
@@ -257,7 +261,7 @@ export function runRiskManager({ side, price, atrPct, stopLossPct, takeProfitPct
   const sizedLeverage = clamp(Math.ceil(notional / accountEquityUsdt), 1, maxLeverage)
   const leverage = Math.max(sizedLeverage, minLeverage)
   if (leverage > sizedLeverage) {
-    adjustments.push(`${limits.fixedLeverage ? 'Fixed leverage' : 'Test mode'}: leverage set to the ${minLeverage}x ${limits.fixedLeverage ? 'setting' : 'minimum'} (position size is unchanged, so the margin is notional / ${minLeverage}).`)
+    adjustments.push(`Test mode: leverage set to the ${minLeverage}x minimum (position size is unchanged, so the margin is notional / ${minLeverage}).`)
   }
   const liquidationDistancePct = (100 / leverage) * 0.9
   if (stopPct >= liquidationDistancePct) {
@@ -436,46 +440,15 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
   }
 }
 
-/**
- * The configured ceilings, plus:
- *  - real money with a fixed leverage set (execution.realFixedLeverage >= 1): leverage is exactly that, whatever the ceiling says (the
- *    account owner's decision); everything else (margin, loss, liquidation) follows from it;
- *  - testnet test mode: the leverage floor (and a ceiling to match).
- */
+/** The configured ceilings, plus the leverage floor (and a ceiling to match) while testnet test mode is on. */
 export function riskLimitsFor(config) {
   const limits = config.risk
-  const fixed = Math.floor(Number(config.execution?.realFixedLeverage))
-  if (config.execution?.mode === 'real' && fixed >= 1) {
-    return { ...limits, minLeverage: fixed, maxLeverage: fixed, fixedLeverage: fixed }
-  }
   if (config.scan?.testMode !== true || config.execution?.mode !== 'testnet') return limits
   return {
     ...limits,
     minLeverage: AI_TRADING_TEST_MODE_MIN_LEVERAGE,
     maxLeverage: Math.max(limits.maxLeverage, AI_TRADING_TEST_MODE_MIN_LEVERAGE),
   }
-}
-
-/** With a fixed leverage, the numbers that follow from it (position, margin, loss at the Analyst's stop, liquidation), so the Risk Manager plans around them. */
-function fixedLeverageLines({ limits, constraints, baseline, analyst }) {
-  const leverage = limits.fixedLeverage
-  if (!(leverage >= 1)) return []
-  const lines = [
-    `- Leverage is FIXED at ${leverage}x for this wallet (the account owner's setting): the code uses exactly ${leverage}x, so return leverage ${leverage}. Isolated liquidation is about ${fx(100 / leverage, 1)}% from entry, so any stop must stay inside ~${fx((100 / leverage) * 0.9, 1)}%.`,
-  ]
-  const cap = constraints?.marginCapUsdt
-  if (cap > 0) {
-    const largest = cap * leverage
-    lines.push(`- With up to ${fx(cap)} USDT of margin the largest position is ${fx(largest)} USDT (margin x ${leverage}); the position actually opened is the smaller of that and the size your riskPercent and stop imply.`)
-    const plan = baseline?.plan
-    if (plan) {
-      const position = Math.min(largest, plan.notionalUsdt)
-      const loss = position * (analyst.stopLossPercent / 100)
-      const wallet = Number(constraints.availableUsdt)
-      lines.push(`- At the Analyst's ${fx(analyst.stopLossPercent)}% stop, a position of about ${fx(position)} USDT (${fx(position / leverage)} USDT margin) would lose about ${fx(loss)} USDT if the stop is hit${wallet > 0 ? ` (${fx((loss / wallet) * 100, 1)}% of the wallet's ${fx(wallet)} USDT)` : ''} and gain about ${fx(position * (analyst.takeProfitPercent / 100))} USDT at its ${fx(analyst.takeProfitPercent)}% target, before fees. Choose your own stop and riskPercent knowing this.`)
-    }
-  }
-  return lines
 }
 
 /** The wallet's balance and open AI positions, so the Risk Manager can weigh portfolio exposure (empty when unknown). */
@@ -530,7 +503,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
   })
   return {
     // The role text is the project owner's Risk Manager prompt (risk-manager-prompt.js); the notes after it say how this pipeline uses the answer.
-    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode, activeMode: activeMode && !testMode, fixedLeverage: limits.fixedLeverage })}`,
+    systemPrompt: `${testMode ? `${TEST_MODE_RISK_PREAMBLE}\n\n` : ''}${RISK_MANAGER_SYSTEM_PROMPT.trim()}\n\n${riskManagerPipelineNotes({ testMode, activeMode: activeMode && !testMode })}`,
     userPrompt: [
       describeMarket(snapshot),
       '',
@@ -541,14 +514,11 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       '',
       'Fixed ceilings (enforced in code; the choice within them is yours):',
       `- Account equity ${limits.accountEquityUsdt} USDT; risk per trade at most ${limits.riskPerTradePct}% of equity`,
-      limits.fixedLeverage
-        ? `- Leverage is fixed at ${limits.fixedLeverage}x (the account owner's setting; the code uses exactly that)`
-        : limits.minLeverage > 1
-          ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
-          : `- Leverage at most ${limits.maxLeverage}x`,
+      limits.minLeverage > 1
+        ? `- Leverage at least ${limits.minLeverage}x (test mode) and at most ${limits.maxLeverage}x`
+        : `- Leverage at most ${limits.maxLeverage}x`,
       `- Stop distance between ${fx(atrFloorPct)}% (${limits.minStopAtrMultiple}x the current ATR of ${fx(snapshot.atrPct, 3)}%) and ${limits.maxStopLossPct}%`,
       `- Reward:risk at least ${limits.minRewardRisk}`,
-      ...fixedLeverageLines({ limits, constraints, baseline, analyst }),
       ...constraintLines({ constraints, baseline, limits, symbol: snapshot.symbol }),
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
@@ -557,9 +527,10 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
       'Decide APPROVE with your own stopLossPercent / takeProfitPercent (percent off the current close, placed beyond normal noise for this symbol), riskPercent (percent of equity you are willing to lose if stopped out) and leverage — or REDUCE (open it, but deliberately smaller than the setup would normally earn, when the case is real but weaker), or VETO if the trade does not deserve capital. Scale risk down for weak conviction, high volatility, a Critic CAUTION, or flow that is crowded or only weakly supportive.',
+      'riskLevel: classify what you are actually about to risk — LOW, MEDIUM or HIGH — driven by how confident you genuinely are in THIS setup, not a fixed rule. HIGH only when the evidence is unusually strong and you would stake more of your own capital on it: a larger riskPercent and/or leverage, still inside the ceilings above. LOW when the case is real but you are not that confident, the evidence is mixed, or several factors are working against it: a small riskPercent and low leverage (1-2x). MEDIUM is the ordinary, decent setup. The tier must match the riskPercent/leverage you actually choose — do not call a trade HIGH and then size it small, or LOW and size it at the ceiling.',
       ...(testMode ? [TEST_MODE_RISK_INSTRUCTION] : activeMode ? [ACTIVE_RISK_INSTRUCTION] : []),
       `confidence (0-100) is your final confidence that this trade should be taken; opening needs at least ${limits.minConfidence}. A VETO may omit it.`,
-      'Reply with exactly: {"decision":"APPROVE|REDUCE|VETO","confidence":0-100,"stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
+      'Reply with exactly: {"decision":"APPROVE|REDUCE|VETO","riskLevel":"LOW|MEDIUM|HIGH","confidence":0-100,"stopLossPercent":number,"takeProfitPercent":number,"riskPercent":number,"leverage":number,"concerns":["short bullets"],"reasoning":"2-3 sentences"}',
     ].join('\n'),
   }
 }
@@ -622,7 +593,7 @@ export function evaluateGates({ analyst, flow, critic, risk, config }) {
       risk?.approved && risk.ai && risk.ai.confidence >= config.risk.minConfidence,
       risk
         ? (risk.approved
-          ? `${risk.reduced ? 'Reduced' : 'Approved'} at ${risk.ai?.confidence ?? 'n/a'}% confidence (needs >= ${config.risk.minConfidence}%), ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.`
+          ? `${risk.reduced ? 'Reduced' : 'Approved'} at ${risk.ai?.confidence ?? 'n/a'}% confidence (needs >= ${config.risk.minConfidence}%)${risk.ai?.riskLevel ? `, ${risk.ai.riskLevel} risk` : ''}, ${risk.plan.leverage}x, risking ${risk.plan.maxLossUsdt} USDT.`
           : risk.vetoReasons.join(' '))
         : 'Risk stage did not run.',
     ),
@@ -787,7 +758,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   risk.backtest = backtest
   riskStage.output = risk
   riskStage.summary = riskProposal
-    ? (risk.approved ? `Approved · ${risk.plan.leverage}x · risk ${risk.plan.maxLossUsdt} USDT` : `Veto · ${risk.vetoReasons[0]}`)
+    ? (risk.approved ? `Approved · ${risk.ai?.riskLevel ? `${risk.ai.riskLevel} · ` : ''}${risk.plan.leverage}x · risk ${risk.plan.maxLossUsdt} USDT` : `Veto · ${risk.vetoReasons[0]}`)
     : riskStage.summary
   run.stages.push(riskStage)
 

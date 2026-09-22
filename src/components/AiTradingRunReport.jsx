@@ -147,6 +147,11 @@ function StageDetails({ stage }) {
             <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? (output.reduced ? 'Reduced' : 'Approved') : 'Veto'}</Badge>
           </Row>
           {output.ai?.confidence != null ? <Row label="Entry confidence">{output.ai.confidence}%</Row> : null}
+          {output.ai?.riskLevel ? (
+            <Row label="Risk level">
+              <Badge tone={output.ai.riskLevel === 'HIGH' ? 'down' : output.ai.riskLevel === 'LOW' ? 'info' : 'warn'}>{output.ai.riskLevel}</Badge>
+            </Row>
+          ) : null}
           {output.ai && ['APPROVE', 'REDUCE'].includes(output.ai.decision) ? (
             <Row label="Model asked for">
               {num(output.ai.stopLossPercent)}% stop · {num(output.ai.takeProfitPercent)}% target · {num(output.ai.riskPercent)}% risk · {num(output.ai.leverage, 0)}x

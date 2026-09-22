@@ -98,9 +98,6 @@ export const AI_TRADING_MODES = ['testnet', 'real']
 // opens exercise a high-leverage position. It raises the ceiling to at least this too; sizing (risk per trade) is unchanged,
 // so only the margin gets smaller. Outside test mode the normal ceilings apply and this is never used.
 export const AI_TRADING_TEST_MODE_MIN_LEVERAGE = 10
-// Highest fixed leverage the real-money setting accepts.
-export const AI_TRADING_REAL_FIXED_LEVERAGE_MAX = 10
-
 // Bounds for the execution settings. `realMaxMarginUsdt` is a hard per-trade
 // margin ceiling on the live account, applied after the Risk Manager sized the plan.
 export const AI_TRADING_EXECUTION_LIMITS = {
@@ -129,9 +126,6 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   dailyProfitTargetUsdt: 0,
   dailyMaxLossUsdt: 0,
   dailyMaxTrades: 0,
-  // Real money only: 0 = leverage follows from risk and stop (the default); N >= 1 = the Risk Manager's leverage is fixed at exactly Nx and the
-  // position, margin and loss all follow from it (see riskLimitsFor). Never applies on testnet.
-  realFixedLeverage: 0,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -222,7 +216,6 @@ export function normalizeAiTradingConfig(raw) {
     // Auto-executing real money needs its own explicit `true`, on top of real mode and being armed.
     autoExecuteReal: realArmed && executionSource.autoExecuteReal === true,
     positionManagerActsOnReal: executionSource.positionManagerActsOnReal === true,
-    realFixedLeverage: Math.min(Math.max(Math.round(Number(executionSource.realFixedLeverage)) || 0, 0), AI_TRADING_REAL_FIXED_LEVERAGE_MAX),
     dailyProfitTargetUsdt: Math.round(clampNumber(executionSource.dailyProfitTargetUsdt, AI_TRADING_EXECUTION_LIMITS.dailyProfitTargetUsdt, 0) * 100) / 100,
     dailyMaxLossUsdt: Math.round(clampNumber(executionSource.dailyMaxLossUsdt, AI_TRADING_EXECUTION_LIMITS.dailyMaxLossUsdt, 0) * 100) / 100,
     dailyMaxTrades: Math.round(clampNumber(executionSource.dailyMaxTrades, AI_TRADING_EXECUTION_LIMITS.dailyMaxTrades, 0)),

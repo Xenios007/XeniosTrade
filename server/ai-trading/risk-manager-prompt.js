@@ -425,7 +425,7 @@ Return STRICT JSON only.
  * How this pipeline consumes the Risk Manager's answer. Appended after the role text; where it differs from the role text
  * (field names, who computes the quantity, hard limits) these notes are what the code actually does.
  */
-export function riskManagerPipelineNotes({ testMode = false, activeMode = false, fixedLeverage = 0 } = {}) {
+export function riskManagerPipelineNotes({ testMode = false, activeMode = false } = {}) {
   const lines = [
     '============================================================',
     'HOW THIS PIPELINE USES YOUR ANSWER',
@@ -436,14 +436,11 @@ export function riskManagerPipelineNotes({ testMode = false, activeMode = false,
     '',
     'Reply with the JSON object requested at the end of the user message. Your finalConfidence is the `confidence` field (0-100; opening',
     'needs the minimum stated in the message). There is no quantity field: the code derives the position from your `riskPercent` and your',
-    'stop (Position Quantity ~ Maximum Loss / Stop Distance) and then scales it to the wallet.',
-    ...(fixedLeverage >= 1
-      ? [
-        `Leverage is FIXED at ${fixedLeverage}x for this wallet by the account owner: the code uses exactly ${fixedLeverage}x whatever you return, so return`,
-        `leverage ${fixedLeverage}. Where the role text says to use the lowest sensible leverage, this fixed setting wins. Choose the stop, target and`,
-        `riskPercent knowing the position is margin x ${fixedLeverage} at most, and that a stop beyond the liquidation distance at ${fixedLeverage}x is refused.`,
-      ]
-      : ['`leverage` is your ceiling; the code uses the lowest leverage that supports the position.']),
+    'stop (Position Quantity ~ Maximum Loss / Stop Distance) and then scales it to the wallet. `leverage` is your ceiling; the code uses',
+    'the lowest leverage that supports the position (never higher than what you return, whatever the role text above discusses in the',
+    'abstract). `riskLevel` (LOW/MEDIUM/HIGH) is your own summary of how much you are risking here, driven by genuine confidence in this',
+    'setup, not a fixed rule - see the riskLevel instruction in the user message. It is informational (shown to the account owner); it does',
+    'not relax or replace any ceiling, and it must match the riskPercent/leverage you actually chose.',
     '',
     'The "Fixed ceilings" listed in the user message are enforced in code: numbers beyond them are clamped and a plan that still breaks',
     'them is rejected. They are limits, not targets. Use only the evidence in the message; anything it does not contain (for example',

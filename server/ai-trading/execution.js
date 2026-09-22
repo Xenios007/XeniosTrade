@@ -200,6 +200,8 @@ export function buildAiTradeRecord({ run, plan, mode, scaled, execution, marginM
     aiRunId: run.id,
     aiTradingMode: mode,
     aiConfidence: run.final?.confidence ?? null,
+    // The Risk Manager's own classification of how much it is risking on this trade (see riskPrompts); null for an older run or a model that omitted it.
+    aiRiskLevel: run.stages?.find((stage) => stage.id === 'risk')?.output?.ai?.riskLevel ?? null,
     aiScaleNotes: scaled.notes,
     walletId: wallet,
     walletName: AI_WALLET_NAMES[mode],
