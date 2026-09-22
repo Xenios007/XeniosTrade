@@ -94,7 +94,7 @@ function ProviderCard({ provider, entry, status, liveStatus, onEdit, onRemove })
       <div className="text-xs leading-relaxed text-slate-400">
         {provider.localServer ? (
           <>
-            {connected ? 'Local model server is running.' : 'Local model server is not reachable — start it with npm run fingpt (or check the tunnel).'}
+            {connected ? 'Local model server is running.' : `Local model server is not reachable — start it with npm run ${provider.npmScript || 'fingpt'} (or check the tunnel).`}
             {status?.present ? <div className="mt-1">Access token stored server-side.</div> : null}
             <div className="mt-1 truncate">Base URL: {entry?.baseUrl || provider.baseUrl}</div>
             {entry?.model ? <div className="mt-1 truncate">Model: {entry.model}</div> : null}
@@ -156,7 +156,7 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
     let cancelled = false
     fetch('/api/ai-trading/config')
       .then((response) => (response.ok ? response.json() : null))
-      .then((payload) => { if (!cancelled && payload) setLiveStatus({ fingpt: payload.fingpt || null }) })
+      .then((payload) => { if (!cancelled && payload) setLiveStatus({ fingpt: payload.fingpt || null, finma: payload.finma || null }) })
       .catch(() => {})
     return () => { cancelled = true }
   }, [])
@@ -270,7 +270,7 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
           ) : (
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-slate-400">
               {editing.localServer
-                ? 'Built-in local model (FinGPT). Leave the Base URL empty to use it, or set it to any other OpenAI-compatible server (llama.cpp, vLLM, LM Studio…, or FinGPT behind a tunnel such as https://llm.projxenios.trade/v1). The API key is only needed for a tunnel / remote URL.'
+                ? `Built-in local model. Leave the Base URL empty to use it, or set it to any other OpenAI-compatible server (llama.cpp, vLLM, LM Studio…, or this model behind its tunnel${editing.tunnelUrl ? ` such as ${editing.tunnelUrl}` : ''}). The API key is only needed for a tunnel / remote URL.`
                 : 'This provider runs locally — no API key required.'}
             </div>
           )}
@@ -391,7 +391,7 @@ function AgentAssignments({ settings }) {
         if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
         if (!cancelled) {
           setConfig(payload.config)
-          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
+          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null })
           setDraft(payload.config.agents)
         }
       })
@@ -526,7 +526,7 @@ function AgentAssignments({ settings }) {
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">
                   {provider?.localServer
-                    ? 'Runs on this machine: FinGPT (Llama 3 8B + LoRA, 4-bit NF4) via server/local-llm — no API key, no per-token cost. Start it with npm run fingpt. Calls are slow (partly offloaded to RAM).'
+                    ? provider.localDescription || 'Runs on this machine: a local model via server/local-llm — no API key, no per-token cost.'
                     : provider?.localLogin
                     ? `Runs through this server's ${loginName} login${assignment.model ? ` with ${assignment.model}` : ' with its default model'} — no API key, counted against that ${loginName} account. Each call can take a minute or more.`
                     : provider ? `Will call ${effectiveModel || 'a model you still need to name'}${assignment.model ? '' : ' (provider default)'}.` : 'Nothing is called until a provider is chosen.'}

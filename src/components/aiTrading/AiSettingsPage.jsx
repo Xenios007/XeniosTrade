@@ -79,7 +79,7 @@ export function AiSettingsPage({ settings }) {
     const payload = await requestJson('/api/ai-trading/config')
     setConfig(payload.config)
     setScanStatus(payload.scanStatus || null)
-    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
+    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null })
     setDaily(payload.daily || null)
     setDraft(draftFromExecution(payload.config.execution))
   }, [])

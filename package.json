@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:server": "node server/mock-trading-server.js",
     "fingpt": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\server.py",
+    "finma": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\finma-server.py",
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",

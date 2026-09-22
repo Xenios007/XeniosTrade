@@ -61,5 +61,7 @@ server/data/
 *.tmp-*
 server/local-llm/.venv/
 server/local-llm/.offload/
+server/local-llm/.offload-finma/
 server/local-llm/*.log
 server/local-llm/api-key.txt
+server/local-llm/finma-api-key.txt

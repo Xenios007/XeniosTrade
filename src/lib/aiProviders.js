@@ -93,6 +93,29 @@ export const AI_PROVIDERS = [
     suggested: ['fingpt-llama3-8b'],
     wiredBot: 'AI Trading agents (local model)',
     timeoutMs: 420_000,
+    npmScript: 'fingpt',
+    localDescription: 'Runs on this machine: FinGPT (Llama 3 8B + LoRA, 4-bit NF4) via server/local-llm — no API key, no per-token cost. Start it with npm run fingpt. Calls are slow (partly offloaded to RAM).',
+    tunnelUrl: 'https://llm.projxenios.trade/v1',
+  }),
+  // FinMA-7B-full (PIXIU project, full fine-tune of LLaMA-7B, 4-bit NF4) served from this machine by
+  // server/local-llm/finma-server.py, port 8012. Same shape as the FinGPT entry above; only one of the two local
+  // model servers can actually be running at a time on this machine's 8 GB card (see server/local-llm/finma-server.py).
+  P('finma', 'FinMA · LLaMA 7B Full (local, 4-bit)', {
+    baseUrl: 'http://127.0.0.1:8012/v1',
+    baseUrlEditable: true,
+    baseUrlHint: 'http://127.0.0.1:8012/v1',
+    // Optional key: only needed when the model is reached over a Cloudflare tunnel, where the local server requires
+    // its bearer token (server/local-llm/finma-api-key.txt). Direct localhost calls need none.
+    keyOptional: true,
+    localLogin: true,
+    localServer: true,
+    keyHint: 'token, only for a tunnel / remote URL',
+    suggested: ['finma-7b-full'],
+    wiredBot: 'AI Trading agents (local model)',
+    timeoutMs: 420_000,
+    npmScript: 'finma',
+    localDescription: 'Runs on this machine: FinMA-7B-full (LLaMA 7B, full fine-tune, 4-bit NF4) via server/local-llm — no API key, no per-token cost. Start it with npm run finma. Calls are slow (partly offloaded to RAM).',
+    tunnelUrl: 'https://finma.projxenios.trade/v1',
   }),
   P('meta', 'Meta (Llama via Together)', {
     baseUrl: 'https://api.together.xyz/v1',

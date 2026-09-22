@@ -285,7 +285,7 @@ export function AiTradingPage({ settings }) {
   useEffect(() => {
     let cancelled = false
     requestJson('/api/ai-trading/config')
-      .then((payload) => { if (!cancelled) { setConfig(payload.config); setScanStatus(payload.scanStatus || null); setBacktestStats(payload.backtestStats); setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null }) } })
+      .then((payload) => { if (!cancelled) { setConfig(payload.config); setScanStatus(payload.scanStatus || null); setBacktestStats(payload.backtestStats); setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null }) } })
       .catch((err) => { if (!cancelled) setError(err.message) })
     requestJson('/api/ai-trading/runs')
       .then((payload) => { if (!cancelled) { setRuns(payload.runs); setScanLog(payload.scanLog || []); setRunsError('') } })

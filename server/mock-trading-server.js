@@ -79,7 +79,7 @@ import { callAgentJson, redactSecrets } from './ai-trading/llm.js'
 import { collectFlowData } from './ai-trading/flow-data.js'
 import { getCodexAgentStatus } from './ai-trading/codex-agent.js'
 import { getClaudeAgentStatus } from './ai-trading/claude-agent.js'
-import { getFingptStatus } from './ai-trading/fingpt-status.js'
+import { getFingptStatus, getFinmaStatus } from './ai-trading/fingpt-status.js'
 import { buildMarketSnapshot, riskLimitsFor, runAiTradingPipeline } from './ai-trading/pipeline.js'
 import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-trading/exchange-fit.js'
 import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
@@ -10274,7 +10274,7 @@ const aiTradingRunsInFlight = new Set()
 
 app.get('/api/ai-trading/config', async (_request, response) => {
   const noLogin = () => ({ available: false, loggedIn: false })
-  const [config, quantStats, scanStatus, codex, claude, fingpt, aiTrades] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin), getFingptStatus(), getAiTrades()])
+  const [config, quantStats, scanStatus, codex, claude, fingpt, finma, aiTrades] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiScanStatus(), getCodexAgentStatus().catch(noLogin), getClaudeAgentStatus().catch(noLogin), getFingptStatus(), getFinmaStatus(), getAiTrades()])
   const daily = dailyStatus({ trades: aiTrades, mode: config.execution.mode, execution: config.execution })
   response.json({
     ok: true,
@@ -10283,6 +10283,7 @@ app.get('/api/ai-trading/config', async (_request, response) => {
     codex,
     claude,
     fingpt,
+    finma,
     daily,
     backtestStats: quantStats
       ? { available: true, generatedAt: quantStats.generatedAt, tradeCount: quantStats.tradeCount, source: quantStats.source }
