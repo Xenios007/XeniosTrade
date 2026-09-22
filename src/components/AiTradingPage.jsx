@@ -7,11 +7,13 @@ import {
 } from '../lib/aiTrading'
 import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
 import { useAiLedger } from '../lib/aiTradingApi'
-import { formatDateTime } from '../lib/formatters'
+import { formatDateTime, formatPrice } from '../lib/formatters'
+import { getTradePnlAmount, isTradeOpen } from '../lib/trades'
 import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
 import { Panel } from './Panel'
 import { Badge } from './ui/Badge'
 import { PageHeader } from './ui/PageHeader'
+import { pnlTone } from './ui/StatCard'
 import { ShadowOutcomesPanel } from './aiTrading/ShadowOutcomesPanel'
 import { SubNavTabs } from './ui/SubNavTabs'
 
@@ -66,7 +68,7 @@ export function AgentAssignmentStrip({ config, settings, localLogins }) {
   )
 }
 
-function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted, trades }) {
+function PipelineTab({ config, settings, localLogins, latestRun, running, error, onRun, onExecuted, trades, livePrices }) {
   const [symbol, setSymbol] = useState(AI_TRADING_SYMBOLS[0])
   const [custom, setCustom] = useState('')
   const target = custom.trim() ? custom.trim().toUpperCase() : symbol
@@ -123,7 +125,7 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
         </div>
       </Panel>
 
-      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} trades={trades} /> : (
+      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /> : (
         <Panel title="Pipeline">
           <PipelineFlow run={null} running={false} />
         </Panel>
@@ -132,7 +134,7 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
   )
 }
 
-const HISTORY_PAGE_SIZE = 100
+const HISTORY_PAGE_SIZE = 25
 
 function scanStatusLine(scanStatus, enabled) {
   if (scanStatus?.running) return 'Scanning now…'
@@ -140,13 +142,63 @@ function scanStatusLine(scanStatus, enabled) {
   return enabled === false ? 'Auto-scan is off.' : 'No scan has run yet.'
 }
 
-function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry, trades }) {
+/** Small live badge for a run row whose trade is still open: current price + running P/L, from the same poll every other live price on the page uses. */
+function LiveTradeBadge({ trade, livePrices }) {
+  if (!isTradeOpen(trade)) return null
+  const currentPrice = livePrices?.[trade.symbol]
+  const pnlAmount = getTradePnlAmount(trade, currentPrice)
+  return (
+    <Badge tone={pnlAmount == null ? 'info' : pnlTone(pnlAmount)}>
+      {currentPrice ? `Live ${formatPrice(currentPrice, 4)}` : 'Live'}
+      {pnlAmount != null ? ` · ${pnlAmount >= 0 ? '+' : ''}${pnlAmount.toFixed(2)} USDT` : ''}
+    </Badge>
+  )
+}
+
+function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, execution, onExecuted, onRetry, trades, livePrices }) {
   const [openId, setOpenId] = useState(null)
   const [filter, setFilter] = useState('all')
-  const [shown, setShown] = useState(HISTORY_PAGE_SIZE)
+  const [page, setPage] = useState(1)
 
   const feed = useMemo(() => buildHistoryFeed(runs, scanLog), [runs, scanLog])
   const items = useMemo(() => filterHistoryFeed(feed, filter), [feed, filter])
+  const totalPages = Math.max(1, Math.ceil(items.length / HISTORY_PAGE_SIZE))
+  const pageStart = (page - 1) * HISTORY_PAGE_SIZE
+  const pageEnd = Math.min(pageStart + HISTORY_PAGE_SIZE, items.length)
+  const pageItems = items.slice(pageStart, pageEnd)
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages))
+  }, [totalPages])
+
+  const paginationControls = items.length > HISTORY_PAGE_SIZE ? (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+      <div>
+        Showing <span className="font-semibold text-white">{pageStart + 1}-{pageEnd}</span> of <span className="font-semibold text-white">{items.length}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setPage((current) => Math.max(1, current - 1))}
+          disabled={page <= 1}
+          className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Previous
+        </button>
+        <div className="min-w-[5.5rem] text-center text-xs uppercase tracking-[0.16em] text-slate-400">
+          Page {page} / {totalPages}
+        </div>
+        <button
+          type="button"
+          onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+          disabled={page >= totalPages}
+          className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  ) : null
 
   return (
     <Panel title="Run History">
@@ -156,7 +208,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
             <button
               key={item.id}
               type="button"
-              onClick={() => { setFilter(item.id); setShown(HISTORY_PAGE_SIZE) }}
+              onClick={() => { setFilter(item.id); setPage(1) }}
               className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${filter === item.id ? 'border-sky-300/50 bg-sky-400/15 text-sky-100' : 'border-white/10 bg-slate-950/50 text-slate-400 hover:border-white/25'}`}
             >
               {item.label}
@@ -170,7 +222,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
       </div>
       <div className="mb-3 text-[11px] leading-relaxed text-slate-500">
         Every scan result is listed here. Only runs where the Analyst went LONG/SHORT, or that opened a trade, have a full report to open (last 50);
-        the rest are one-line HOLDs and errors. Refreshes every 15 seconds.
+        the rest are one-line HOLDs and errors. Refreshes every 15 seconds. A run whose trade is still open shows its live price and P/L below.
       </div>
 
       {error ? (
@@ -192,7 +244,8 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
         </div>
       ) : (
         <div className="grid gap-2">
-          {items.slice(0, shown).map((item) => {
+          {paginationControls}
+          {pageItems.map((item) => {
             if (item.kind === 'scan') {
               const { entry } = item
               return (
@@ -212,6 +265,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
             const final = run.final || {}
             const approved = Boolean(final.approved)
             const opened = run.execution?.status === 'opened'
+            const liveTrade = run.execution?.tradeId ? trades.find((candidate) => candidate.id === run.execution.tradeId) || null : null
             return (
               <div key={run.id} className="rounded-2xl border border-white/10 bg-white/[0.03]">
                 <button
@@ -228,21 +282,14 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   <Badge tone="neutral">{run.trigger === 'scan' ? 'Scan' : 'Manual'}</Badge>
                   {run.testMode ? <Badge tone="warn">Test mode</Badge> : null}
                   {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
+                  <LiveTradeBadge trade={liveTrade} livePrices={livePrices} />
                   <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
                 </button>
-                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} /></div> : null}
+                {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /></div> : null}
               </div>
             )
           })}
-          {items.length > shown ? (
-            <button
-              type="button"
-              onClick={() => setShown((count) => count + HISTORY_PAGE_SIZE)}
-              className="mt-1 justify-self-center rounded-full border border-white/10 px-4 py-1.5 text-xs font-medium text-slate-300 hover:border-white/25"
-            >
-              Show more ({items.length - shown} older)
-            </button>
-          ) : null}
+          {paginationControls}
         </div>
       )}
     </Panel>
@@ -277,6 +324,7 @@ export function AiTradingPage({ settings }) {
   const [scanLog, setScanLog] = useState([])
   const { ledger } = useAiLedger({ pollMs: 15_000 })
   const trades = ledger?.trades || []
+  const livePrices = ledger?.livePrices || {}
   const [runsError, setRunsError] = useState('')
   const [scanStatus, setScanStatus] = useState(null)
   const [running, setRunning] = useState(false)
@@ -347,13 +395,13 @@ export function AiTradingPage({ settings }) {
       <Routes>
         <Route
           path="/"
-          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} trades={trades} />}
+          element={<PipelineTab config={config} settings={settings} localLogins={localLogins} latestRun={runs[0] || null} running={running} error={error} onRun={runPipeline} onExecuted={reloadRuns} trades={trades} livePrices={livePrices} />}
         />
         <Route
           path="history"
           element={(
             <div className="grid gap-6">
-              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} />
+              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} livePrices={livePrices} />
               <ShadowOutcomesPanel />
               <BacktestContext backtestStats={backtestStats} />
             </div>

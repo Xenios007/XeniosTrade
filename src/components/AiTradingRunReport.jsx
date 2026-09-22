@@ -1,11 +1,12 @@
 import { ArrowRight, Check, Loader2, X } from 'lucide-react'
 import { AI_TRADING_AGENTS } from '../lib/aiTrading'
 import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
+import { getTradePnlAmount, getTradeRoiPercent, isTradeOpen } from '../lib/trades'
 import { Badge } from './ui/Badge'
 import { Panel } from './Panel'
 import { ExecutionPanel } from './aiTrading/ExecutionPanel'
 import { DECISION_TONE, label as decisionLabel } from './aiTrading/PositionManagerPanel'
-import { StatCard } from './ui/StatCard'
+import { StatCard, pnlTone } from './ui/StatCard'
 
 const KIND_LABEL = { ai: 'AI', data: 'Data', code: 'Code' }
 const KIND_TONE = { ai: 'info', data: 'neutral', code: 'warn' }
@@ -308,10 +309,14 @@ function Gates({ gates }) {
   )
 }
 
-function Verdict({ run, execution, onExecuted }) {
+function Verdict({ run, execution, onExecuted, liveTrade, livePrices = {} }) {
   const { final } = run
   const tone = final.approved ? (final.action === 'LONG' ? 'up' : 'down') : 'default'
   const trade = final.trade
+  const open = isTradeOpen(liveTrade)
+  const currentPrice = open ? livePrices?.[liveTrade.symbol] : null
+  const pnlAmount = open ? getTradePnlAmount(liveTrade, currentPrice) : null
+  const roiPercent = open ? getTradeRoiPercent(liveTrade, currentPrice) : null
 
   return (
     <Panel title="Verdict">
@@ -323,6 +328,7 @@ function Verdict({ run, execution, onExecuted }) {
           <span className="text-sm text-slate-400">
             {run.symbol} at {formatPrice(run.price, 4)} · {formatDateTimeWithSeconds(run.startedAt)}
           </span>
+          {open ? <Badge tone="info">Still open</Badge> : null}
         </div>
         {final.reason ? <p className="max-w-3xl text-sm leading-relaxed text-slate-300">{final.reason}</p> : null}
 
@@ -334,6 +340,22 @@ function Verdict({ run, execution, onExecuted }) {
             <StatCard label="Max loss" value={`${num(trade.maxLossUsdt)} USDT`} sublabel={`${num(trade.riskPctOfEquity)}% of equity`} tone="warn" />
             <StatCard label="Notional" value={`${num(trade.notionalUsdt, 0)} USDT`} sublabel={`qty ${Number(trade.quantity).toPrecision(4)}`} />
             <StatCard label="Leverage" value={`${trade.leverage}x`} sublabel={`${num(trade.marginUsdt)} USDT margin`} />
+          </div>
+        ) : null}
+
+        {open ? (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <StatCard
+              label="Current price"
+              value={currentPrice ? formatPrice(currentPrice, 4) : 'Loading…'}
+              sublabel="live, this trade"
+            />
+            <StatCard
+              label="Unrealized P/L"
+              value={pnlAmount == null ? 'n/a' : `${signed(num(pnlAmount, 2))} USDT`}
+              sublabel={roiPercent == null ? 'live' : `${signed(num(roiPercent, 1))}% ROI`}
+              tone={pnlAmount == null ? 'default' : pnlTone(pnlAmount)}
+            />
           </div>
         ) : null}
 
@@ -351,13 +373,13 @@ function Verdict({ run, execution, onExecuted }) {
   )
 }
 
-export function AiTradingRunReport({ run, running = false, execution = null, onExecuted = null, trades = [] }) {
-  const trade = run?.execution?.tradeId ? trades.find((item) => item.id === run.execution.tradeId) || null : null
+export function AiTradingRunReport({ run, running = false, execution = null, onExecuted = null, trades = [], livePrices = {} }) {
+  const liveTrade = run?.execution?.tradeId ? trades.find((item) => item.id === run.execution.tradeId) || null : null
   return (
     <div className="grid gap-6">
-      {run && !running ? <Verdict run={run} execution={execution} onExecuted={onExecuted} /> : null}
+      {run && !running ? <Verdict run={run} execution={execution} onExecuted={onExecuted} liveTrade={liveTrade} livePrices={livePrices} /> : null}
       <Panel title="Pipeline">
-        <PipelineFlow run={running ? null : run} running={running} trade={running ? null : trade} />
+        <PipelineFlow run={running ? null : run} running={running} trade={running ? null : liveTrade} />
       </Panel>
     </div>
   )
