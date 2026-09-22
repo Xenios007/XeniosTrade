@@ -61,6 +61,7 @@ function ModeHistory({ mode, ledger, refresh }) {
         livePrices={ledger.livePrices}
         closingTradeIds={closing}
         onManualClose={closeTrade}
+        showBotFilter={false}
       />
     </div>
   )

@@ -28,6 +28,8 @@ const TRADE_HISTORY_ARRANGE_OPTIONS = [
   { id: 'pnl-high', label: 'Highest P/L' },
   { id: 'pnl-low', label: 'Lowest P/L' },
 ]
+// AI Trading's history has no bot to sort/filter by: every row is the same one AI model.
+const TRADE_HISTORY_ARRANGE_OPTIONS_NO_BOT = TRADE_HISTORY_ARRANGE_OPTIONS.filter((option) => option.id !== 'bot')
 
 const TRADE_STATUS_SORT_ORDER = {
   OPEN: 0,
@@ -230,15 +232,17 @@ export function TradeHistoryTable({
   title = 'Trade History',
   closingTradeIds = {},
   onManualClose,
+  // Off for AI Trading's history: it only ever has one signal model, so a bot picker (and sorting by bot) has nothing to filter.
+  showBotFilter = true,
 }) {
   const [arrangeBy, setArrangeBy] = useState('latest')
   const [botFilter, setBotFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [currentPage, setCurrentPage] = useState(1)
   const filteredTrades = useMemo(() => trades.filter((trade) => (
-    (botFilter === 'all' || trade.signalModelId === botFilter)
+    (!showBotFilter || botFilter === 'all' || trade.signalModelId === botFilter)
     && (statusFilter === 'all' || trade.status === statusFilter)
-  )), [trades, botFilter, statusFilter])
+  )), [trades, botFilter, statusFilter, showBotFilter])
   const openTrades = filteredTrades.filter((trade) => isTradeOpen(trade)).length
   const arrangedTrades = useMemo(() => {
     const nextTrades = [...filteredTrades]
@@ -334,23 +338,25 @@ export function TradeHistoryTable({
       title={title}
       action={(
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2 rounded-full border border-emerald-300/20 bg-slate-950/35 px-3 py-2 text-emerald-100">
-            <Bot className="h-3.5 w-3.5 shrink-0 text-emerald-200" />
-            <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-100/70 sm:inline">
-              Bot
-            </span>
-            <select
-              value={botFilter}
-              onChange={(event) => setBotFilter(event.target.value)}
-              className="min-w-[7rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-emerald-100 outline-none"
-            >
-              {TRADE_BOT_FILTER_OPTIONS.map((option) => (
-                <option key={option.id} value={option.id} className="bg-slate-950 text-white">
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          {showBotFilter ? (
+            <div className="flex items-center gap-2 rounded-full border border-emerald-300/20 bg-slate-950/35 px-3 py-2 text-emerald-100">
+              <Bot className="h-3.5 w-3.5 shrink-0 text-emerald-200" />
+              <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-100/70 sm:inline">
+                Bot
+              </span>
+              <select
+                value={botFilter}
+                onChange={(event) => setBotFilter(event.target.value)}
+                className="min-w-[7rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-emerald-100 outline-none"
+              >
+                {TRADE_BOT_FILTER_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id} className="bg-slate-950 text-white">
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
           <div className="flex items-center gap-2 rounded-full border border-amber-300/20 bg-slate-950/35 px-3 py-2 text-amber-100">
             <ListFilter className="h-3.5 w-3.5 shrink-0 text-amber-200" />
             <span className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-amber-100/70 sm:inline">
@@ -378,7 +384,7 @@ export function TradeHistoryTable({
               onChange={(event) => setArrangeBy(event.target.value)}
               className="min-w-[8.75rem] bg-transparent text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 outline-none"
             >
-              {TRADE_HISTORY_ARRANGE_OPTIONS.map((option) => (
+              {(showBotFilter ? TRADE_HISTORY_ARRANGE_OPTIONS : TRADE_HISTORY_ARRANGE_OPTIONS_NO_BOT).map((option) => (
                 <option key={option.id} value={option.id} className="bg-slate-950 text-white">
                   {option.label}
                 </option>
@@ -390,7 +396,7 @@ export function TradeHistoryTable({
     >
       {arrangedTrades.length === 0 ? (
         <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-slate-400">
-          {trades.length === 0 ? 'No trades recorded yet.' : 'No trades match the selected bot/status filters.'}
+          {trades.length === 0 ? 'No trades recorded yet.' : `No trades match the selected ${showBotFilter ? 'bot/status filters' : 'status filter'}.`}
         </div>
       ) : (
         <div className="min-w-0 space-y-3">
