@@ -452,6 +452,25 @@ export function riskLimitsFor(config) {
 }
 
 /** The wallet's balance and open AI positions, so the Risk Manager can weigh portfolio exposure (empty when unknown). */
+/**
+ * Advisory only, never a ceiling: the account owner's target USDT profit on a winning trade (execution.targetProfitPerTradeUsdt,
+ * 0 = no goal stated). Gives concrete numbers so the Risk Manager can reason toward it with its own sizing, inside the same
+ * ceilings as always; it must never take a bad setup, or exceed a ceiling, just to reach this number.
+ */
+function profitGoalLines({ target, constraints, limits }) {
+  if (!(target > 0)) return []
+  const lines = [
+    `- The account owner's goal is roughly ${fx(target)} USDT profit on a winning trade (after fees) - not a requirement. Do not take a setup you would otherwise reject, or exceed any ceiling above, just to reach it. When the setup and the ceilings allow it, size (riskPercent, leverage, takeProfitPercent) toward this rather than a much smaller profit; a weak or uncertain setup should still be sized small (or vetoed) even if that misses the goal.`,
+  ]
+  const cap = constraints?.marginCapUsdt
+  if (cap > 0) {
+    const largest = cap * limits.maxLeverage
+    const neededPct = (target / largest) * 100
+    lines.push(`- Example at the ${limits.maxLeverage}x ceiling and your ${fx(cap)} USDT margin cap (largest position ${fx(largest)} USDT): a ${fx(neededPct)}% take-profit would net about ${fx(target)} USDT. A smaller position or lower leverage needs a larger take-profit percent (still >= the reward:risk minimum below) to reach the same USDT profit.`)
+  }
+  return lines
+}
+
 function portfolioLines({ constraints }) {
   if (!constraints) return []
   const lines = []
@@ -491,7 +510,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   return lines
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0 }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = runRiskManager({
     side: analyst.action,
@@ -523,6 +542,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       `For reference, the plain rule-based sizing of the Analyst's numbers would be: ${baseline.approved
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}.`,
+      ...profitGoalLines({ target: targetProfitUsdt, constraints, limits }),
       ...portfolioLines({ constraints }),
       ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
@@ -747,7 +767,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics, targetProfitUsdt: config.execution?.targetProfitPerTradeUsdt }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output

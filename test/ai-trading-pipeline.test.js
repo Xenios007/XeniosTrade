@@ -1399,3 +1399,66 @@ test('trade record: keeps the Risk Manager\'s riskLevel for the trade history, o
   const withoutLevel = buildAiTradeRecord({ run: { ...run, stages: [{ id: 'risk', output: { ai: {} } }] }, plan, mode: 'real', scaled, execution: {}, marginMode: 'ISOLATED', leverage: 3, dateKey: '2026-09-22' })
   assert.equal(withoutLevel.aiRiskLevel, null)
 })
+
+// ---- Target profit per trade (advisory, never a ceiling) ---------------------------------------------------------------------
+
+test('config: targetProfitPerTradeUsdt defaults to 1, is bounded, and 0 turns it off', () => {
+  const read = (execution) => normalizeAiTradingConfig({ execution }).execution.targetProfitPerTradeUsdt
+  assert.equal(read({}), 1, 'default goal is 1 USDT per trade')
+  assert.equal(read({ targetProfitPerTradeUsdt: 5.5 }), 5.5)
+  assert.equal(read({ targetProfitPerTradeUsdt: 0 }), 0, '0 = off')
+  assert.equal(read({ targetProfitPerTradeUsdt: -3 }), 0, 'clamped to the 0 floor')
+  assert.equal(read({ targetProfitPerTradeUsdt: 'x' }), 1, 'garbage falls back to the default, not 0')
+})
+
+test('risk manager: is told the profit goal with concrete numbers, and that it must not override its own judgement', async () => {
+  const withGoal = normalizeAiTradingConfig({ execution: { targetProfitPerTradeUsdt: 1 } })
+  const fake = fakeAgents()
+  let risk = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: withGoal, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => ({ mode: 'real', minOrderUsdt: 5, marginCapUsdt: 40, availableUsdt: 40, openPositions: [] }),
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.match(risk.userPrompt, /The account owner's goal is roughly 1\.00 USDT profit on a winning trade \(after fees\) - not a requirement/)
+  assert.match(risk.userPrompt, /Do not take a setup you would otherwise reject, or exceed any ceiling above, just to reach it/)
+  // margin cap known: a concrete example is given (40 USDT cap x 5x ceiling = 200 USDT position)
+  assert.match(risk.userPrompt, /Example at the 5x ceiling and your 40\.00 USDT margin cap \(largest position 200\.00 USDT\): a 0\.50% take-profit would net about 1\.00 USDT/)
+  assert.match(risk.systemPrompt, /If the user message states a target\s*\n\s*profit per trade, that is the same kind of guidance/)
+
+  // 0 = off: no goal line at all
+  const off = normalizeAiTradingConfig({ execution: { targetProfitPerTradeUsdt: 0 } })
+  const fakeOff = fakeAgents()
+  let riskOff = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: off, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) riskOff = call; return fakeOff.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.doesNotMatch(riskOff.userPrompt, /account owner's goal/)
+
+  // without a margin cap (constraints unavailable) the goal still appears, just without the worked example
+  const fakeNoCap = fakeAgents()
+  let riskNoCap = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: withGoal, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) riskNoCap = call; return fakeNoCap.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.match(riskNoCap.userPrompt, /account owner's goal is roughly 1\.00 USDT/)
+  assert.doesNotMatch(riskNoCap.userPrompt, /Example at the/)
+})
+
+test('daily limits: 0 = off for all three lets automatic real trading continue without a daily stop', async () => {
+  const { dailyStatus, manilaDay } = await import('../server/ai-trading/daily-limits.js')
+  const now = Date.now()
+  const today = manilaDay(now)
+  const manyLosses = Array.from({ length: 20 }, (_unused, index) => ({
+    symbol: 'ETHUSDT', aiTradingMode: 'real', status: 'CLOSED_SL', pnl: -5, notional: 360, closedDateKey: today, tradeDateKey: today, id: `t${index}`,
+  }))
+  const status = dailyStatus({ trades: manyLosses, mode: 'real', now, execution: { dailyProfitTargetUsdt: 0, dailyMaxLossUsdt: 0, dailyMaxTrades: 0 } })
+  assert.equal(status.blocked, null, 'no daily limit stops trading when all three are off')
+  assert.equal(status.tradesOpened, 20)
+  assert.equal(status.realizedUsdt, -107.2)
+})

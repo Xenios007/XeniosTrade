@@ -107,6 +107,9 @@ export const AI_TRADING_EXECUTION_LIMITS = {
   dailyProfitTargetUsdt: { min: 0, max: 100_000, step: 0.5, label: 'Daily profit target (USDT, 0 = off)' },
   dailyMaxLossUsdt: { min: 0, max: 100_000, step: 0.5, label: 'Daily loss stop (USDT, 0 = off)' },
   dailyMaxTrades: { min: 0, max: 50, step: 1, label: 'Max real trades per day (0 = off)' },
+  // Guidance for the Risk Manager, not enforced in code (see profitGoalLines in pipeline.js): a target USDT profit on a
+  // winning trade. It reasons toward it with its own riskPercent/leverage/takeProfitPercent, inside the usual ceilings.
+  targetProfitPerTradeUsdt: { min: 0, max: 10_000, step: 0.1, label: 'Target profit per trade (USDT, 0 = off)' },
 }
 
 export const DEFAULT_AI_TRADING_EXECUTION = {
@@ -126,6 +129,9 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   dailyProfitTargetUsdt: 0,
   dailyMaxLossUsdt: 0,
   dailyMaxTrades: 0,
+  // The Risk Manager is told to aim for roughly this much USDT profit on a winning trade (0 = no goal stated). Purely
+  // advisory - it never raises a ceiling, never overrides the model's own risk judgement, and is not enforced in code.
+  targetProfitPerTradeUsdt: 1,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -219,6 +225,7 @@ export function normalizeAiTradingConfig(raw) {
     dailyProfitTargetUsdt: Math.round(clampNumber(executionSource.dailyProfitTargetUsdt, AI_TRADING_EXECUTION_LIMITS.dailyProfitTargetUsdt, 0) * 100) / 100,
     dailyMaxLossUsdt: Math.round(clampNumber(executionSource.dailyMaxLossUsdt, AI_TRADING_EXECUTION_LIMITS.dailyMaxLossUsdt, 0) * 100) / 100,
     dailyMaxTrades: Math.round(clampNumber(executionSource.dailyMaxTrades, AI_TRADING_EXECUTION_LIMITS.dailyMaxTrades, 0)),
+    targetProfitPerTradeUsdt: Math.round(clampNumber(executionSource.targetProfitPerTradeUsdt, AI_TRADING_EXECUTION_LIMITS.targetProfitPerTradeUsdt, DEFAULT_AI_TRADING_EXECUTION.targetProfitPerTradeUsdt) * 100) / 100,
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,
