@@ -249,13 +249,13 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
             if (item.kind === 'scan') {
               const { entry } = item
               return (
-                <div key={`${entry.symbol}-${entry.at}`} className="flex flex-wrap items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.015] px-4 py-2.5">
-                  <span className="w-36 shrink-0 text-xs text-slate-500">{formatDateTime(entry.at)}</span>
-                  <span className="w-24 shrink-0 text-sm font-semibold text-slate-200">{entry.symbol}</span>
+                <div key={`${entry.symbol}-${entry.at}`} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-2xl border border-white/5 bg-white/[0.015] px-4 py-2.5">
+                  <span className="shrink-0 whitespace-nowrap text-xs text-slate-500">{formatDateTime(entry.at)}</span>
+                  <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-slate-200">{entry.symbol}</span>
                   <Badge tone={entry.outcome === 'error' ? 'down' : 'neutral'}>{entry.outcome === 'hold' ? 'No trade' : entry.outcome}</Badge>
                   <Badge tone="neutral">Scan</Badge>
                   {entry.testMode ? <Badge tone="warn">Test mode</Badge> : null}
-                  <span className="min-w-0 flex-1 text-xs text-slate-500">{entry.detail}</span>
+                  <span className="min-w-0 flex-1 break-words text-xs text-slate-500">{entry.detail}</span>
                 </div>
               )
             }
@@ -272,10 +272,10 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   type="button"
                   aria-expanded={open}
                   onClick={() => setOpenId(open ? null : run.id)}
-                  className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left"
+                  className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-3 text-left"
                 >
-                  <span className="w-36 shrink-0 text-xs text-slate-400">{formatDateTime(run.startedAt)}</span>
-                  <span className="w-24 shrink-0 text-sm font-semibold text-white">{run.symbol}</span>
+                  <span className="shrink-0 whitespace-nowrap text-xs text-slate-400">{formatDateTime(run.startedAt)}</span>
+                  <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-white">{run.symbol}</span>
                   <Badge tone={approved ? (final.action === 'LONG' ? 'up' : 'down') : 'neutral'}>
                     {approved ? `Trade ${final.action}` : 'No trade'}
                   </Badge>
@@ -283,7 +283,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   {run.testMode ? <Badge tone="warn">Test mode</Badge> : null}
                   {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
                   <LiveTradeBadge trade={liveTrade} livePrices={livePrices} />
-                  <span className="min-w-0 flex-1 truncate text-xs text-slate-500">{final.reason}</span>
+                  <span className="min-w-0 flex-1 basis-full break-words text-xs text-slate-500 sm:basis-auto sm:truncate">{final.reason}</span>
                 </button>
                 {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /></div> : null}
               </div>
