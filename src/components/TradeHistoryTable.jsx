@@ -125,6 +125,33 @@ function compareLabels(left, right) {
   return String(left || '').localeCompare(String(right || ''))
 }
 
+/** Page numbers to render around `current`, e.g. [1, 'ellipsis', 4, 5, 6, 'ellipsis', 20]. */
+function getPaginationRange(current, total) {
+  const siblingCount = 1
+  const totalVisible = siblingCount * 2 + 5
+
+  if (total <= totalVisible) {
+    return Array.from({ length: total }, (_, i) => i + 1)
+  }
+
+  const leftSibling = Math.max(current - siblingCount, 1)
+  const rightSibling = Math.min(current + siblingCount, total)
+  const showLeftEllipsis = leftSibling > 2
+  const showRightEllipsis = rightSibling < total - 1
+
+  if (!showLeftEllipsis && showRightEllipsis) {
+    const leftCount = 3 + siblingCount * 2
+    return [...Array.from({ length: leftCount }, (_, i) => i + 1), 'ellipsis', total]
+  }
+
+  if (showLeftEllipsis && !showRightEllipsis) {
+    const rightCount = 3 + siblingCount * 2
+    return [1, 'ellipsis', ...Array.from({ length: rightCount }, (_, i) => total - rightCount + i + 1)]
+  }
+
+  return [1, 'ellipsis', ...Array.from({ length: rightSibling - leftSibling + 1 }, (_, i) => leftSibling + i), 'ellipsis', total]
+}
+
 function getTradeSortTime(trade) {
   return Number(trade?.transactTime || trade?.closedAt || 0)
 }
@@ -309,22 +336,42 @@ export function TradeHistoryTable({
       <div>
         Showing <span className="font-semibold text-white">{pageStartIndex + 1}-{pageEndIndex}</span> of <span className="font-semibold text-white">{arrangedTrades.length}</span> trades
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
           onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
           disabled={currentPage <= 1}
+          aria-label="Previous page"
           className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Previous
         </button>
-        <div className="min-w-[5.5rem] text-center text-xs uppercase tracking-[0.16em] text-slate-400">
-          Page {currentPage} / {totalPages}
-        </div>
+        {getPaginationRange(currentPage, totalPages).map((item, index) => (
+          item === 'ellipsis' ? (
+            <span key={`ellipsis-${index}`} className="px-1 text-xs text-slate-500">
+              &hellip;
+            </span>
+          ) : (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setCurrentPage(item)}
+              aria-current={item === currentPage ? 'page' : undefined}
+              className={`h-8 min-w-[2rem] rounded-full border px-2.5 text-xs font-semibold transition ${
+                item === currentPage
+                  ? 'border-sky-300/50 bg-sky-400/15 text-sky-100'
+                  : 'border-white/10 bg-white/[0.04] text-slate-300 hover:border-white/20'
+              }`}
+            >
+              {item}
+            </button>
+          )
+        ))}
         <button
           type="button"
           onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
           disabled={currentPage >= totalPages}
+          aria-label="Next page"
           className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-200 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Next
