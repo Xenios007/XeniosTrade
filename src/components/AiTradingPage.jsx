@@ -283,7 +283,7 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
                   {run.testMode ? <Badge tone="warn">Test mode</Badge> : null}
                   {opened ? <Badge tone="info">Opened on {run.execution.mode}</Badge> : null}
                   <LiveTradeBadge trade={liveTrade} livePrices={livePrices} />
-                  <span className="min-w-0 flex-1 basis-full break-words text-xs text-slate-500 sm:basis-auto sm:truncate">{final.reason}</span>
+                  <span className="min-w-0 grow basis-full break-words text-xs text-slate-500 sm:basis-0 sm:truncate">{final.reason}</span>
                 </button>
                 {open ? <div className="border-t border-white/10 p-4"><AiTradingRunReport run={run} execution={execution} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /></div> : null}
               </div>
