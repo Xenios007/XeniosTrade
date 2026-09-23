@@ -14,46 +14,77 @@ function verdictFor(group) {
   return { tone: 'neutral', label: 'Inconclusive' }
 }
 
+// One group per card: same fields as the table, stacked, for viewports too narrow for the 9-column table.
+function SummaryCards({ groups }) {
+  return (
+    <div className="grid min-w-0 gap-2 sm:hidden">
+      {groups.map((group) => {
+        const verdict = verdictFor(group)
+        return (
+          <div key={group.key} className="min-w-0 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="break-words font-medium text-white">{group.label}</span>
+              {verdict ? <Badge tone={verdict.tone}>{verdict.label}</Badge> : <span className="text-slate-500">—</span>}
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-slate-300">
+              <div className="min-w-0"><span className="text-slate-500">Signals </span>{group.signals}{group.pending ? <span className="text-slate-500"> ({group.pending} pending)</span> : null}</div>
+              <div className="min-w-0"><span className="text-slate-500">Decided </span>{group.decided}<span className="text-slate-500"> · {group.expired} exp.</span></div>
+              <div className="min-w-0"><span className="text-slate-500">Target first </span>{pct(group.targetRate)}</div>
+              <div className="min-w-0"><span className="text-slate-500">Break-even </span>{pct(group.breakEvenRate)}</div>
+              <div className="col-span-2 min-w-0"><span className="text-slate-500">95% range </span>{group.targetRateLow == null ? '—' : `${pct(group.targetRateLow)} – ${pct(group.targetRateHigh)}`}</div>
+              <div className="min-w-0"><span className="text-slate-500">No-skill baseline </span>{pct(group.baselineTargetRate)}{group.baselineSignals ? <span className="text-slate-500"> (n={group.baselineSignals})</span> : null}</div>
+              <div className="min-w-0"><span className="text-slate-500">Avg net / signal </span>{signedPct(group.avgNetPct)}</div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function SummaryTable({ summary }) {
   if (!summary?.groups?.length || summary.groups[0].signals === 0) {
     return <div className="py-4 text-center text-sm text-slate-400">No signals recorded yet.</div>
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] text-left text-xs">
-        <thead className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-          <tr>
-            <th className="py-2 pr-3 font-medium">Where the signal went</th>
-            <th className="py-2 pr-3 font-medium">Signals</th>
-            <th className="py-2 pr-3 font-medium">Decided</th>
-            <th className="py-2 pr-3 font-medium">Target first</th>
-            <th className="py-2 pr-3 font-medium">95% range</th>
-            <th className="py-2 pr-3 font-medium">Break-even</th>
-            <th className="py-2 pr-3 font-medium">No-skill baseline</th>
-            <th className="py-2 pr-3 font-medium">Avg net / signal</th>
-            <th className="py-2 font-medium">Reading</th>
-          </tr>
-        </thead>
-        <tbody className="text-slate-200">
-          {summary.groups.map((group) => {
-            const verdict = verdictFor(group)
-            return (
-              <tr key={group.key} className="border-t border-white/5">
-                <td className="py-2 pr-3 font-medium text-white">{group.label}</td>
-                <td className="py-2 pr-3">{group.signals}{group.pending ? <span className="text-slate-500"> ({group.pending} pending)</span> : null}</td>
-                <td className="py-2 pr-3">{group.decided}<span className="text-slate-500"> · {group.expired} expired</span></td>
-                <td className="py-2 pr-3">{pct(group.targetRate)}</td>
-                <td className="py-2 pr-3 text-slate-400">{group.targetRateLow == null ? '—' : `${pct(group.targetRateLow)} – ${pct(group.targetRateHigh)}`}</td>
-                <td className="py-2 pr-3">{pct(group.breakEvenRate)}</td>
-                <td className="py-2 pr-3">{pct(group.baselineTargetRate)}{group.baselineSignals ? <span className="text-slate-500"> (n={group.baselineSignals})</span> : null}</td>
-                <td className="py-2 pr-3">{signedPct(group.avgNetPct)}</td>
-                <td className="py-2">{verdict ? <Badge tone={verdict.tone}>{verdict.label}</Badge> : <span className="text-slate-500">—</span>}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+    <>
+      <SummaryCards groups={summary.groups} />
+      <div className="hidden min-w-0 overflow-x-auto sm:block">
+        <table className="w-full min-w-[720px] text-left text-xs">
+          <thead className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+            <tr>
+              <th className="py-2 pr-3 font-medium">Where the signal went</th>
+              <th className="py-2 pr-3 font-medium">Signals</th>
+              <th className="py-2 pr-3 font-medium">Decided</th>
+              <th className="py-2 pr-3 font-medium">Target first</th>
+              <th className="py-2 pr-3 font-medium">95% range</th>
+              <th className="py-2 pr-3 font-medium">Break-even</th>
+              <th className="py-2 pr-3 font-medium">No-skill baseline</th>
+              <th className="py-2 pr-3 font-medium">Avg net / signal</th>
+              <th className="py-2 font-medium">Reading</th>
+            </tr>
+          </thead>
+          <tbody className="text-slate-200">
+            {summary.groups.map((group) => {
+              const verdict = verdictFor(group)
+              return (
+                <tr key={group.key} className="border-t border-white/5">
+                  <td className="py-2 pr-3 font-medium text-white">{group.label}</td>
+                  <td className="py-2 pr-3">{group.signals}{group.pending ? <span className="text-slate-500"> ({group.pending} pending)</span> : null}</td>
+                  <td className="py-2 pr-3">{group.decided}<span className="text-slate-500"> · {group.expired} expired</span></td>
+                  <td className="py-2 pr-3">{pct(group.targetRate)}</td>
+                  <td className="py-2 pr-3 text-slate-400">{group.targetRateLow == null ? '—' : `${pct(group.targetRateLow)} – ${pct(group.targetRateHigh)}`}</td>
+                  <td className="py-2 pr-3">{pct(group.breakEvenRate)}</td>
+                  <td className="py-2 pr-3">{pct(group.baselineTargetRate)}{group.baselineSignals ? <span className="text-slate-500"> (n={group.baselineSignals})</span> : null}</td>
+                  <td className="py-2 pr-3">{signedPct(group.avgNetPct)}</td>
+                  <td className="py-2">{verdict ? <Badge tone={verdict.tone}>{verdict.label}</Badge> : <span className="text-slate-500">—</span>}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   )
 }
 

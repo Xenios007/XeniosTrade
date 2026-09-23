@@ -24,7 +24,7 @@ export function Panel({
 
   return (
     <section className={`min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/5 shadow-glow backdrop-blur-xl ${className}`}>
-      <header className="shrink-0 flex items-center justify-between border-b border-white/10 px-5 py-4">
+      <header className="shrink-0 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-white/10 px-5 py-4">
         {collapsible ? (
           <button
             type="button"

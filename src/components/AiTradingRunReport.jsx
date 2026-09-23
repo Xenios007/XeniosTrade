@@ -24,7 +24,7 @@ const num = (value, digits = 2) => (Number.isFinite(Number(value)) ? Number(valu
 
 function Row({ label, children }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 text-xs">
+    <div className="flex min-w-0 items-baseline justify-between gap-3 text-xs">
       <span className="shrink-0 text-slate-500">{label}</span>
       <span className="min-w-0 break-words text-right text-slate-200">{children}</span>
     </div>
@@ -32,7 +32,7 @@ function Row({ label, children }) {
 }
 
 function Reasoning({ children }) {
-  return children ? <p className="text-xs leading-relaxed text-slate-300">{children}</p> : null
+  return children ? <p className="min-w-0 break-words text-xs leading-relaxed text-slate-300">{children}</p> : null
 }
 
 /** The 5th step: the AI that manages the trade this run opened. It reads the trade record, not a run stage. */
@@ -46,7 +46,7 @@ function ManagerDetails({ stage }) {
   const targetMoved = trade.initialTakeProfit != null && Number(trade.initialTakeProfit) !== Number(trade.takeProfit ?? -1)
 
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <Row label="Trade">{isOpen ? 'Open' : trade.closedBy === 'position-manager' ? 'Closed by the Position Manager' : 'Closed'}</Row>
       <Row label="Stop">{formatPrice(trade.stopLoss, 4)}{stopMoved ? ` (was ${formatPrice(trade.initialStopLoss, 4)})` : ''}</Row>
       <Row label="Target">{trade.takeProfit == null ? 'open-ended' : formatPrice(trade.takeProfit, 4)}{targetMoved && trade.initialTakeProfit ? ` (was ${formatPrice(trade.initialTakeProfit, 4)})` : ''}</Row>
@@ -80,7 +80,7 @@ function StageDetails({ stage }) {
   switch (stage.id) {
     case 'analyst':
       return (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 gap-2">
           <Row label="Call"><Badge tone={ACTION_TONE[output.action]}>{output.action}</Badge></Row>
           <Row label="Confidence">{output.confidence}%</Row>
           <Row label="Regime">{output.regime}</Row>
@@ -88,8 +88,8 @@ function StageDetails({ stage }) {
             <Row label="Proposed stop / target">{num(output.stopLossPercent)}% / {num(output.takeProfitPercent)}%</Row>
           ) : null}
           {output.keyFactors.length ? (
-            <ul className="list-disc space-y-0.5 pl-4 text-xs text-slate-300">
-              {output.keyFactors.map((factor) => <li key={factor}>{factor}</li>)}
+            <ul className="min-w-0 list-disc space-y-0.5 pl-4 text-xs text-slate-300">
+              {output.keyFactors.map((factor) => <li key={factor} className="break-words">{factor}</li>)}
             </ul>
           ) : null}
           <Reasoning>{output.reasoning}</Reasoning>
@@ -109,18 +109,18 @@ function StageDetails({ stage }) {
       ].filter(([, value]) => value != null)
 
       return (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 gap-2">
           <Row label="Verdict"><Badge tone={VERDICT_TONE[output.verdict]}>{output.verdict}</Badge></Row>
           {output.crowding ? <Row label="Crowding"><Badge tone={{ LOW: 'up', MEDIUM: 'warn', HIGH: 'down' }[output.crowding]}>{output.crowding}</Badge></Row> : null}
           {output.flags.map((item) => (
-            <div key={item.issue} className="flex items-start gap-2 text-xs text-slate-300">
+            <div key={item.issue} className="flex min-w-0 items-start gap-2 text-xs text-slate-300">
               <Badge tone={SEVERITY_TONE[item.severity]} className="shrink-0">{item.severity}</Badge>
-              <span>{item.issue}</span>
+              <span className="min-w-0 break-words">{item.issue}</span>
             </div>
           ))}
           <Reasoning>{output.reasoning}</Reasoning>
           {metricRows.length ? (
-            <div className="mt-1 grid gap-1.5 border-t border-white/10 pt-2">
+            <div className="mt-1 grid min-w-0 gap-1.5 border-t border-white/10 pt-2">
               <span className="text-[10px] uppercase tracking-[0.2em] text-slate-600">Evidence it saw</span>
               {metricRows.map(([label, value]) => <Row key={label} label={label}>{value}</Row>)}
             </div>
@@ -130,12 +130,12 @@ function StageDetails({ stage }) {
     }
     case 'critic':
       return (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 gap-2">
           <Row label="Verdict"><Badge tone={VERDICT_TONE[output.verdict]}>{output.verdict}</Badge></Row>
           {output.objections.map((item) => (
-            <div key={item.issue} className="flex items-start gap-2 text-xs text-slate-300">
+            <div key={item.issue} className="flex min-w-0 items-start gap-2 text-xs text-slate-300">
               <Badge tone={SEVERITY_TONE[item.severity]} className="shrink-0">{item.severity}</Badge>
-              <span>{item.issue}</span>
+              <span className="min-w-0 break-words">{item.issue}</span>
             </div>
           ))}
           <Reasoning>{output.reasoning}</Reasoning>
@@ -143,7 +143,7 @@ function StageDetails({ stage }) {
       )
     case 'risk':
       return (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 gap-2">
           <Row label="Result">
             <Badge tone={output.approved ? 'up' : 'down'}>{output.approved ? (output.reduced ? 'Reduced' : 'Approved') : 'Veto'}</Badge>
           </Row>
@@ -167,18 +167,18 @@ function StageDetails({ stage }) {
             </>
           ) : null}
           {output.ai?.concerns?.length ? (
-            <ul className="list-disc space-y-0.5 pl-4 text-xs text-slate-300">
-              {output.ai.concerns.map((concern) => <li key={concern}>{concern}</li>)}
+            <ul className="min-w-0 list-disc space-y-0.5 pl-4 text-xs text-slate-300">
+              {output.ai.concerns.map((concern) => <li key={concern} className="break-words">{concern}</li>)}
             </ul>
           ) : null}
           {output.ai?.reasoning && output.approved ? <Reasoning>{output.ai.reasoning}</Reasoning> : null}
           {output.backtest?.available ? (
-            <p className="text-[11px] leading-relaxed text-slate-500">
+            <p className="min-w-0 break-words text-[11px] leading-relaxed text-slate-500">
               Backtest background (not a gate): {num(output.backtest.expectedValueR)}R expected value over {output.backtest.sampleSize.toLocaleString()} similar trades from Bots 1–4.
             </p>
           ) : null}
-          {output.vetoReasons.map((reason) => <p key={reason} className="text-xs leading-relaxed text-rose-200">{reason}</p>)}
-          {output.adjustments.map((note) => <p key={note} className="text-[11px] leading-relaxed text-amber-200">Limit applied: {note}</p>)}
+          {output.vetoReasons.map((reason) => <p key={reason} className="min-w-0 break-words text-xs leading-relaxed text-rose-200">{reason}</p>)}
+          {output.adjustments.map((note) => <p key={note} className="min-w-0 break-words text-[11px] leading-relaxed text-amber-200">Limit applied: {note}</p>)}
         </div>
       )
     default:
