@@ -58,15 +58,15 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
     const failed = run.execution?.status === 'failed'
     return (
       <div className={`grid gap-1 rounded-2xl border px-4 py-3 text-xs ${failed ? 'border-rose-400/20 bg-rose-400/10 text-rose-200' : 'border-white/10 bg-slate-950/50 text-slate-300'}`}>
-        <div className="flex flex-wrap items-center gap-3">
-          <Badge tone="warn">Real money · auto</Badge>
-          <span>
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
+          <Badge tone="warn" className="shrink-0">Real money · auto</Badge>
+          <span className="min-w-0 flex-1 break-words">
             {failed
               ? `The automatic real-money order was not placed: ${run.execution.error}`
               : 'Real money auto-execute is on. This approved run was not opened (it may pre-date the switch, or its plan expired).'}
           </span>
         </div>
-        <span className="text-slate-400">
+        <span className="min-w-0 break-words text-slate-400">
           Auto-execute is on, so there is no manual Execute button. To place a run by hand, switch it off in{' '}
           <Link to="/ai-settings" className="text-sky-300 hover:underline">AI Settings</Link>.
         </span>
@@ -76,24 +76,24 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
 
   return (
     <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <Badge tone={mode === 'real' ? 'warn' : 'info'}>{MODE_LABEL[mode]} mode</Badge>
+      <div className="flex min-w-0 flex-wrap items-center gap-3">
+        <Badge tone={mode === 'real' ? 'warn' : 'info'} className="shrink-0">{MODE_LABEL[mode]} mode</Badge>
         {run.execution?.status === 'failed' ? (
-          <span className="text-xs text-rose-300">Automatic open failed: {run.execution.error}</span>
+          <span className="min-w-0 flex-1 break-words text-xs text-rose-300">Automatic open failed: {run.execution.error}</span>
         ) : mode === 'testnet' ? (
-          <span className="text-xs text-slate-400">
+          <span className="min-w-0 flex-1 break-words text-xs text-slate-400">
             {execution?.autoExecuteTestnet ? 'Auto-execute is on but this run was not opened.' : 'Auto-execute is off.'} Open it on the testnet wallet:
           </span>
         ) : armed ? (
-          <span className="text-xs text-amber-200">Real money is armed with auto-execute off — you place each trade yourself.</span>
+          <span className="min-w-0 flex-1 break-words text-xs text-amber-200">Real money is armed with auto-execute off — you place each trade yourself.</span>
         ) : (
-          <span className="text-xs text-slate-400">Real money is not armed. <Link to="/ai-settings" className="text-sky-300 hover:underline">Arm it in AI Settings</Link> to trade this.</span>
+          <span className="min-w-0 flex-1 break-words text-xs text-slate-400">Real money is not armed. <Link to="/ai-settings" className="text-sky-300 hover:underline">Arm it in AI Settings</Link> to trade this.</span>
         )}
         <button
           type="button"
           disabled={busy || (mode === 'real' && !armed)}
           onClick={() => (mode === 'real' ? setConfirming(true) : submit())}
-          className={`ml-auto inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+          className={`ml-auto shrink-0 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
             mode === 'real' ? 'bg-amber-400 text-slate-950' : 'bg-sky-400 text-slate-950'
           }`}
         >
@@ -121,9 +121,9 @@ export function ExecutionPanel({ run, execution, onExecuted }) {
             </>
           )}
         >
-          <div className="flex items-start gap-3 text-sm text-amber-100">
+          <div className="flex min-w-0 items-start gap-3 text-sm text-amber-100">
             <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0" />
-            <p>
+            <p className="min-w-0 break-words">
               This places a real {run.final.action} market order on <strong>{run.symbol}</strong> on your live Binance Futures account,
               with an exchange-side stop-loss and take-profit. The size is capped to your real-money margin limit
               ({execution?.realMaxMarginUsdt} USDT) and your available balance. You can lose the margin.
