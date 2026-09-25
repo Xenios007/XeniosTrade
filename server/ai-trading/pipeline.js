@@ -27,8 +27,18 @@
 //  - config.risk (accountEquityUsdt, riskPerTradePct, maxLeverage, ...) is no longer enforced. It is shown to the
 //    Risk Manager as reference numbers (what a rule-based bot would mechanically do, for contrast) and used to
 //    convert its riskPercent into dollars; nothing in code clamps or vetoes against it anymore.
+//  - Exceptions, each behind its own config.strategy switch (all off by default = everything above holds unchanged), added after
+//    a 33-trade testnet run lost to fees with no entry edge (docs/AI_TRADING.md, "Strategy switches"):
+//      timeframe 'swing'  1H entries, 4H trend, 1D confirmation instead of 5M / 1H scalps.
+//      trendFilter        a code gate: only the higher-timeframe trend's direction may be traded (trendDirection / trendGate).
+//      feeAware           a code veto on the final plan: target vs fee, reward:risk after fees, stop vs ATR (feeAwareProblems).
+//      lean               3 agents: no Flow / Critic calls; the Analyst reads the flow data and the Risk Manager plays Critic.
+//      makerEntry         execution only (maker-entry.js), nothing here.
 
-import { AI_TRADING_AGENTS, AI_TRADING_TEST_MODE_MIN_LEVERAGE } from '../../src/lib/aiTrading.js'
+import {
+  AI_TRADING_AGENTS, AI_TRADING_MIN_NET_REWARD_RISK, AI_TRADING_MIN_TARGET_FEE_MULTIPLE, AI_TRADING_ROUND_TRIP_FEE_PCT,
+  AI_TRADING_TEST_MODE_MIN_LEVERAGE, AI_TRADING_TIMEFRAMES, AI_TRADING_TREND_THRESHOLD, aiStrategyTag, getAiTradingTimeframe,
+} from '../../src/lib/aiTrading.js'
 import { indicatorBundle } from '../strategy/shared-signals.js'
 import { describeFlow } from './flow-data.js'
 import { lookupQuantEdge } from './quant-stats.js'
@@ -47,20 +57,23 @@ const fx = (value, digits = 2) => (Number.isFinite(Number(value)) ? Number(value
 // ---------------------------------------------------------------- market data
 
 /** Turns raw candle windows into the snapshot the Analyst/Critic reason over. */
-export function buildMarketSnapshot({ symbol, entry: rawEntry, bias: rawBias, higher: rawHigher = [], marketContext = {}, nowMs = Date.now() }) {
+export function buildMarketSnapshot({ symbol, entry: rawEntry, bias: rawBias, higher: rawHigher = [], regime: rawRegime = null, timeframe = AI_TRADING_TIMEFRAMES.scalp, marketContext = {}, nowMs = Date.now() }) {
   // Exchange kline feeds end with the still-forming candle (a few seconds of volume, partial wicks), which
   // reads as "volume collapsed to 0.00x" and a fake reversal. Everything the agents see must be closed.
   const closedOnly = (candles) => candles.filter((candle) => !(candle.closeTime > nowMs))
   const entry = closedOnly(rawEntry)
   const bias = closedOnly(rawBias)
   const higher = closedOnly(rawHigher)
+  // The classifier's higher-timeframe confirmation: the swing profile passes daily candles; the scalp profile never had one here.
+  const regimeCandles = Array.isArray(rawRegime) ? closedOnly(rawRegime) : (marketContext?.regime4hCandles || null)
 
   if (entry.length < MIN_ENTRY_BARS || bias.length < MIN_BIAS_BARS) {
-    throw new Error(`Not enough candle history for ${symbol} (${entry.length} 5M / ${bias.length} 1H bars).`)
+    throw new Error(`Not enough candle history for ${symbol} (${entry.length} ${timeframe.entry.label} / ${bias.length} ${timeframe.bias.label} bars).`)
   }
 
-  const b = indicatorBundle(entry, bias, marketContext?.regime4hCandles || null)
-  const last24h = bias.slice(-24)
+  const b = indicatorBundle(entry, bias, regimeCandles)
+  // The last 24 hours of the bias series, whatever its bar length.
+  const last24h = bias.slice(-Math.max(1, Math.round(1440 / timeframe.bias.minutes)))
   const funding = Number(marketContext?.fundingRate)
 
   return {
@@ -75,27 +88,31 @@ export function buildMarketSnapshot({ symbol, entry: rawEntry, bias: rawBias, hi
       low24h: Math.min(...last24h.map((c) => c.low)),
       closes: bias.slice(-8).map((c) => c.close),
     },
-    fifteenMinuteCloses: higher.slice(-8).map((c) => c.close),
+    fifteenMinuteCloses: higher.slice(-8).map((c) => c.close), // the timeframe's `context` series (15M for scalp, 1D for swing)
     candleCloseTime: Number(entry.at(-1)?.closeTime ?? 0),
-    entryCandles: entry, // closed 5M bars, reused by the Market Flow Agent's price-vs-OI comparison
+    entryCandles: entry, // closed entry-timeframe bars
+    timeframe,
   }
 }
 
 export function describeMarket(snapshot) {
   const b = snapshot.indicators
+  const tf = snapshot.timeframe || AI_TRADING_TIMEFRAMES.scalp
+  const E = tf.entry.label
+  const B = tf.bias.label
   const pct = (value) => `${(value * 100).toFixed(3)}%`
   return [
     `Symbol: ${snapshot.symbol} (USDT-margined perpetual futures), current close ${snapshot.price}`,
-    `Regime (1H/4H classifier): ${b.regime}, trend score ${fx(b.trendScore, 3)}; 1H ADX14 ${fx(b.adx1h, 1)}; 1H EMA20-EMA50 gap ${pct(b.biasTrendGap)}`,
-    `5M momentum: RSI14 ${fx(b.rsi, 1)} (slope ${fx(b.rsiSlope, 3)}), z-score vs 20-bar mean ${fx(b.zscore)}, EMA20 distance ${pct(b.emaDist)}, VWAP distance ${pct(b.vwapDist)}`,
-    `5M volatility: ATR14 ${fx(b.atr, 6)} (${fx(snapshot.atrPct, 3)}% of price, ${b.atrExpanding ? 'expanding' : b.atrCompressed ? 'compressed' : 'steady'}), Bollinger(20,2) width ${fx(b.bb.width, 4)}, band position ${fx(b.bb.position)}, squeeze ${b.squeeze ? 'yes' : 'no'}`,
+    `Regime (${B}${tf.regime ? `/${tf.regime.label}` : '/4H'} classifier): ${b.regime}, trend score ${fx(b.trendScore, 3)} (range -4..+4); ${B} ADX14 ${fx(b.adx1h, 1)}; ${B} EMA20-EMA50 gap ${pct(b.biasTrendGap)}`,
+    `${E} momentum: RSI14 ${fx(b.rsi, 1)} (slope ${fx(b.rsiSlope, 3)}), z-score vs 20-bar mean ${fx(b.zscore)}, EMA20 distance ${pct(b.emaDist)}, VWAP distance ${pct(b.vwapDist)}`,
+    `${E} volatility: ATR14 ${fx(b.atr, 6)} (${fx(snapshot.atrPct, 3)}% of price, ${b.atrExpanding ? 'expanding' : b.atrCompressed ? 'compressed' : 'steady'}), Bollinger(20,2) width ${fx(b.bb.width, 4)}, band position ${fx(b.bb.position)}, squeeze ${b.squeeze ? 'yes' : 'no'}`,
     `Volume: latest is ${fx(b.relVol)}x the 20-bar mean (previous bar ${fx(b.relVolPrev)}x)`,
-    `Structure: 40-bar 5M range ${b.recentLow} to ${b.recentHigh} (price at ${fx(b.rangePos)} of range, width ${pct(b.rangeBandPct)}); 24h 1H range ${snapshot.hourly.low24h} to ${snapshot.hourly.high24h}`,
-    `Latest closed 5M candle: body/range ${fx(b.bodyRange)}, lower wick ${fx(b.lowerWick)}, upper wick ${fx(b.upperWick)}, bull reclaim ${b.bullReclaim}, bear reject ${b.bearReject}`,
+    `Structure: 40-bar ${E} range ${b.recentLow} to ${b.recentHigh} (price at ${fx(b.rangePos)} of range, width ${pct(b.rangeBandPct)}); 24h ${B} range ${snapshot.hourly.low24h} to ${snapshot.hourly.high24h}`,
+    `Latest closed ${E} candle: body/range ${fx(b.bodyRange)}, lower wick ${fx(b.lowerWick)}, upper wick ${fx(b.upperWick)}, bull reclaim ${b.bullReclaim}, bear reject ${b.bearReject}`,
     `Funding rate: ${snapshot.fundingRate == null ? 'unavailable' : `${(snapshot.fundingRate * 100).toFixed(4)}%`}`,
-    `Last 8 1H closes: ${snapshot.hourly.closes.join(', ')}`,
-    `Last 8 15M closes: ${snapshot.fifteenMinuteCloses.join(', ') || 'n/a'}`,
-    `Last 10 closed 5M candles (o/h/l/c/vol, oldest to newest):`,
+    `Last 8 ${B} closes: ${snapshot.hourly.closes.join(', ')}`,
+    `Last 8 ${tf.context.label} closes: ${snapshot.fifteenMinuteCloses.join(', ') || 'n/a'}`,
+    `Last 10 closed ${E} candles (o/h/l/c/vol, oldest to newest):`,
     ...snapshot.recentCandles.map((c) => `  ${c.o}/${c.h}/${c.l}/${c.c}/${fx(c.v, 1)}`),
   ].join('\n')
 }
@@ -216,6 +233,45 @@ export function parseRiskProposal(json) {
   return proposal
 }
 
+// ------------------------------------------------------------ trend filter
+
+/**
+ * strategy.trendFilter: the higher-timeframe classifier (bias candles + regime confirmation) picks the only direction allowed. Score >=
+ * +threshold -> LONG only, <= -threshold -> SHORT only, anything in between -> no trade at all (and no model is called).
+ */
+export function trendDirection(snapshot, threshold = AI_TRADING_TREND_THRESHOLD) {
+  const score = Number(snapshot?.indicators?.trendScore)
+  if (!Number.isFinite(score)) return null
+  if (score >= threshold) return 'LONG'
+  if (score <= -threshold) return 'SHORT'
+  return null
+}
+
+// ----------------------------------------------------------- fee-aware rules
+
+/**
+ * strategy.feeAware: rules checked in code on the Risk Manager's final stop/target (and told to it up front). A plan that fails one is
+ * vetoed with the reason, like an exchange constraint - a trade whose expected reward is mostly eaten by fees, or whose stop sits inside
+ * ordinary noise, is not worth opening however confident the model is.
+ * @returns {string[]} the broken rules (empty = the plan passes)
+ */
+export function feeAwareProblems({ stopLossPct, takeProfitPct, atrPct, minStopAtrMultiple = 1, feePct = AI_TRADING_ROUND_TRIP_FEE_PCT }) {
+  const problems = []
+  const minTarget = AI_TRADING_MIN_TARGET_FEE_MULTIPLE * feePct
+  if (!(takeProfitPct >= minTarget)) {
+    problems.push(`Target ${fx(takeProfitPct)}% is under ${AI_TRADING_MIN_TARGET_FEE_MULTIPLE}x the ~${fx(feePct)}% round-trip fee (${fx(minTarget)}%): fees would take too much of the win.`)
+  }
+  const netRewardRisk = (takeProfitPct - feePct) / (stopLossPct + feePct)
+  if (!(netRewardRisk >= AI_TRADING_MIN_NET_REWARD_RISK)) {
+    problems.push(`Reward:risk after fees is ${fx(netRewardRisk)} ((target ${fx(takeProfitPct)}% - fee) / (stop ${fx(stopLossPct)}% + fee)); at least ${fx(AI_TRADING_MIN_NET_REWARD_RISK)} is required.`)
+  }
+  const minStop = minStopAtrMultiple * Number(atrPct)
+  if (Number.isFinite(minStop) && minStop > 0 && !(stopLossPct >= minStop)) {
+    problems.push(`Stop ${fx(stopLossPct)}% sits inside normal noise: it must be at least ${fx(minStopAtrMultiple, 1)}x the entry-timeframe ATR (${fx(minStop)}%).`)
+  }
+  return problems
+}
+
 // -------------------------------------------------------------- Risk Manager
 
 /**
@@ -333,7 +389,7 @@ export function buildRiskPlan({ side, price, stopLossPct, takeProfitPct, riskPer
  * only reason a plan can still fail past this point is a real exchange constraint (fitPlanToExchangeMinimum,
  * below): the wallet's actual margin and Binance's minimum order size, not an opinion about the trade.
  */
-export function reviewRiskProposal({ proposal, side, price, limits, constraints = null }) {
+export function reviewRiskProposal({ proposal, side, price, limits, constraints = null, atrPct = null }) {
   if (proposal.decision === 'VETO') {
     return {
       approved: false,
@@ -357,6 +413,14 @@ export function reviewRiskProposal({ proposal, side, price, limits, constraints 
 
   if (!plan) {
     return { approved: false, vetoReasons: ['The Risk Manager did not return a usable plan (missing price, stop, target, risk% or leverage).'], adjustments: [], plan: null, limits, ai: proposal }
+  }
+
+  // strategy.feeAware (limits.feeAware, set by riskLimitsFor): the one deliberate exception to "the AI's numbers are final" - see feeAwareProblems.
+  if (limits.feeAware) {
+    const problems = feeAwareProblems({ stopLossPct: plan.stopLossPct, takeProfitPct: plan.takeProfitPct, atrPct, minStopAtrMultiple: limits.minStopAtrMultiple })
+    if (problems.length) {
+      return { approved: false, vetoReasons: [`Fee-aware rules: ${problems.join(' ')}`], adjustments: [], plan: null, limits, ai: proposal, feeRuleVeto: true }
+    }
   }
 
   const reviewed = { approved: true, vetoReasons: [], adjustments: [], plan, limits, ai: proposal, reduced: proposal.decision === 'REDUCE' }
@@ -414,16 +478,30 @@ const ACTIVE_ANALYST_INSTRUCTION = 'ACTIVE MODE: choose the direction the data l
 const ACTIVE_FLOW_INSTRUCTION = 'ACTIVE MODE: AGAINST needs at least two independent adverse signals (for example open interest moving against the trade, taker flow against it, or extreme funding or basis). A persistently lopsided long/short account ratio on its own is NOT enough: report crowding HIGH if it is, but the verdict is NEUTRAL (or SUPPORTS) unless something else is also against the trade.'
 const ACTIVE_RISK_INSTRUCTION = 'ACTIVE MODE: an extended or late entry in a valid trend is a reason to REDUCE (smaller size, tighter stop, nearer target), not to VETO. VETO only for a clearly unacceptable trade: no defensible stop, a fatal flaw the Critic raised, liquidation too close to the stop, broken data, or negative evidence specific to this setup. Background statistics from unrelated bots are weak evidence, not a veto.'
 
-function analystPrompts(snapshot, testMode = false, activeMode = false) {
+function analystPrompts(snapshot, testMode = false, activeMode = false, { allowedDirection = null, flowMetrics = null, lean = false, feeAware = false } = {}) {
+  const tf = snapshot.timeframe || AI_TRADING_TIMEFRAMES.scalp
+  const actions = allowedDirection ? `${allowedDirection}|HOLD` : 'LONG|SHORT|HOLD'
+  const lines = [
+    describeMarket(snapshot),
+  ]
+  if (lean) {
+    lines.push('', 'Derivatives positioning and order flow (you read this yourself; there is no separate flow agent):')
+    lines.push(...(flowMetrics ? describeFlow(flowMetrics).map((line) => `- ${line}`) : ['- Flow data unavailable for this run.']))
+  }
+  lines.push('')
+  if (allowedDirection) {
+    lines.push(`TREND FILTER: the higher-timeframe trend is ${allowedDirection === 'LONG' ? 'UP' : 'DOWN'} (trend score ${fx(snapshot.indicators.trendScore, 0)}), so only ${allowedDirection} is allowed; the opposite side is never taken. Your job is to judge whether NOW is a good ${allowedDirection} entry within that trend (a pullback, a reclaim, a continuation with room left) or whether to wait: answer ${allowedDirection} or HOLD. HOLD is the right answer when the entry is extended, stretched into a barrier, or the timing is poor. The trade is meant to play out over ${tf.holdHint}.`)
+  } else {
+    lines.push(`Read the candles, indicators, volume, structure and regime, then decide LONG, SHORT or HOLD for ${tf.holdHint}.`)
+  }
+  lines.push(testMode ? TEST_MODE_INSTRUCTION : activeMode ? ACTIVE_ANALYST_INSTRUCTION : 'Only choose a direction when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.')
+  if (feeAware) {
+    lines.push(`Costs: a round trip costs about ${fx(AI_TRADING_ROUND_TRIP_FEE_PCT)}% of the position, so a target under ${fx(AI_TRADING_MIN_TARGET_FEE_MULTIPLE * AI_TRADING_ROUND_TRIP_FEE_PCT)}% is not worth taking, and a stop inside one ${tf.entry.label} ATR (${fx(snapshot.atrPct, 3)}%) is inside normal noise.`)
+  }
+  lines.push(`Reply with exactly: {"action":"${actions}","confidence":0-100,"regime":"short label","stopLossPercent":number,"takeProfitPercent":number,"keyFactors":["up to 5 short bullets"],"reasoning":"2-4 sentences"}`)
   return {
     systemPrompt: `${testMode ? TEST_MODE_PREAMBLE : activeMode ? ACTIVE_PREAMBLE : SYSTEM_PREAMBLE} You are the Market Analyst.`,
-    userPrompt: [
-      describeMarket(snapshot),
-      '',
-      'Read the candles, indicators, volume, structure and regime, then decide LONG, SHORT or HOLD for the next few 5M candles.',
-      testMode ? TEST_MODE_INSTRUCTION : activeMode ? ACTIVE_ANALYST_INSTRUCTION : 'Only choose LONG/SHORT when the data gives a genuine edge. Propose stopLossPercent and takeProfitPercent as percentages off the current close, sized to this symbol\'s ATR (they are always required, even for HOLD). A downstream Risk Manager may widen, tighten or veto them.',
-      'Reply with exactly: {"action":"LONG|SHORT|HOLD","confidence":0-100,"regime":"short label","stopLossPercent":number,"takeProfitPercent":number,"keyFactors":["up to 5 short bullets"],"reasoning":"2-4 sentences"}',
-    ].join('\n'),
+    userPrompt: lines.join('\n'),
   }
 }
 
@@ -479,7 +557,7 @@ function criticPrompts(snapshot, analyst, flow, testMode = false) {
 
 /** config.risk's reference numbers (not enforced — see the file header), with the mechanical-baseline leverage floor raised while testnet test mode is on, so that reference plan looks like a real testnet trade. */
 export function riskLimitsFor(config) {
-  const limits = config.risk
+  const limits = config.strategy?.feeAware ? { ...config.risk, feeAware: true, roundTripFeePct: AI_TRADING_ROUND_TRIP_FEE_PCT } : config.risk
   if (config.scan?.testMode !== true || config.execution?.mode !== 'testnet') return limits
   return {
     ...limits,
@@ -547,7 +625,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   return lines
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0 }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0, lean = false }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = mechanicalBaselinePlan({
     side: analyst.action,
@@ -564,9 +642,19 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
       describeMarket(snapshot),
       '',
       `Analyst proposal: ${analyst.action} at ${analyst.confidence}% confidence, stop ${fx(analyst.stopLossPercent)}%, target ${fx(analyst.takeProfitPercent)}%. ${analyst.reasoning}`,
-      `Market Flow Agent: ${flowSummary(flow)}`,
+      ...(lean
+        ? [
+          'Derivatives positioning and order flow (raw data; there is no separate flow agent in this pipeline):',
+          ...(flowMetrics ? describeFlow(flowMetrics).map((line) => `- ${line}`) : ['- Flow data unavailable for this run.']),
+        ]
+        : [`Market Flow Agent: ${flowSummary(flow)}`]),
       backtestLine(backtest),
-      `Critic: ${critic.verdict}. ${critic.objections.map((item) => `[${item.severity}] ${item.issue}`).join(' ') || 'No objections.'}`,
+      ...(lean
+        ? ['You are also the Critic in this pipeline: before sizing anything, name the strongest reasons this trade could fail (the weakest part of the setup, a barrier in the way, crowded positioning, a move that is already extended, flow working against it) and VETO when they outweigh the case.']
+        : [`Critic: ${critic.verdict}. ${critic.objections.map((item) => `[${item.severity}] ${item.issue}`).join(' ') || 'No objections.'}`]),
+      ...(limits.feeAware
+        ? [`HARD RULES checked in code on the numbers you return (a plan that breaks one is vetoed, not resized): target at least ${fx(AI_TRADING_MIN_TARGET_FEE_MULTIPLE * (limits.roundTripFeePct ?? AI_TRADING_ROUND_TRIP_FEE_PCT))}% (${AI_TRADING_MIN_TARGET_FEE_MULTIPLE}x the ~${fx(limits.roundTripFeePct ?? AI_TRADING_ROUND_TRIP_FEE_PCT)}% round-trip fee); reward:risk after fees, (target - fee) / (stop + fee), at least ${fx(AI_TRADING_MIN_NET_REWARD_RISK)}; stop at least ${fx(limits.minStopAtrMultiple, 1)}x the entry-timeframe ATR (${fx(limits.minStopAtrMultiple * snapshot.atrPct)}%). If the setup cannot meet them, VETO.`]
+        : []),
       '',
       'Reference numbers (nothing below is enforced by code — you decide the trade fully; account equity is here so you can convert riskPercent into dollars):',
       `- Account equity ${limits.accountEquityUsdt} USDT; a rule-based bot here would risk at most ${limits.riskPerTradePct}% of equity per trade`,
@@ -631,11 +719,13 @@ async function runLlmStage({ id, agentConfig, callAgent, prompts, parse }) {
  * one agent whose job is to weigh them, not a piece of code checking a verdict string. No confidence threshold
  * either: the Risk Manager's own stated confidence stands, whatever it is.
  */
-export function evaluateGates({ analyst, risk }) {
+export function evaluateGates({ analyst, risk, trend = null }) {
   const gate = (id, label, passed, detail) => ({ id, label, passed: Boolean(passed), detail })
   const directional = analyst && analyst.action !== 'HOLD'
 
   return [
+    // strategy.trendFilter only: the higher-timeframe trend picked a direction and the Analyst's call (if any) agrees with it.
+    ...(trend ? [trendGate(trend, analyst)] : []),
     gate('analyst', 'Analyst sees a directional setup', directional, analyst ? `${analyst.action} at ${analyst.confidence}% confidence.` : 'Analyst stage did not complete.'),
     gate(
       'risk',
@@ -648,6 +738,18 @@ export function evaluateGates({ analyst, risk }) {
         : 'Risk stage did not run.',
     ),
   ]
+}
+
+/** @param {{ direction: 'LONG'|'SHORT'|null, score: number }} trend */
+export function trendGate(trend, analyst = null) {
+  const against = trend.direction && analyst && analyst.action !== 'HOLD' && analyst.action !== trend.direction
+  const passed = Boolean(trend.direction) && !against
+  const detail = !trend.direction
+    ? `No clear higher-timeframe trend (score ${fx(trend.score, 0)}; needs ${AI_TRADING_TREND_THRESHOLD} or more either way).`
+    : against
+      ? `Analyst called ${analyst.action} against the ${trend.direction} trend (score ${fx(trend.score, 0)}).`
+      : `${trend.direction} only (trend score ${fx(trend.score, 0)}).`
+  return { id: 'trend', label: 'Trade with the higher-timeframe trend', passed, detail }
 }
 
 // --------------------------------------------------------------- orchestrator
@@ -674,6 +776,8 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     activeMode: config.scan?.activeMode === true,
     price: null,
     config: { agents: config.agents, risk: config.risk },
+    // Which strategy variant produced this run (e.g. 'swing+trend+fee+lean+maker'); the shadow tracker scores each variant separately.
+    strategy: aiStrategyTag(config.strategy),
     stages: [],
     final: null,
   }
@@ -708,25 +812,61 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     if (constraints) run.constraints = constraints
   }
 
+  const strategy = config.strategy || {}
+  const lean = strategy.lean === true
+  run.timeframe = snapshot.timeframe?.id || 'scalp'
+
+  // 0c. Trend filter (strategy.trendFilter): trade only in the higher-timeframe trend's direction. No trend -> no trade, and no model
+  // is called at all (a free, instant HOLD).
+  let trend = null
+  if (strategy.trendFilter) {
+    trend = { direction: trendDirection(snapshot), score: Number(snapshot.indicators.trendScore) }
+    run.trend = trend
+    if (!trend.direction) {
+      const gate = trendGate(trend)
+      run.stages.push(...['analyst', 'flow', 'critic', 'risk'].map((id) => skipped(id, `Trend filter: ${gate.detail}`)))
+      return hold(`Trend filter: ${gate.detail}`, [gate])
+    }
+  }
+
+  // 0d. 3-agent pipeline (strategy.lean): the Analyst reads the flow data itself, so fetch it first. Never fatal here - the prompts
+  // say so when it is missing.
+  let flowData = null
+  if (lean && getFlowData) {
+    flowData = await Promise.resolve().then(() => getFlowData(symbol, snapshot)).catch(() => null)
+  }
+  const notInLean = (id) => skipped(id, 'Not used in the 3-agent pipeline (the Analyst reads flow data, the Risk Manager plays Critic).')
+
   // 1. Market Analyst
   const analystStage = await runLlmStage({
     id: 'analyst',
     agentConfig: config.agents.analyst,
     callAgent,
-    prompts: analystPrompts(snapshot, config.scan?.testMode === true, config.scan?.activeMode === true),
+    prompts: analystPrompts(snapshot, config.scan?.testMode === true, config.scan?.activeMode === true, {
+      allowedDirection: trend?.direction || null,
+      flowMetrics: flowData?.metrics || null,
+      lean,
+      feeAware: strategy.feeAware === true,
+    }),
     parse: parseAnalystOutput,
   })
   const analyst = analystStage.output
   if (analyst) analystStage.summary = `${analyst.action} · ${analyst.confidence}% · ${analyst.regime}`
   run.stages.push(analystStage)
 
+  const skipRest = (reason) => run.stages.push(...['flow', 'critic', 'risk'].map((id) => (lean && id !== 'risk' ? notInLean(id) : skipped(id, reason))))
   if (!analyst) {
-    run.stages.push(...['flow', 'critic', 'risk'].map((id) => skipped(id, 'Market Analyst did not return a usable call.')))
+    skipRest('Market Analyst did not return a usable call.')
     return hold(`Market Analyst failed: ${analystStage.error}`)
   }
   if (analyst.action === 'HOLD') {
-    run.stages.push(...['flow', 'critic', 'risk'].map((id) => skipped(id, 'Market Analyst returned HOLD — nothing to vet.')))
-    return hold(analyst.reasoning || 'Market Analyst returned HOLD.', evaluateGates({ analyst, risk: null }))
+    skipRest('Market Analyst returned HOLD — nothing to vet.')
+    return hold(analyst.reasoning || 'Market Analyst returned HOLD.', evaluateGates({ analyst, risk: null, trend }))
+  }
+  if (trend && analyst.action !== trend.direction) {
+    const gates = evaluateGates({ analyst, risk: null, trend })
+    skipRest('Analyst call was against the higher-timeframe trend.')
+    return hold(`Trend filter: ${gates[0].detail}`, gates)
   }
 
   // Background context for the Risk Manager; not a stage, not a gate.
@@ -737,57 +877,62 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     takeProfitPct: analyst.takeProfitPercent,
   })
 
-  // 2. Market Flow Agent (LLM over derivatives positioning and order flow)
-  const flowStarted = Date.now()
-  let flowStage
-  let flowData = null
-  try {
-    if (!getFlowData) throw new Error('No flow data source is configured.')
-    flowData = await getFlowData(symbol, snapshot)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    flowStage = { ...baseStage('flow'), status: 'error', durationMs: Date.now() - flowStarted, error: message, summary: message }
-  }
-  if (!flowStage) {
-    flowStage = await runLlmStage({
-      id: 'flow',
-      agentConfig: config.agents.flow,
+  let flow = null
+  let critic = null
+  if (lean) {
+    run.stages.push(notInLean('flow'), notInLean('critic'))
+  } else {
+    // 2. Market Flow Agent (LLM over derivatives positioning and order flow)
+    const flowStarted = Date.now()
+    let flowStage
+    try {
+      if (!getFlowData) throw new Error('No flow data source is configured.')
+      flowData = await getFlowData(symbol, snapshot)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      flowStage = { ...baseStage('flow'), status: 'error', durationMs: Date.now() - flowStarted, error: message, summary: message }
+    }
+    if (!flowStage) {
+      flowStage = await runLlmStage({
+        id: 'flow',
+        agentConfig: config.agents.flow,
+        callAgent,
+        prompts: flowPrompts(snapshot, analyst, flowData.metrics, config.scan?.activeMode === true),
+        parse: parseFlowOutput,
+      })
+      // Keep the evidence next to the verdict so the report is auditable.
+      if (flowStage.output) flowStage.output = { ...flowStage.output, metrics: flowData.metrics, sources: flowData.sources }
+    }
+    flow = flowStage.output
+    if (flow) flowStage.summary = `${flow.verdict}${flow.crowding ? ` · crowding ${flow.crowding}` : ''} · ${flow.flags.length} flag(s)`
+    run.stages.push(flowStage)
+
+    // AI Trading, not bot trading: Flow's verdict — even AGAINST — is evidence handed to the Risk Manager (see
+    // flowSummary in riskPrompts), not a checkpoint that skips it. Only a genuine stage failure stops the pipeline
+    // here (fail closed): there is no flow evidence at all to hand forward.
+    if (!flow) {
+      run.stages.push(...['critic', 'risk'].map((id) => skipped(id, 'Market Flow Agent did not return a usable call.')))
+      return hold(`Market Flow Agent failed: ${flowStage.error}`, evaluateGates({ analyst, risk: null }))
+    }
+
+    // 3. Critic
+    const criticStage = await runLlmStage({
+      id: 'critic',
+      agentConfig: config.agents.critic,
       callAgent,
-      prompts: flowPrompts(snapshot, analyst, flowData.metrics, config.scan?.activeMode === true),
-      parse: parseFlowOutput,
+      prompts: criticPrompts(snapshot, analyst, flow, config.scan?.testMode === true),
+      parse: parseCriticOutput,
     })
-    // Keep the evidence next to the verdict so the report is auditable.
-    if (flowStage.output) flowStage.output = { ...flowStage.output, metrics: flowData.metrics, sources: flowData.sources }
-  }
-  const flow = flowStage.output
-  if (flow) flowStage.summary = `${flow.verdict}${flow.crowding ? ` · crowding ${flow.crowding}` : ''} · ${flow.flags.length} flag(s)`
-  run.stages.push(flowStage)
+    critic = criticStage.output
+    if (critic) criticStage.summary = `${critic.verdict} · ${critic.objections.length} objection(s)`
+    run.stages.push(criticStage)
 
-  // AI Trading, not bot trading: Flow's verdict — even AGAINST — is evidence handed to the Risk Manager (see
-  // flowSummary in riskPrompts), not a checkpoint that skips it. Only a genuine stage failure stops the pipeline
-  // here (fail closed): there is no flow evidence at all to hand forward.
-  if (!flow) {
-    run.stages.push(...['critic', 'risk'].map((id) => skipped(id, 'Market Flow Agent did not return a usable call.')))
-    return hold(`Market Flow Agent failed: ${flowStage.error}`, evaluateGates({ analyst, risk: null }))
-  }
-
-  // 3. Critic
-  const criticStage = await runLlmStage({
-    id: 'critic',
-    agentConfig: config.agents.critic,
-    callAgent,
-    prompts: criticPrompts(snapshot, analyst, flow, config.scan?.testMode === true),
-    parse: parseCriticOutput,
-  })
-  const critic = criticStage.output
-  if (critic) criticStage.summary = `${critic.verdict} · ${critic.objections.length} objection(s)`
-  run.stages.push(criticStage)
-
-  // Same principle as Flow: the Critic's verdict — even REJECT — is evidence for the Risk Manager, not its own
-  // checkpoint. Only a genuine stage failure stops the pipeline here.
-  if (!critic) {
-    run.stages.push(skipped('risk', 'Critic did not return a usable call.'))
-    return hold(`Critic failed: ${criticStage.error}`, evaluateGates({ analyst, risk: null }))
+    // Same principle as Flow: the Critic's verdict — even REJECT — is evidence for the Risk Manager, not its own
+    // checkpoint. Only a genuine stage failure stops the pipeline here.
+    if (!critic) {
+      run.stages.push(skipped('risk', 'Critic did not return a usable call.'))
+      return hold(`Critic failed: ${criticStage.error}`, evaluateGates({ analyst, risk: null }))
+    }
   }
 
   // 4. Risk Manager — receives everything above and makes the final AI judgment: APPROVE / REDUCE / VETO, and
@@ -797,12 +942,12 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics, targetProfitUsdt: config.execution?.targetProfitPerTradeUsdt }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics, targetProfitUsdt: config.execution?.targetProfitPerTradeUsdt, lean }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output
   const risk = riskProposal
-    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, limits: riskLimits, constraints })
+    ? reviewRiskProposal({ proposal: riskProposal, side: analyst.action, price: snapshot.price, limits: riskLimits, constraints, atrPct: snapshot.atrPct })
     // No usable Risk Manager answer is a veto: sizing must never fall back to "unchecked".
     : { approved: false, vetoReasons: [`Risk Manager unavailable: ${riskStage.error}`], adjustments: [], plan: null, limits: riskLimits, ai: null }
   risk.backtest = backtest
@@ -813,7 +958,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
   run.stages.push(riskStage)
 
   // The Risk Manager is the sole gate for entry: its own APPROVE/REDUCE (vs VETO) is the verdict.
-  const gates = evaluateGates({ analyst, risk })
+  const gates = evaluateGates({ analyst, risk, trend })
   const approved = gates.every((item) => item.passed)
 
   if (!approved) {

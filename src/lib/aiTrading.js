@@ -158,6 +158,88 @@ export const DEFAULT_AI_TRADING_SCAN = {
   activeMode: false,
 }
 
+// ---- Strategy (added 2026-09-25) -------------------------------------------------------------------------------------------
+// A review of 33 testnet trades (11 won, 22 lost; ~-60 USDT after estimated fees) found the entries had no edge: replayed with their own
+// stop/target, the target was hit first 8 times out of 33 (24%) where ~49% was needed after fees, and 5-minute scalps with ~0.4% stops lost a
+// quarter of every stop distance to fees. These switches change WHERE trades come from and how they are shaped. Each one is independent
+// so its effect can be measured on its own (the shadow tracker tags every signal with the strategy that produced it). Code defaults keep
+// the original behavior; the server's config turns them on.
+
+/**
+ * Candle timeframes per strategy. `entry` is what the Analyst reads bar by bar (and what ATR / the stop floor are measured on), `bias`
+ * drives the trend classifier, `regime` confirms it one level up, `context` is a short list of closes for the prompt. The cadences and the
+ * shadow-tracker horizon scale with the timeframe so a swing idea is neither re-run every 5 minutes nor judged after 2 hours.
+ */
+export const AI_TRADING_TIMEFRAMES = {
+  scalp: {
+    id: 'scalp',
+    label: 'Scalp (5M entries, 1H trend)',
+    entry: { interval: '5m', label: '5M', minutes: 5, bars: 120 },
+    bias: { interval: '1h', label: '1H', minutes: 60, bars: 120 },
+    regime: null,
+    context: { interval: '15m', label: '15M', minutes: 15, bars: 120 },
+    holdHint: 'the next few 5M candles',
+    minRunGapMs: 0,
+    cooldownMs: 15 * 60_000,
+    managerIntervalMs: 5 * 60_000,
+    evidence: { fast: { interval: '5m', label: '5M', minutes: 5, bars: 500 }, slow: { interval: '1h', label: '1H', minutes: 60, bars: 300 }, excursionBars: 12 },
+    shadow: { horizonMs: 2 * 60 * 60_000, baselineWindowMs: 60 * 60_000, baselineStepMs: 5 * 60_000, resolution: '1m' },
+  },
+  swing: {
+    id: 'swing',
+    label: 'Swing (1H entries, 4H trend, daily confirmation)',
+    entry: { interval: '1h', label: '1H', minutes: 60, bars: 200 },
+    bias: { interval: '4h', label: '4H', minutes: 240, bars: 200 },
+    regime: { interval: '1d', label: '1D', minutes: 1440, bars: 120 },
+    context: { interval: '1d', label: '1D', minutes: 1440, bars: 120 },
+    holdHint: 'the next 12-48 hours (several 1H candles)',
+    // One pipeline run per symbol per closed 1H candle (the scan loop still ticks every 5 minutes).
+    minRunGapMs: 55 * 60_000,
+    cooldownMs: 2 * 60 * 60_000,
+    managerIntervalMs: 15 * 60_000,
+    evidence: { fast: { interval: '1h', label: '1H', minutes: 60, bars: 500 }, slow: { interval: '4h', label: '4H', minutes: 240, bars: 300 }, excursionBars: 24 },
+    shadow: { horizonMs: 48 * 60 * 60_000, baselineWindowMs: 6 * 60 * 60_000, baselineStepMs: 60 * 60_000, resolution: '5m' },
+  },
+}
+export const AI_TRADING_TIMEFRAME_IDS = Object.keys(AI_TRADING_TIMEFRAMES)
+
+// Fee-aware rules (strategy.feeAware). Taker in + taker out on Binance USDT-M is ~0.05% + 0.05%; kept conservative even with maker entries.
+export const AI_TRADING_ROUND_TRIP_FEE_PCT = 0.1
+export const AI_TRADING_MIN_TARGET_FEE_MULTIPLE = 5 // target must be at least this many round trips (0.5%)
+export const AI_TRADING_MIN_NET_REWARD_RISK = 1.5 // (target - fee) / (stop + fee)
+// Trend filter (strategy.trendFilter): the classifier's trend score runs -4..+4 (EMA20 vs 50, slope, gap, higher-timeframe confirmation).
+export const AI_TRADING_TREND_THRESHOLD = 2
+
+export const DEFAULT_AI_TRADING_STRATEGY = {
+  timeframe: 'scalp',
+  feeAware: false,
+  trendFilter: false,
+  // 3-agent pipeline: Analyst (reads the flow data itself) -> Risk Manager (also does the Critic's job) -> Position Manager.
+  lean: false,
+  // Enter with a post-only limit order at the best bid/ask (maker fee), falling back to market if it does not fill in time.
+  makerEntry: false,
+}
+
+/** The timeframe profile a config uses (falls back to the legacy scalp profile). */
+export function getAiTradingTimeframe(config) {
+  return AI_TRADING_TIMEFRAMES[config?.strategy?.timeframe] || AI_TRADING_TIMEFRAMES.scalp
+}
+
+/** Short tag for the active strategy, stored on every run and shadow signal so strategies can be compared, e.g. "swing+trend+fee+lean". */
+export function aiStrategyTag(strategy = DEFAULT_AI_TRADING_STRATEGY) {
+  const parts = [AI_TRADING_TIMEFRAMES[strategy?.timeframe] ? strategy.timeframe : 'scalp']
+  if (strategy?.trendFilter) parts.push('trend')
+  if (strategy?.feeAware) parts.push('fee')
+  if (strategy?.lean) parts.push('lean')
+  if (strategy?.makerEntry) parts.push('maker')
+  return parts.join('+')
+}
+
+/** Agents that actually run under a config (the 3-agent pipeline skips Market Flow and the Critic). */
+export function activeAiTradingAgentIds(config) {
+  return config?.strategy?.lean ? ['analyst', 'risk', 'manager'] : AI_TRADING_LLM_AGENT_IDS
+}
+
 export const DEFAULT_AI_TRADING_CONFIG = {
   agents: {
     analyst: { providerId: 'anthropic', model: '' },
@@ -177,6 +259,7 @@ export const DEFAULT_AI_TRADING_CONFIG = {
   },
   execution: DEFAULT_AI_TRADING_EXECUTION,
   scan: DEFAULT_AI_TRADING_SCAN,
+  strategy: DEFAULT_AI_TRADING_STRATEGY,
 }
 
 function clampNumber(value, { min, max }, fallback) {
@@ -255,5 +338,15 @@ export function normalizeAiTradingConfig(raw) {
     activeMode: scanSource.activeMode === true,
   }
 
-  return { agents, risk, execution, scan }
+  const strategySource = source.strategy && typeof source.strategy === 'object' ? source.strategy : {}
+  const strategy = {
+    timeframe: AI_TRADING_TIMEFRAMES[strategySource.timeframe] ? strategySource.timeframe : DEFAULT_AI_TRADING_STRATEGY.timeframe,
+    // Each switch needs an explicit `true`.
+    feeAware: strategySource.feeAware === true,
+    trendFilter: strategySource.trendFilter === true,
+    lean: strategySource.lean === true,
+    makerEntry: strategySource.makerEntry === true,
+  }
+
+  return { agents, risk, execution, scan, strategy }
 }

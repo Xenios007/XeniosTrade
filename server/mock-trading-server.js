@@ -70,7 +70,8 @@ import { refreshBotOpenrouterDecisions } from './strategy/bot-openrouter.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
 import { mergeAiProviderCredentialsUpdate, normalizeAiProviderCredentials } from '../src/lib/aiProviders.js'
 import { getAiProviderCredential, setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
-import { AI_POSITION_MANAGER_INTERVAL_MS, AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN } from '../src/lib/aiTrading.js'
+import { AI_POSITION_MANAGER_INTERVAL_MS, AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_TIMEFRAMES, aiStrategyTag, getAiTradingTimeframe } from '../src/lib/aiTrading.js'
+import { runMakerEntry, makerLimitPrice } from './ai-trading/maker-entry.js'
 import {
   applyPartialClose, buildEntryContext, computeTradeMetrics, parsePositionManagerOutput, planPositionAction, positionManagerPrompts, recordReview,
 } from './ai-trading/position-manager.js'
@@ -8129,6 +8130,10 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
   }))
 
   const clientOrderSeed = `xenios${Date.now()}${Math.random().toString(36).slice(2, 6)}`
+  // entryMode 'maker' (AI Trading's strategy.makerEntry): a post-only limit at the touch first, market for whatever did not fill (maker-entry.js).
+  const maker = payload.entryMode === 'maker'
+  let makerOrderId = null
+  let makerFill = null
   const entryParams = {
     symbol: payload.symbol,
     side: payload.side,
@@ -8141,7 +8146,7 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
     // rejected quantity or filter costs nothing and the reason is reported before any position exists.
     await step('Order validation', () => fetchSignedFuturesApi('/fapi/v1/order/test', { method: 'POST', apiKey, secretKey, baseUrl, params: entryParams }))
   }
-  const entryOrder = await step('Entry order', () => placeBinanceOrder({ baseUrl, apiKey, secretKey, ...entryParams }))
+  const entryOrder = maker ? null : await step('Entry order', () => placeBinanceOrder({ baseUrl, apiKey, secretKey, ...entryParams }))
 
   // From here a position EXISTS on the exchange. Anything that goes wrong must cancel the protective orders and close it (the catch below),
   // never leave it open and unprotected - which is exactly what a failed status lookup used to do.
@@ -8156,15 +8161,52 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
   try {
     // The status lookup only refines the fill price and quantity: the entry response already says what filled, so a failed lookup must not
     // abort the trade.
-    entryOrderStatus = await fetchBinanceOrderStatus({
-      symbol: payload.symbol,
-      orderId: entryOrder.orderId,
-      apiKey,
-      secretKey,
-      baseUrl,
-    }).catch(() => null)
-    executedQuantity = firstPositive(entryOrderStatus?.executedQty, entryOrder.executedQty, payload.quantity)
-    resolvedEntryPrice = getExchangeOrderFillPrice(entryOrderStatus || entryOrder, payload.entryPrice)
+    if (maker) {
+      const entryPriceHint = Number(payload.entryPrice) || 0
+      const minOrderUsdt = getMinOrderUsdt(resolvedSymbolInfo, entryPriceHint)
+      makerFill = await runMakerEntry({
+        quantity: Number(entryParams.quantity),
+        exchange: {
+          placeLimit: async () => {
+            const book = await fetchJson(`${baseUrl}/fapi/v1/ticker/bookTicker?symbol=${payload.symbol}`, { retries: 1, timeoutMs: 9_000, allowStaleOnError: false })
+            const price = makerLimitPrice({ side: payload.side, bidPrice: book?.bidPrice, askPrice: book?.askPrice })
+            const order = await placeBinanceOrder({
+              baseUrl,
+              apiKey,
+              secretKey,
+              symbol: payload.symbol,
+              side: payload.side,
+              type: 'LIMIT',
+              timeInForce: 'GTX',
+              price: formatFuturesPrice(resolvedSymbolInfo, price, payload.side === 'BUY' ? 'down' : 'up'),
+              quantity: entryParams.quantity,
+              newClientOrderId: `${clientOrderSeed}_mk`,
+            })
+            makerOrderId = order?.orderId ?? null
+            return order
+          },
+          fetchStatus: (orderId) => fetchBinanceOrderStatus({ symbol: payload.symbol, orderId, apiKey, secretKey, baseUrl }),
+          cancel: (orderId) => cancelBinanceOrder({ symbol: payload.symbol, orderId, apiKey, secretKey, baseUrl }),
+          placeMarket: (quantity) => placeBinanceOrder({ baseUrl, apiKey, secretKey, ...entryParams, quantity: formatFuturesQuantity(resolvedSymbolInfo, quantity) }),
+          tradableQuantity: (quantity) => {
+            const aligned = Number(formatFuturesQuantity(resolvedSymbolInfo, Math.max(0, quantity)))
+            return aligned > 0 && (!(entryPriceHint > 0) || aligned * entryPriceHint >= minOrderUsdt) ? aligned : 0
+          },
+        },
+      })
+      executedQuantity = makerFill.executedQty
+      resolvedEntryPrice = makerFill.avgPrice > 0 ? makerFill.avgPrice : resolvedEntryPrice
+    } else {
+      entryOrderStatus = await fetchBinanceOrderStatus({
+        symbol: payload.symbol,
+        orderId: entryOrder.orderId,
+        apiKey,
+        secretKey,
+        baseUrl,
+      }).catch(() => null)
+      executedQuantity = firstPositive(entryOrderStatus?.executedQty, entryOrder.executedQty, payload.quantity)
+      resolvedEntryPrice = getExchangeOrderFillPrice(entryOrderStatus || entryOrder, payload.entryPrice)
+    }
 
     if (!Number.isFinite(executedQuantity) || executedQuantity <= 0) {
       throw new Error(`${environmentLabel} did not return a valid executed quantity for the entry order.`)
@@ -8212,14 +8254,16 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
     return {
       mode: executionMode,
       validationStatus: 'EXECUTED',
-      message: `Order executed on ${environmentLabel} in ${marginMode.toLowerCase()} margin mode with exchange-side protective algo orders.`,
+      message: `Order executed on ${environmentLabel} in ${marginMode.toLowerCase()} margin mode with exchange-side protective algo orders.${makerFill ? ` Maker-first entry: ${makerFill.makerQty} as maker, ${makerFill.takerQty} at market.${makerFill.notes.length ? ` ${makerFill.notes.join(' ')}` : ''}` : ''}`,
       entryPrice: resolvedEntryPrice > 0 ? resolvedEntryPrice : Number(payload.entryPrice || 0),
       quantity: executedQuantity,
       notional: Number(((resolvedEntryPrice > 0 ? resolvedEntryPrice : Number(payload.entryPrice || 0)) * executedQuantity).toFixed(8)),
       stopLoss: normalizedStopLoss,
       takeProfit: normalizedTakeProfit,
-      exchangeEntryOrderId: entryOrderStatus?.orderId || entryOrder.orderId || null,
-      exchangeEntryClientOrderId: entryOrderStatus?.clientOrderId || entryOrder.clientOrderId || null,
+      exchangeEntryOrderId: makerFill ? makerFill.orderId : (entryOrderStatus?.orderId || entryOrder.orderId || null),
+      exchangeEntryClientOrderId: makerFill ? makerFill.clientOrderId : (entryOrderStatus?.clientOrderId || entryOrder.clientOrderId || null),
+      // A maker-first entry can be two orders (limit + market remainder); both are entry fills, never exit fills.
+      ...(makerFill ? { exchangeEntryOrderIds: makerFill.orderIds, entryFill: { makerQty: makerFill.makerQty, takerQty: makerFill.takerQty, notes: makerFill.notes } } : {}),
       exchangeStopOrderId: null,
       exchangeStopClientOrderId: null,
       exchangeTakeProfitOrderId: null,
@@ -8231,6 +8275,8 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
     }
   } catch (error) {
     await Promise.allSettled([
+      // A maker limit that is still resting would fill later with no stop behind it: cancel it first.
+      makerOrderId != null ? cancelBinanceOrder({ symbol: payload.symbol, orderId: makerOrderId, apiKey, secretKey, baseUrl }) : null,
       cancelProtectiveOrder({
         symbol: payload.symbol,
         orderId: stopOrder?.orderId,
@@ -8283,6 +8329,7 @@ export async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, s
   // value, which could make a genuinely closing fill look like an already-known one (or vice versa).
   const knownOrderIds = new Set([
     String(trade.exchangeEntryOrderId ?? ''),
+    ...(trade.exchangeEntryOrderIds || []).map(String), // a maker-first entry's limit + market orders
     ...(trade.partialCloseOrderIds || []).map(String), // fills of the Position Manager's partial closes are not the final exit
   ].filter(Boolean))
   const closingFills = (Array.isArray(fills) ? fills : [])
@@ -10306,7 +10353,8 @@ app.put('/api/ai-trading/config', async (request, response) => {
       // Test mode relaxes the AI vetting; it must be switched on deliberately for the mode it will run in, never carried across.
       requestedScan = { ...requestedScan, testMode: false }
     }
-    const next = await saveAiTradingConfig({ ...body, execution: requestedExecution, scan: requestedScan })
+    // Same for `strategy` (timeframe / fee-aware / trend filter / 3-agent / maker entry): a client that does not send it keeps what is saved.
+    const next = await saveAiTradingConfig({ ...body, execution: requestedExecution, scan: requestedScan, strategy: body.strategy ?? current.strategy })
     if (next.execution.mode !== current.execution.mode || next.execution.realArmed !== current.execution.realArmed || next.execution.autoExecuteReal !== current.execution.autoExecuteReal) {
       console.warn(`[ai-trading] Execution settings changed: mode ${current.execution.mode} -> ${next.execution.mode}, real armed ${current.execution.realArmed} -> ${next.execution.realArmed}, real auto-execute ${Boolean(current.execution.autoExecuteReal)} -> ${Boolean(next.execution.autoExecuteReal)}`)
     }
@@ -10326,29 +10374,43 @@ app.get('/api/ai-trading/runs', async (_request, response) => {
 // Derivatives positioning / order flow for the Market Flow Agent and the Position Manager (public futures data, no keys). The
 // order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
 async function getAiFlowData(target, snapshot) {
-  const [depth, btcKlines] = await Promise.all([
+  // The flow summary reads 5M candles (its 1h / 4h changes are 12 / 48 bars). On the swing timeframe the snapshot's entry candles are 1H,
+  // so fetch the 5M series separately.
+  const needs5m = Boolean(snapshot?.timeframe) && snapshot.timeframe.entry.interval !== '5m'
+  const [depth, btcKlines, own5m] = await Promise.all([
     fetchFuturesDepth(target, 20).catch(() => null),
     target === 'BTCUSDT' ? null : fetchKlines('BTCUSDT', '5m', 60).catch(() => null),
+    needs5m ? fetchKlines(target, '5m', 120) : null,
   ])
   const closedOnly = (candles) => candles.filter((candle) => !(candle.closeTime > Date.now()))
   return collectFlowData({
     symbol: target,
     baseUrl: futuresLiveBaseUrl,
     fetchJson: (url, cacheKey) => fetchJson(url, { retries: 1, timeoutMs: 9_000, cacheKey, cacheTtlMs: MARKET_DATA_CONTEXT_CACHE_TTL_MS }),
-    entry: snapshot.entryCandles,
+    entry: needs5m ? closedOnly(toCandleData(own5m)) : snapshot.entryCandles,
     orderBook: depth,
     btcCandles: btcKlines ? closedOnly(toCandleData(btcKlines)) : null,
   })
 }
 
-async function getAiMarketInputs(target) {
-  const [bias, higher, entry, marketContext] = await Promise.all([
-    fetchKlines(target, '1h', 120),
-    fetchKlines(target, '15m', 120),
-    fetchKlines(target, '5m', 120),
+// Candles for the configured timeframe (AI_TRADING_TIMEFRAMES): scalp = 5M entries / 1H trend / 15M context (the original set); swing =
+// 1H entries / 4H trend / 1D regime confirmation and context.
+async function getAiMarketInputs(target, timeframe = AI_TRADING_TIMEFRAMES.scalp) {
+  const [bias, higher, entry, regime, marketContext] = await Promise.all([
+    fetchKlines(target, timeframe.bias.interval, timeframe.bias.bars),
+    fetchKlines(target, timeframe.context.interval, timeframe.context.bars),
+    fetchKlines(target, timeframe.entry.interval, timeframe.entry.bars),
+    timeframe.regime ? fetchKlines(target, timeframe.regime.interval, timeframe.regime.bars) : null,
     fetchSignalMarketContext(target),
   ])
-  return { bias: toCandleData(bias), higher: toCandleData(higher), entry: toCandleData(entry), marketContext }
+  return {
+    bias: toCandleData(bias),
+    higher: toCandleData(higher),
+    entry: toCandleData(entry),
+    ...(regime ? { regime: toCandleData(regime) } : {}),
+    marketContext,
+    timeframe,
+  }
 }
 
 // The exchange's smallest order for a symbol at `price` (USDT), from the live exchange rules.
@@ -10410,13 +10472,14 @@ async function recordShadowSignal(run) {
   await updateShadowSignals((current) => (current.some((item) => item.id === signal.id) ? undefined : [signal, ...current]))
 }
 
-async function fetchShadowCandles(symbol, startMs) {
-  const path = `/klines?symbol=${symbol}&interval=1m&startTime=${Math.floor(startMs)}&limit=1000`
+async function fetchShadowCandles(symbol, startMs, interval = '1m') {
+  // 1000 x 1m covers a scalp signal's 2h horizon + 1h baseline; 1000 x 5m (~83h) covers a swing signal's 48h + 6h.
+  const path = `/klines?symbol=${symbol}&interval=${interval}&startTime=${Math.floor(startMs)}&limit=1000`
   const klines = await fetchJson(`${publicDataBaseUrl}${path}`, {
     retries: 1,
     timeoutMs: 9_000,
     fallbackUrl: `${publicDataFallbackBaseUrl}${path}`,
-    cacheKey: `shadow-klines:${symbol}:${Math.floor(startMs / 60_000)}`,
+    cacheKey: `shadow-klines:${symbol}:${interval}:${Math.floor(startMs / 60_000)}`,
     cacheTtlMs: 60_000,
   })
   return toCandleData(klines)
@@ -10446,7 +10509,7 @@ async function resolveShadowSignals({ maxSignals = 15 } = {}) {
     const updates = new Map()
     for (const signal of due) {
       try {
-        const candles = await fetchShadowCandles(signal.symbol, signal.startedAt)
+        const candles = await fetchShadowCandles(signal.symbol, signal.startedAt, signal.resolution || '1m')
         if (!candles.length) continue
         let next = signal
         if (signal.status === 'pending') {
@@ -10476,12 +10539,18 @@ app.get('/api/ai-trading/shadow', async (request, response) => {
     const since = Number(request.query.since) || 0
     const profile = request.query.profile === 'active' ? true : request.query.profile === 'normal' ? false : undefined
     const signals = (await getShadowSignals()).filter((signal) => signal.startedAt >= since)
-    const compact = ({ id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, outcome, testMode }) => ({
-      id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, testMode, result: outcome?.result ?? null, netPct: outcome?.netPct ?? null, minutes: outcome?.minutes ?? null,
+    const compact = ({ id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, outcome, testMode, strategy }) => ({
+      id, symbol, side, stopPct, targetPct, startedAt, group, verdicts, status, testMode, strategy: strategy || 'scalp', result: outcome?.result ?? null, netPct: outcome?.netPct ?? null, minutes: outcome?.minutes ?? null,
     })
+    // Readiness (point 5 of the pipeline plan) is judged per strategy variant: the one configured now, unless ?strategy= names another.
+    const currentStrategy = aiStrategyTag((await getAiTradingConfig()).strategy)
+    const strategy = typeof request.query.strategy === 'string' && request.query.strategy ? request.query.strategy : currentStrategy
     response.json({
       ok: true,
       total: signals.length,
+      strategy,
+      currentStrategy,
+      strategySummary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, strategy }),
       summary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, activeMode: profile }),
       testModeSummary: summarizeShadow(signals, { feePct: SHADOW_FEE_ROUND_TRIP_PCT, testMode: true }),
       recent: signals.slice(0, 40).map(compact),
@@ -10494,11 +10563,12 @@ app.get('/api/ai-trading/shadow', async (request, response) => {
 // Measured market evidence for the Risk Manager (risk-evidence.js): a longer candle history than the Analyst gets (500 x 5M, 300 x 1H) for the
 // volatility percentile and the typical-excursion base rates, and the LIVE futures order book (the flow data uses the testnet book, which is
 // too thin to say anything about slippage on real money). Each fetch fails independently.
-async function getAiRiskEvidence(symbol, notionalsUsdt) {
+async function getAiRiskEvidence(symbol, notionalsUsdt, timeframe = AI_TRADING_TIMEFRAMES.scalp) {
   const closedCandles = (klines) => toCandleData(klines).filter((candle) => !(candle.closeTime > Date.now()))
+  const { fast, slow } = timeframe.evidence
   const [klines5m, klines1h, depth] = await Promise.all([
-    fetchKlines(symbol, '5m', 500).catch(() => null),
-    fetchKlines(symbol, '1h', 300).catch(() => null),
+    fetchKlines(symbol, fast.interval, fast.bars).catch(() => null),
+    fetchKlines(symbol, slow.interval, slow.bars).catch(() => null),
     fetchJson(`${futuresLiveBaseUrl}/fapi/v1/depth?symbol=${symbol}&limit=50`, {
       retries: 1,
       timeoutMs: 9_000,
@@ -10511,6 +10581,7 @@ async function getAiRiskEvidence(symbol, notionalsUsdt) {
     candles1h: klines1h ? closedCandles(klines1h) : null,
     depth,
     notionalsUsdt,
+    ...(timeframe.id === 'scalp' ? {} : { timeframe: timeframe.evidence }),
   })
 }
 
@@ -10521,7 +10592,7 @@ async function getAiTradeConstraints(symbol, snapshot) {
   const ceiling = riskLimitsFor(config).maxLeverage
   // Slippage is reported for the smallest order the exchange accepts and for the largest this wallet could open.
   const notionals = exchange ? [exchange.minOrderUsdt, Math.min(exchange.marginCapUsdt * ceiling, 5000)] : []
-  const evidence = await getAiRiskEvidence(symbol, notionals).catch(() => null)
+  const evidence = await getAiRiskEvidence(symbol, notionals, snapshot?.timeframe || getAiTradingTimeframe(config)).catch(() => null)
   if (!exchange && !evidence) return null
   return { ...(exchange || { mode: config.execution.mode }), ...(evidence ? { evidence } : {}) }
 }
@@ -10538,7 +10609,7 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     // Derivatives positioning / order flow for the Market Flow Agent (public futures data, no keys). The
     // order book comes from the same futures depth call the signal bots use; BTC gives alts their market tide.
     getFlowData: getAiFlowData,
-    getMarketInputs: getAiMarketInputs,
+    getMarketInputs: (target) => getAiMarketInputs(target, getAiTradingTimeframe(config)),
     getTradeConstraints: getAiTradeConstraints,
   })
   run.trigger = trigger
@@ -10590,6 +10661,8 @@ app.post('/api/ai-trading/run', async (request, response) => {
 // a tick that arrives while the previous cycle is still running is dropped, not queued.
 let aiScanCycleRunning = false
 let aiDailyBlockLogged = ''
+// symbol -> when the scan last ran the pipeline for it (in memory; a restart just allows one early run). Used by the swing timeframe's gap.
+const aiScanLastRunAt = {}
 
 async function runAiScanCycle() {
   if (aiScanCycleRunning) return
@@ -10615,6 +10688,9 @@ async function runAiScanCycle() {
       mode: config.execution.mode,
       inFlight: aiTradingRunsInFlight,
       dailyBlock: daily.blocked,
+      cooldownMs: getAiTradingTimeframe(config).cooldownMs,
+      minRunGapMs: getAiTradingTimeframe(config).minRunGapMs,
+      lastRunAt: aiScanLastRunAt,
     })
     const results = {}
     const stamp = Date.now()
@@ -10627,6 +10703,7 @@ async function runAiScanCycle() {
       if (!config.scan.enabled) break // switched off mid-cycle
       if (aiTradingRunsInFlight.has(symbol)) continue
       aiTradingRunsInFlight.add(symbol)
+      aiScanLastRunAt[symbol] = Date.now()
       try {
         const run = await performAiTradingRun(symbol, { trigger: 'scan' })
         const saved = shouldPersistScanRun(run)
@@ -10820,15 +10897,21 @@ async function openAiTradeLocked({ run, mode, confirm, auto }) {
       entryPrice: plan.entryPrice,
       leverage: tradeLeverage,
       marginMode,
+      ...(config.strategy?.makerEntry ? { entryMode: 'maker' } : {}),
     }, settings, { forceBinance: true, environment })
     if (mode === 'real' && rawExecution.mode !== 'binance-futures-live') {
       throw new AiExecutionError('Binance live execution was not confirmed; nothing was recorded as a real money trade.', 502)
     }
     const execution = { quantity, entryPrice: plan.entryPrice, notional: quantity * plan.entryPrice, ...rawExecution }
 
-    const record = buildAiTradeRecord({
-      run, plan, mode, scaled: sizing, execution, marginMode, leverage: tradeLeverage, dateKey: manilaDateKey(),
-    })
+    const record = {
+      ...buildAiTradeRecord({ run, plan, mode, scaled: sizing, execution, marginMode, leverage: tradeLeverage, dateKey: manilaDateKey() }),
+      // Which strategy variant opened it (the Position Manager reviews it on the same timeframe), and a maker-first entry's order ids / fills.
+      aiStrategy: run.strategy || 'scalp',
+      aiTimeframe: run.timeframe || 'scalp',
+      ...(rawExecution.exchangeEntryOrderIds ? { exchangeEntryOrderIds: rawExecution.exchangeEntryOrderIds } : {}),
+      ...(rawExecution.entryFill ? { entryFill: rawExecution.entryFill } : {}),
+    }
     await updateAiTrades((current) => (current.some((trade) => trade.aiRunId === run.id) ? undefined : [record, ...current]))
     aiExchangeSummaryCache[mode] = null
     console.log(`[ai-trading] Opened ${mode} ${record.side} ${record.symbol} qty ${record.quantity} @ ${record.entryPrice} via ${record.mode} (run ${run.id})`)
@@ -11084,7 +11167,7 @@ async function runPositionManagerReview(tradeId) {
     let price
     try {
       const entryContext = trade.entryContext || buildEntryContext((await getAiTradingRuns()).find((run) => run.id === trade.aiRunId))
-      const inputs = await getAiMarketInputs(trade.symbol)
+      const inputs = await getAiMarketInputs(trade.symbol, AI_TRADING_TIMEFRAMES[trade.aiTimeframe] || AI_TRADING_TIMEFRAMES.scalp)
       const snapshot = buildMarketSnapshot({ symbol: trade.symbol, ...inputs })
       const flowMetrics = (await getAiFlowData(trade.symbol, snapshot).catch(() => null))?.metrics || null
       price = Number((await fetchTickerPrice(trade.symbol).catch(() => null))?.price) || snapshot.price
@@ -11157,7 +11240,8 @@ async function runPositionManagerCycle() {
     const now = Date.now()
     const due = (await getAiTrades()).filter((trade) => isOpenAiTrade(trade)
       && !aiTradesBeingManaged.has(trade.id)
-      && now - Number(trade.managerLastReviewAt || trade.transactTime || 0) >= AI_POSITION_MANAGER_INTERVAL_MS)
+      // Swing trades are reviewed every 15 min, scalp ones every AI_POSITION_MANAGER_INTERVAL_MS (the timeframe the trade was opened on).
+      && now - Number(trade.managerLastReviewAt || trade.transactTime || 0) >= (AI_TRADING_TIMEFRAMES[trade.aiTimeframe]?.managerIntervalMs || AI_POSITION_MANAGER_INTERVAL_MS))
     for (const trade of due) {
       await runPositionManagerReview(trade.id).catch((error) => {
         console.warn('[ai-trading] Position Manager review failed:', error instanceof Error ? error.message : error)

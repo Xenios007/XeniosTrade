@@ -141,8 +141,10 @@ function changesSinceEntry(entry, snapshot, metrics, flowMetricsNow) {
   if (entry.regime && now.regime && entry.regime !== now.regime) lines.push(`- regime: ${entry.regime} -> ${now.regime}`)
   else if (now.regime) lines.push(`- regime: unchanged (${now.regime})`)
   pair('trend score', entry.trendScore, now.trendScore, 3)
-  pair('1H ADX', entry.adx1h, now.adx1h, 1)
-  pair('5M RSI', entry.rsi, now.rsi, 1)
+  // Labels follow the snapshot's timeframe (scalp: 5M entries / 1H trend; swing: 1H / 4H).
+  const tf = snapshot.timeframe
+  pair(`${tf?.bias?.label || '1H'} ADX`, entry.adx1h, now.adx1h, 1)
+  pair(`${tf?.entry?.label || '5M'} RSI`, entry.rsi, now.rsi, 1)
   pair('RSI slope', entry.rsiSlope, now.rsiSlope, 3)
   pair('z-score', entry.zscore, now.zscore)
   pair('ATR % of price', entry.atrPct, snapshot.atrPct, 3)

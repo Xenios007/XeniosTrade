@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, Route, Routes } from 'react-router-dom'
 import { getAiProvider, isLocalLoginReady, isProviderConnected, providerDisplayName } from '../lib/aiProviders'
 import {
-  AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS,
+  AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS, activeAiTradingAgentIds,
 } from '../lib/aiTrading'
 import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
 import { useAiLedger } from '../lib/aiTradingApi'
@@ -40,6 +40,7 @@ async function requestJson(url, options) {
 export function AgentAssignmentStrip({ config, settings, localLogins }) {
   const status = settings?.aiProviderCredentialStatus || {}
   const credentials = settings?.aiProviderCredentials || {}
+  const activeAgents = activeAiTradingAgentIds(config)
 
   return (
     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
@@ -51,12 +52,13 @@ export function AgentAssignmentStrip({ config, settings, localLogins }) {
           ? (provider.localLogin ? isLocalLoginReady(localLogins, provider.id) : isProviderConnected(provider, credentials[provider.id], Boolean(status[provider.id]?.present)))
           : false
         const model = assignment?.model || (provider?.localLogin && !provider?.localServer ? 'default model' : credentials[provider?.id]?.model || provider?.suggested?.[0])
+        const unused = !activeAgents.includes(agentId)
 
         return (
-          <div key={agentId} className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2.5">
+          <div key={agentId} className={`rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2.5 ${unused ? 'opacity-50' : ''}`}>
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-slate-200">{agent.name}</span>
-              <Badge tone={connected ? 'up' : 'warn'}>{connected ? (provider.localServer ? 'Running' : provider.localLogin ? 'Logged in' : 'Key saved') : provider ? (provider.localServer ? 'Server offline' : provider.localLogin ? 'Not logged in' : 'No key') : 'Unassigned'}</Badge>
+              {unused ? <Badge tone="neutral">Not used (3-agent)</Badge> : <Badge tone={connected ? 'up' : 'warn'}>{connected ? (provider.localServer ? 'Running' : provider.localLogin ? 'Logged in' : 'Key saved') : provider ? (provider.localServer ? 'Server offline' : provider.localLogin ? 'Not logged in' : 'No key') : 'Unassigned'}</Badge>}
             </div>
             <div className="mt-1 truncate text-[11px] text-slate-500">
               {provider ? `${providerDisplayName(provider, credentials)}${model ? ` · ${model}` : ''}` : 'Pick a provider on the AI Models page'}

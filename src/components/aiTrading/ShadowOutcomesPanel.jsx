@@ -96,6 +96,8 @@ export function ShadowOutcomesPanel() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [showTest, setShowTest] = useState(false)
+  // Only the signals of the strategy configured now (timeframe + switches), which is what the real-money readiness check judges.
+  const [onlyStrategy, setOnlyStrategy] = useState(true)
   // Only signals newer than this many hours (0 = everything). Lets a prompt change be judged on the signals made after it.
   const [sinceHours, setSinceHours] = useState(0)
 
@@ -119,7 +121,8 @@ export function ShadowOutcomesPanel() {
     return () => { cancelled = true; clearInterval(timer) }
   }, [sinceHours])
 
-  const summary = showTest ? data?.testModeSummary : data?.summary
+  const summary = showTest ? data?.testModeSummary : (onlyStrategy && data?.strategySummary ? data.strategySummary : data?.summary)
+  const readiness = data?.strategySummary?.readiness
   const criticRate = summary?.criticRejectRate
 
   return (
@@ -145,6 +148,15 @@ export function ShadowOutcomesPanel() {
           >
             {showTest ? 'Showing test-mode signals' : 'Showing normal-mode signals'}
           </button>
+          {!showTest && data?.strategy ? (
+            <button
+              type="button"
+              onClick={() => setOnlyStrategy((value) => !value)}
+              className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300 hover:border-white/20"
+            >
+              {onlyStrategy ? `Strategy: ${data.strategy}` : 'All strategies'}
+            </button>
+          ) : null}
         </div>
       )}
     >
@@ -155,6 +167,11 @@ export function ShadowOutcomesPanel() {
           {summary ? ` Fees assumed at ${summary.feePct}% round trip; signals are followed for ${summary.horizonMinutes} minutes; a candle touching both levels counts as a stop.` : ''}
         </p>
         {error ? <div className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">{error}</div> : null}
+        {readiness && !showTest ? (
+          <div className={`rounded-xl border px-3 py-2 text-xs ${readiness.ready ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-white/10 bg-slate-950/50 text-slate-300'}`}>
+            Real-money readiness ({data.strategy}): {readiness.message}
+          </div>
+        ) : null}
         {!data && !error ? <div className="py-4 text-center text-sm text-slate-400">Loading…</div> : null}
         {data ? <SummaryTable summary={summary} /> : null}
         {criticRate != null ? (

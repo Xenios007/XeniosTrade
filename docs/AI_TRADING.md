@@ -223,3 +223,29 @@ size, so a stale, oversized old order from before a partial close still closes t
 if it fires); the daily-limits gate (enforced in both the scan planner and `assertCanExecute`, 0 = truly off, testnet
 never limited).
 
+
+## Strategy switches (added 2026-09-25)
+
+Why: a 33-trade testnet run (all five agents on Claude, BTC/ETH) went 11W / 22L. Price PnL was -25.14 USDT and fees were about -34.50 on top.
+The average stop was 0.41% and the average target 0.64%, so the 0.1% round-trip fee was a large share of every trade. Replaying the original
+brackets on 1m candles gave 8 targets to 25 stops (24%, against a ~49% break-even). Model confidence did not separate winners (53%) from
+losers (50%). So the entries had no edge, and the model and the number of agents were not the main problem.
+
+Five changes. Each one is a switch in `config.strategy` (AI Settings -> Strategy). They all default off, which is the original setup, so rolling
+one back is a single toggle:
+
+| Switch | What it does | Where |
+| --- | --- | --- |
+| `timeframe: 'swing'` | 1H entry candles, 4H trend, 1D regime confirmation and context (instead of 5M / 1H / 15M). The holding horizon is 12-48h. Each symbol is analysed at most once per 55 min, re-entry cooldown is 2h, and open trades are reviewed every 15 min. Flow data still reads 5M candles, fetched separately. Risk evidence uses 1H/4H with a 24-bar (24h) excursion horizon. | `AI_TRADING_TIMEFRAMES` (src/lib/aiTrading.js), `getAiMarketInputs`, `planScanCycle({ minRunGapMs })` |
+| `trendFilter` | A code gate. The regime classifier's trend score (-4..+4) picks the only allowed side: >= +2 is LONG only, <= -2 is SHORT only. With no clear trend the result is HOLD and no model is called. The Analyst is offered only `<side>|HOLD`, and a call against the trend is blocked before the other agents run. | `trendDirection`, `trendGate` (pipeline.js) |
+| `feeAware` | A code veto on the Risk Manager's final numbers. Target must be >= 5x the 0.1% round-trip fee, (target - fee)/(stop + fee) must be >= 1.5, and the stop must be >= 1x the entry-timeframe ATR. Both the Analyst and the Risk Manager are told these rules up front. | `feeAwareProblems`, `reviewRiskProposal({ atrPct })` |
+| `lean` | The 3-agent pipeline: Analyst -> Risk Manager -> Position Manager. The Analyst reads the flow metrics directly, and the Risk Manager also does the Critic's job. Flow and Critic show as "Not used". Missing flow data does not stop a run. | `runAiTradingPipeline` |
+| `makerEntry` | Places a post-only (GTX) limit order at the best bid/ask and waits up to 15s. Any unfilled part is cancelled and sent as a market order. A post-only rejection falls back to a market order. Every entry order id is stored (`exchangeEntryOrderIds`) so the close-price resolver never mistakes an entry fill for an exit. | `server/ai-trading/maker-entry.js`, `createExchangeTradeExecution({ entryMode: 'maker' })` |
+
+Note: `trendFilter` and `feeAware` are deliberate exceptions to the "no code gates around the AI" rule in the pipeline header. Both are switchable.
+
+**Test before real money.** Every run and shadow signal records its strategy tag (for example `swing+trend+fee+lean+maker`). Swing signals
+are followed for 48h on 5m candles, and approved signals are replayed with the Risk Manager's final bracket. `/api/ai-trading/shadow` returns
+`strategySummary.readiness` for the configured strategy. A strategy is ready only after at least 200 decided taken trades (executed or
+approved) where the 95% low of the hit rate is above the fee-inclusive break-even rate. The result appears in AI Settings -> Strategy and in
+Shadow outcomes. Until it says Ready, keep the strategy on testnet.

@@ -14,7 +14,7 @@ function closedAtOf(trade) {
  * A run is wasted LLM spend (and a duplicate entry) when the symbol already has an open AI position, was closed
  * moments ago, is being analysed right now, or the wallet is already at its position cap.
  */
-export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Date.now(), inFlight = new Set(), cooldownMs = AI_SCAN_COOLDOWN_MS, dailyBlock = null }) {
+export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Date.now(), inFlight = new Set(), cooldownMs = AI_SCAN_COOLDOWN_MS, dailyBlock = null, lastRunAt = {}, minRunGapMs = 0 }) {
   const toRun = []
   const skipped = []
   const openInMode = trades.filter((trade) => isOpenAiTrade(trade) && trade.aiTradingMode === mode).length
@@ -33,6 +33,9 @@ export function planScanCycle({ symbols, trades = [], mode = 'testnet', now = Da
       skipped.push({ symbol, reason: `The ${mode} wallet is at its ${MAX_OPEN_POSITIONS[mode]}-position limit.` })
     } else if (own.some((trade) => !isOpenAiTrade(trade) && now - closedAtOf(trade) < cooldownMs && closedAtOf(trade) > 0)) {
       skipped.push({ symbol, reason: `Closed less than ${Math.round(cooldownMs / 60_000)} min ago (cooldown).` })
+    } else if (minRunGapMs > 0 && now - (Number(lastRunAt[symbol]) || 0) < minRunGapMs) {
+      // Swing timeframe: the entry candle is 1H, so re-asking the models every 5 min would only re-read the same bar.
+      skipped.push({ symbol, reason: `Analysed less than ${Math.round(minRunGapMs / 60_000)} min ago (waiting for a new entry candle).` })
     } else {
       toRun.push(symbol)
     }

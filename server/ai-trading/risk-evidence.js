@@ -133,15 +133,22 @@ export function bookImpact(book, notionalsUsdt = []) {
 }
 
 /** Everything measurable from the market data (each part is optional and skipped when there is not enough data). */
-export function buildRiskEvidence({ candles5m = null, candles1h = null, depth = null, notionalsUsdt = [] } = {}) {
+// `candles5m` / `candles1h` keep their historical names but are the timeframe's fast / slow series (5M/1H for scalp, 1H/4H for swing);
+// `timeframe` (an AI_TRADING_TIMEFRAMES[...].evidence block) labels them and sets the excursion horizon.
+const DEFAULT_EVIDENCE_TIMEFRAME = { fast: { label: '5M', minutes: 5 }, slow: { label: '1H', minutes: 60 }, excursionBars: 12 }
+
+export function buildRiskEvidence({ candles5m = null, candles1h = null, depth = null, notionalsUsdt = [], timeframe = DEFAULT_EVIDENCE_TIMEFRAME } = {}) {
   const safely = (fn) => { try { return fn() } catch { return null } }
   const evidence = {
     atr5m: candles5m ? safely(() => atrPercentile(candles5m)) : null,
     atr1h: candles1h ? safely(() => atrPercentile(candles1h)) : null,
-    excursion: candles5m ? safely(() => excursionStats(candles5m, 12)) : null,
+    excursion: candles5m ? safely(() => excursionStats(candles5m, timeframe.excursionBars || 12)) : null,
     book: depth ? safely(() => bookImpact(depth, notionalsUsdt)) : null,
   }
-  return Object.values(evidence).some(Boolean) ? evidence : null
+  if (!Object.values(evidence).some(Boolean)) return null
+  return timeframe === DEFAULT_EVIDENCE_TIMEFRAME
+    ? evidence
+    : { ...evidence, frames: { fast: { label: timeframe.fast.label, minutes: timeframe.fast.minutes }, slow: { label: timeframe.slow.label, minutes: timeframe.slow.minutes } } }
 }
 
 const spanLabel = (bars, barMinutes) => {
@@ -158,18 +165,21 @@ export function describeRiskEvidence({ evidence = null, side = 'LONG', stopPct =
   const direction = side === 'SHORT' ? 'short' : 'long'
   const label = direction.toUpperCase()
 
+  const fast = evidence?.frames?.fast || DEFAULT_EVIDENCE_TIMEFRAME.fast
+  const slow = evidence?.frames?.slow || DEFAULT_EVIDENCE_TIMEFRAME.slow
   if (evidence?.atr5m || evidence?.atr1h) {
     const parts = []
-    if (evidence.atr5m) parts.push(`5M ATR is ${fx(evidence.atr5m.atrPct, 3)}% of price, the ${evidence.atr5m.percentile}th percentile of the last ${evidence.atr5m.samples} 5M bars (${spanLabel(evidence.atr5m.samples, 5)})`)
-    if (evidence.atr1h) parts.push(`1H ATR is ${fx(evidence.atr1h.atrPct, 3)}%, the ${evidence.atr1h.percentile}th percentile of the last ${evidence.atr1h.samples} 1H bars (${spanLabel(evidence.atr1h.samples, 60)})`)
+    if (evidence.atr5m) parts.push(`${fast.label} ATR is ${fx(evidence.atr5m.atrPct, 3)}% of price, the ${evidence.atr5m.percentile}th percentile of the last ${evidence.atr5m.samples} ${fast.label} bars (${spanLabel(evidence.atr5m.samples, fast.minutes)})`)
+    if (evidence.atr1h) parts.push(`${slow.label} ATR is ${fx(evidence.atr1h.atrPct, 3)}%, the ${evidence.atr1h.percentile}th percentile of the last ${evidence.atr1h.samples} ${slow.label} bars (${spanLabel(evidence.atr1h.samples, slow.minutes)})`)
     lines.push(`- Volatility context: ${parts.join('; ')}.`)
   }
 
   const stats = evidence?.excursion?.[direction]
   if (stats?.mfe && stats?.mae) {
-    const horizonMinutes = evidence.excursion.horizonBars * 5
+    const horizonMinutes = evidence.excursion.horizonBars * fast.minutes
+    const horizonLabel = horizonMinutes >= 120 ? `${fx(horizonMinutes / 60, 0)} hours` : `${horizonMinutes} minutes`
     const trio = (table) => `median ${fx(percentileOf(table, 50), 2)}% / 75th ${fx(percentileOf(table, 75), 2)}% / 90th ${fx(percentileOf(table, 90), 2)}%`
-    lines.push(`- Typical excursion in the ${horizonMinutes} minutes after ANY 5M close, for a ${label} (n=${evidence.excursion.windows} overlapping windows, about ${evidence.excursion.independent} independent): favorable ${trio(stats.mfe)}; adverse ${trio(stats.mae)}. This is a base rate for the symbol, not this setup.`)
+    lines.push(`- Typical excursion in the ${horizonLabel} after ANY ${fast.label} close, for a ${label} (n=${evidence.excursion.windows} overlapping windows, about ${evidence.excursion.independent} independent): favorable ${trio(stats.mfe)}; adverse ${trio(stats.mae)}. This is a base rate for the symbol, not this setup.`)
     const stopTouched = finite(stopPct) && stopPct > 0 ? rankIn(stats.mae, stopPct) : null
     const targetReached = finite(targetPct) && targetPct > 0 ? rankIn(stats.mfe, targetPct) : null
     if (stopTouched != null || targetReached != null) {

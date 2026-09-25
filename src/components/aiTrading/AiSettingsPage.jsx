@@ -2,7 +2,7 @@ import { ShieldAlert } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { APP_MODE_BOT, getModeUrl } from '../../lib/appMode'
-import { AI_SCAN_INTERVAL_MS, AI_TRADING_EXECUTION_LIMITS, AI_TRADING_SYMBOLS } from '../../lib/aiTrading'
+import { AI_SCAN_INTERVAL_MS, AI_TRADING_EXECUTION_LIMITS, AI_TRADING_MIN_NET_REWARD_RISK, AI_TRADING_MIN_TARGET_FEE_MULTIPLE, AI_TRADING_ROUND_TRIP_FEE_PCT, AI_TRADING_SYMBOLS, AI_TRADING_TIMEFRAMES, DEFAULT_AI_TRADING_STRATEGY, aiStrategyTag } from '../../lib/aiTrading'
 import { formatDateTime } from '../../lib/formatters'
 import { MODE_LABEL, requestJson, useAiLedger } from '../../lib/aiTradingApi'
 import { AgentAssignmentStrip } from '../AiTradingPage'
@@ -73,6 +73,7 @@ export function AiSettingsPage({ settings }) {
   const [notice, setNotice] = useState('')
   const [arming, setArming] = useState(false)
   const [typed, setTyped] = useState('')
+  const [readiness, setReadiness] = useState(null)
   const { ledger } = useAiLedger({ pollMs: 20_000 })
 
   const load = useCallback(async () => {
@@ -82,6 +83,8 @@ export function AiSettingsPage({ settings }) {
     setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null })
     setDaily(payload.daily || null)
     setDraft(draftFromExecution(payload.config.execution))
+    // Point 5 of the pipeline plan: has the configured strategy proven itself on enough trades? Never blocks the page.
+    requestJson('/api/ai-trading/shadow').then((shadow) => setReadiness(shadow.strategySummary?.readiness ? { strategy: shadow.strategy, ...shadow.strategySummary.readiness } : null)).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -111,6 +114,27 @@ export function AiSettingsPage({ settings }) {
       setConfig(payload.config)
       setNotice(message)
       window.dispatchEvent(new Event(AI_CONFIG_CHANGED_EVENT))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveStrategy(patch, message) {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const payload = await requestJson('/api/ai-trading/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...config, strategy: { ...(config.strategy || DEFAULT_AI_TRADING_STRATEGY), ...patch } }),
+      })
+      setConfig(payload.config)
+      setNotice(message)
+      window.dispatchEvent(new Event(AI_CONFIG_CHANGED_EVENT))
+      requestJson('/api/ai-trading/shadow').then((shadow) => setReadiness(shadow.strategySummary?.readiness ? { strategy: shadow.strategy, ...shadow.strategySummary.readiness } : null)).catch(() => {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save.')
     } finally {
@@ -266,6 +290,69 @@ export function AiSettingsPage({ settings }) {
             </div>
           </div>
           <ScanStatusList scanStatus={scanStatus} enabled={config.scan.enabled} />
+        </div>
+      </Panel>
+
+      <Panel title="Strategy" action={<Badge tone="neutral">{aiStrategyTag(config.strategy)}</Badge>}>
+        <div className="grid gap-4">
+          <p className="text-xs leading-relaxed text-slate-500">
+            How the pipeline trades. Each switch can be turned off on its own; with everything off it is the original setup (5M scalp, five agents, market entries).
+          </p>
+          <div>
+            <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Timeframe</div>
+            <div className="grid gap-3 md:grid-cols-2">
+              {Object.values(AI_TRADING_TIMEFRAMES).map((timeframe) => {
+                const active = (config.strategy?.timeframe || 'scalp') === timeframe.id
+                return (
+                  <button
+                    key={timeframe.id}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => saveStrategy({ timeframe: timeframe.id }, `Timeframe: ${timeframe.label}.`)}
+                    className={`rounded-2xl border p-4 text-left transition disabled:opacity-60 ${active ? 'border-sky-300/50 bg-sky-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-white">{timeframe.label}</span>
+                      {active ? <Badge tone="info">Active</Badge> : null}
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {timeframe.id === 'swing'
+                        ? 'Trades that play out over 12-48 hours. Stops and targets are several times the fee, so fees stop eating the edge. Each symbol is analysed at most once an hour; open trades are reviewed every 15 minutes.'
+                        : 'The original setup: trades over the next few 5M candles with small stops and targets. Fees are a large share of each trade.'}
+                    </p>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          {[
+            ['trendFilter', 'Trade with the higher-timeframe trend only', 'The trend classifier picks the only allowed direction (LONG in an uptrend, SHORT in a downtrend). No clear trend means no trade and no model calls. The Analyst can only confirm the direction or wait.'],
+            ['feeAware', 'Fee-aware rules', `Checked in code on the final plan: target at least ${AI_TRADING_MIN_TARGET_FEE_MULTIPLE}x the ~${AI_TRADING_ROUND_TRIP_FEE_PCT}% round-trip fee, reward:risk after fees at least ${AI_TRADING_MIN_NET_REWARD_RISK}, stop at least 1x the entry-timeframe ATR. A plan that breaks one is vetoed.`],
+            ['lean', '3-agent pipeline', 'Analyst (reads the flow data itself), then Risk Manager (also plays the Critic), then Position Manager. Skips the Market Flow and Critic model calls.'],
+            ['makerEntry', 'Maker entry (limit first)', 'Posts a post-only limit order at the best bid/ask and waits 15s; whatever did not fill goes at market. A maker fill pays a lower fee and no spread.'],
+          ].map(([key, title, body]) => (
+            <label key={key} className="flex items-center justify-between gap-4 text-sm text-slate-200">
+              <span>
+                {title}
+                <span className="mt-0.5 block text-xs text-slate-500">{body}</span>
+              </span>
+              <Toggle
+                checked={Boolean(config.strategy?.[key])}
+                disabled={busy}
+                label={title}
+                onChange={(value) => saveStrategy({ [key]: value }, `${title}: ${value ? 'on' : 'off'}.`)}
+              />
+            </label>
+          ))}
+          {readiness ? (
+            <div className={`rounded-2xl border px-4 py-3 text-xs ${readiness.ready ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-white/10 bg-slate-950/50 text-slate-300'}`}>
+              <div className="mb-1 font-semibold">Ready for real money? <span className="font-normal text-slate-400">({readiness.strategy})</span></div>
+              {readiness.message}
+              <div className="mt-1 text-slate-500">
+                Needs {readiness.required} decided trades (target or stop hit) with the hit rate&apos;s 95% low above the break-even rate after fees. Judged separately for each strategy setting.
+              </div>
+            </div>
+          ) : null}
         </div>
       </Panel>
 
