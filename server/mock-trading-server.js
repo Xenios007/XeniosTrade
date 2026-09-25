@@ -10819,6 +10819,23 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
   return withAiModeExecutionLock(mode, () => openAiTradeLocked({ run, mode, confirm, auto }))
 }
 
+// One position on the shared exchange account can come from three independent systems (AI Trading, Bots 1-9, or Bot 10 / Consolidated
+// Knowledge — server/consolidated-testnet.js, testnet only). Read-only and best-effort: identifying the holder is a nicety for the
+// message, never a reason to fail differently.
+async function describeBlockingPosition(symbol, mode, snapshot, positionAmount) {
+  const position = (snapshot?.positions || []).find((item) => String(item?.symbol || '') === symbol)
+  const side = positionAmount > 0 ? 'LONG' : 'SHORT'
+  const details = position
+    ? ` (${side} ${Math.abs(positionAmount)} @ ${position.entryPrice}, ${position.leverage}x)`
+    : ` (${side} ${Math.abs(positionAmount)})`
+  let holder = 'possibly opened by a bot'
+  if (mode === 'testnet') {
+    const consolidated = await readJson(path.join(dataDir, 'consolidated/testnet-state.json'), null).catch(() => null)
+    if (consolidated?.position?.symbol === symbol) holder = 'opened by Bot 10 (Consolidated Knowledge)'
+  }
+  return `${symbol} already has an open position on this ${mode} Binance account${details}, ${holder}. The AI will not trade on top of it — it will retry once that position closes.`
+}
+
 // The body of openAiTrade, run one-at-a-time per mode (see withAiModeExecutionLock).
 async function openAiTradeLocked({ run, mode, confirm, auto }) {
   try {
@@ -10836,9 +10853,12 @@ async function openAiTradeLocked({ run, mode, confirm, auto }) {
     let availableUsdt
     if (hasKeys) {
       const snapshot = await fetchBinanceAccountSnapshot({ apiKey, secretKey, baseUrl: getFuturesBaseUrl(environment) })
-      // One-way position mode: a second position on the symbol would net against the first (e.g. a bot's).
-      if (Math.abs(getExchangePositionAmount(snapshot, run.symbol)) > 1e-8) {
-        throw new AiExecutionError(`${run.symbol} already has an open position on this ${mode} Binance account (possibly opened by a bot). The AI will not trade on top of it.`)
+      // One-way position mode: a second position on the symbol would net against the first. Three independent systems can each hold a
+      // position on this account (AI Trading, Bots 1-9, and Bot 10/Consolidated Knowledge), so whichever opened first blocks the others
+      // on that symbol until it closes — say what is actually held, so this reads as "expected contention", not an unexplained failure.
+      const positionAmount = getExchangePositionAmount(snapshot, run.symbol)
+      if (Math.abs(positionAmount) > 1e-8) {
+        throw new AiExecutionError(await describeBlockingPosition(run.symbol, mode, snapshot, positionAmount))
       }
       availableUsdt = Number(snapshot.availableBalance)
     } else {
