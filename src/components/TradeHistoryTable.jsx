@@ -570,7 +570,7 @@ export function TradeHistoryTable({
                   </div>
                 ) : null}
 
-                <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+                <div className="mt-4 grid grid-cols-2 gap-3 2xl:grid-cols-4">
                   <div className="min-w-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
                     <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Entry</div>
                     <div className="mt-1 break-words text-sm font-semibold text-white">{formatPrice(trade.entryPrice, 5)}</div>
@@ -594,7 +594,7 @@ export function TradeHistoryTable({
                   </div>
                 </div>
 
-                <div className="mt-3 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+                <div className="mt-3 grid grid-cols-2 gap-3 2xl:grid-cols-4">
                   <div className="min-w-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
                     <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">To TP</div>
                     <div className={`mt-1 break-words text-sm font-semibold ${
