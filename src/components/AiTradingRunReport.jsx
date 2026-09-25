@@ -193,7 +193,7 @@ function StageCard({ agent, stage, running }) {
   return (
     <div className="flex min-w-0 flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-sm font-semibold text-white">{agent.name}</span>
           <Badge tone={KIND_TONE[agent.kind]}>{KIND_LABEL[agent.kind]}</Badge>
           {agent.guardrail ? <Badge tone="warn">Limits in code</Badge> : null}
