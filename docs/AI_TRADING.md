@@ -189,3 +189,37 @@ The Risk Manager's system prompt is now the project owner's full role definition
 ## Target profit per trade (added 2026-09-22)
 
 `execution.targetProfitPerTradeUsdt` (AI Settings -> Real money wallet; default 1, 0 = off; bounded 0-10,000) is guidance given to the Risk Manager, **not a code rule**: `profitGoalLines` in `pipeline.js` states it in the user message ("roughly N USDT profit on a winning trade, after fees - not a requirement") plus, when the wallet's margin cap is known, a worked example (the take-profit percent that would net N USDT at a bot-baseline reference leverage and the margin cap). The Risk Manager is told explicitly not to take a bad setup just to reach it - a weak or uncertain setup is still sized small or vetoed even if that misses the goal. Nothing in code enforces the number; it only ever changes what the model puts in `riskPercent` / `leverage` / `takeProfitPercent`, which (as of 2026-09-23) is used exactly as the model gives it, still scaled down to fit the wallet's actual available margin (a real constraint, not a trade-quality ceiling).
+## Real-money bug audit (2026-09-25)
+
+Prompted by a live incident: an ETHUSDT real-money entry was left on the exchange with no stop-loss/take-profit for
+several days (root cause and fix: see the executor rewrite two sections up, commit `e7f2a25`). A follow-up audit for
+the same class of problem found two more real-money-relevant bugs, both fixed:
+
+**1. Order id precision loss in trade-close reconciliation.** The `e7f2a25` fix made every *entry* order id exact
+(`exchange-json.js`'s `quoteLargeIntegers`, since Binance now issues ids above 2^53), but two downstream places still
+ran `Number(orderId)` on ids that were already correct strings, rounding them right back to an imprecise double:
+`applyPartialClose` (`position-manager.js`, storing `partialCloseOrderIds`) and `resolveExchangeClosePriceFromUserTrades`'s
+`knownOrderIds` exclusion set (`mock-trading-server.js`, used to tell a genuine closing fill apart from the entry / a
+partial-close fill when reconstructing a trade's exit price from `/fapi/v1/userTrades`). Two *different* real order ids
+that happen to round to the same double could make a genuine closing fill look like an already-known one (wrong exit
+price / PnL recorded) or vice versa. Fixed by comparing order ids as strings throughout, never through `Number()`.
+Regression tests use a real id and its confirmed Number()-collision partner (`test/exchange-executor.test.js`,
+`test/ai-trading-position-manager.test.js`) - both were verified to fail against the pre-fix code and pass against the fix.
+
+**2. A same-mode execution race could exceed the 1-real-position cap.** `assertCanExecute`'s "already at the position
+cap" check reads `getAiTrades()` fresh on every call. `openAiTrade` only guarded against the *same* run id executing
+twice (`aiExecutionsInFlight`); it did nothing to stop two *different* approved runs (e.g. the operator clicking Execute
+on two runs within the same event-loop turn) from both reading "0 open positions" before either had recorded its trade,
+and both placing a real order. The auto-scan path was never exposed to this (`runAiScanCycle` processes symbols
+sequentially, one `performAiTradingRun` awaited at a time), but manual execution was. Fixed with
+`withAiModeExecutionLock`: a FIFO queue per trading mode that makes the whole read-check-place-record sequence atomic
+with respect to other executions in that mode (a failure never blocks the next queued execution). Testnet and real
+money queue independently. Unit-tested directly (`test/exchange-executor.test.js`).
+
+Also reviewed and found sound, no change needed: the entry-flow rewrite itself (re-verified against the tests, no
+regression); `replaceAiProtectiveOrders` (new stop/target is placed before the old one is cancelled, so a failure
+leaves the *old* protective orders live, not a gap - and Binance's `reduceOnly` self-limits to the current position
+size, so a stale, oversized old order from before a partial close still closes the whole remaining position correctly
+if it fires); the daily-limits gate (enforced in both the scan planner and `assertCanExecute`, 0 = truly off, testnet
+never limited).
+

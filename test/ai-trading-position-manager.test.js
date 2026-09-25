@@ -259,19 +259,28 @@ test('applyPartialClose: shrinks the position, banks the closed leg, and accumul
   assert.equal(first.maxLossPerTrade, 18)
   assert.equal(first.partialRealizedPnl, 20) // 5% of the 400 closed
   assert.equal(first.initialQuantity, 10)
-  assert.deepEqual(first.partialCloseOrderIds, [111])
+  assert.deepEqual(first.partialCloseOrderIds, ['111'])
   assert.equal(first.partialCloses.length, 1)
 
   const second = applyPartialClose(first, { quantity: 3, price: 102, at: T0 + 2, orderId: 222 })
   assert.equal(second.quantity, 3)
   assert.equal(second.notional, 300)
   assert.equal(second.partialRealizedPnl, 26) // 20 + 2% of the 300 closed
-  assert.deepEqual(second.partialCloseOrderIds, [111, 222])
+  assert.deepEqual(second.partialCloseOrderIds, ['111', '222'])
   assert.equal(second.initialQuantity, 10, 'the original size is kept for the "% still open" input')
 
   const short = applyPartialClose(shortTrade(), { quantity: 5, price: 96 })
   assert.equal(short.partialRealizedPnl, 20, 'a short profits when price falls')
   assert.equal(applyPartialClose(longTrade(), { quantity: 0, price: 105 }).quantity, 10, 'a zero close changes nothing')
+})
+
+test('applyPartialClose: a Binance order id above 2^53 is kept exact, not rounded by Number()', () => {
+  // Real id seen on the account (server/exchange-json.js exists for the same reason): Number() rounds this to
+  // ...691711000, which is a DIFFERENT id and could misidentify a later fill during close-price reconciliation.
+  const bigId = '8389766281691711234'
+  const result = applyPartialClose(longTrade(), { quantity: 4, price: 105, orderId: bigId })
+  assert.deepEqual(result.partialCloseOrderIds, [bigId])
+  assert.notEqual(String(Number(bigId)), bigId, 'sanity check: Number() really does round this one')
 })
 
 test('recordReview: newest first, capped, stamps the time, and records rejected / advisory outcomes', () => {

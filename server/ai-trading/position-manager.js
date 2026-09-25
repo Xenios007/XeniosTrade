@@ -348,7 +348,8 @@ export function applyPartialClose(trade, { quantity, price, at = Date.now(), ord
     maxLossPerTrade: Number((Number(trade.maxLossPerTrade) * keep).toFixed(4)),
     partialRealizedPnl: Number(((trade.partialRealizedPnl || 0) + legPnl).toFixed(2)),
     partialLastAt: at,
-    partialCloseOrderIds: orderId ? [...(trade.partialCloseOrderIds || []), Number(orderId)] : (trade.partialCloseOrderIds || []),
+    // Kept as a string: Binance order ids now exceed 2^53, and Number() would round two different ids to the same value.
+    partialCloseOrderIds: orderId ? [...(trade.partialCloseOrderIds || []), String(orderId)] : (trade.partialCloseOrderIds || []),
     partialCloses: [...(trade.partialCloses || []), { at, quantity: closed, price, pnl: Number(legPnl.toFixed(2)) }],
   }
 }

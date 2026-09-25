@@ -8267,7 +8267,8 @@ export async function createExchangeTradeExecution(payload, settings, { forceBin
   }
 }
 
-async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
+// Exported for tests (a stubbed exchange).
+export async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKey, baseUrl = futuresTestnetBaseUrl }) {
   const fills = await fetchBinanceUserTrades({
     symbol: trade.symbol,
     startTime: Math.max(Number(trade.transactTime || 0) - 60_000, 0),
@@ -8278,13 +8279,15 @@ async function resolveExchangeClosePriceFromUserTrades(trade, { apiKey, secretKe
   })
 
   const trackedQuantity = getTrackedTradeQuantity(trade)
+  // Compared as strings: Binance order ids now exceed 2^53, and Number() would round two different ids to the same
+  // value, which could make a genuinely closing fill look like an already-known one (or vice versa).
   const knownOrderIds = new Set([
-    Number(trade.exchangeEntryOrderId || 0),
-    ...(trade.partialCloseOrderIds || []).map(Number), // fills of the Position Manager's partial closes are not the final exit
-  ])
+    String(trade.exchangeEntryOrderId ?? ''),
+    ...(trade.partialCloseOrderIds || []).map(String), // fills of the Position Manager's partial closes are not the final exit
+  ].filter(Boolean))
   const closingFills = (Array.isArray(fills) ? fills : [])
     .filter((fill) => {
-      const orderId = Number(fill?.orderId || 0)
+      const orderId = String(fill?.orderId ?? '')
       if (!orderId || knownOrderIds.has(orderId)) {
         return false
       }
@@ -10663,6 +10666,23 @@ async function runAiScanCycle() {
 // rules live in ai-trading/execution.js (unit-tested); this block does the exchange and disk I/O.
 // Real money: manual only, armed only, symbol typed back as confirmation, margin hard-capped.
 const aiExecutionsInFlight = new Set()
+// Serializes openAiTrade per mode: assertCanExecute's "at the position cap" check reads getAiTrades() fresh on every
+// call, so two DIFFERENT approved runs executed within the same event-loop turn (e.g. the operator clicking Execute
+// on two runs seconds apart, before the first's trade is recorded) could both see the cap as not yet reached and both
+// place a real order - momentarily exceeding MAX_OPEN_POSITIONS. aiExecutionsInFlight only guards the SAME run id
+// twice, not two different ones, so it does not cover this. A queue per mode makes the whole read-check-place-record
+// sequence atomic with respect to other executions in that mode, with no effect on the single-call (non-racing) case.
+const aiModeExecutionQueues = new Map()
+// Exported for tests. `task` is the section to serialize; it starts only once every earlier call queued under the
+// same `mode` has settled (succeeded or thrown), and its own outcome is what the caller of withAiModeExecutionLock sees.
+export function withAiModeExecutionLock(mode, task) {
+  const previous = aiModeExecutionQueues.get(mode) || Promise.resolve()
+  const next = previous.then(task, task)
+  // Swallow here so one failed execution never poisons the queue for the next one; the real rejection still
+  // propagates to this call's own caller via `next`, the promise returned below.
+  aiModeExecutionQueues.set(mode, next.catch(() => {}))
+  return next
+}
 const AI_EXCHANGE_CACHE_MS = 15_000
 const aiExchangeSummaryCache = { testnet: null, real: null }
 
@@ -10718,6 +10738,11 @@ async function openAiTrade({ run, mode, confirm = '', auto = false }) {
     throw new AiExecutionError('This run is already being executed.')
   }
   aiExecutionsInFlight.add(run.id)
+  return withAiModeExecutionLock(mode, () => openAiTradeLocked({ run, mode, confirm, auto }))
+}
+
+// The body of openAiTrade, run one-at-a-time per mode (see withAiModeExecutionLock).
+async function openAiTradeLocked({ run, mode, confirm, auto }) {
   try {
     const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
     const ticker = await fetchTickerPrice(run.symbol).catch(() => null)
