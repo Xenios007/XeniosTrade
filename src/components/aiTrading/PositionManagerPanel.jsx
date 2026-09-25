@@ -109,15 +109,15 @@ function ManagedTrade({ trade, onReview, reviewing }) {
 }
 
 /**
- * The Position Manager's view of the AI trades in one wallet: open positions (with a Review now button) and the last few
- * trades it managed, each with its full review timeline.
+ * The Position Manager's view of the AI trades in one wallet: open positions only, each with a Review now button and its
+ * full review timeline. A trade drops out the moment it closes — its history stays visible in Trade History below.
  */
 export function PositionManagerPanel({ mode, trades, refresh }) {
   const [reviewing, setReviewing] = useState({})
   const [error, setError] = useState('')
-  const open = trades.filter((trade) => trade.status === 'OPEN')
-  const managedClosed = trades.filter((trade) => trade.status !== 'OPEN' && trade.managerReviews?.length).slice(0, 5)
-  const shown = [...open, ...managedClosed]
+  // Open trades only: once a trade closes it belongs to Trade History below, not here — it never lingers in this list
+  // (and is never paginated back in) as the wallet keeps trading and the list turns over.
+  const shown = trades.filter((trade) => trade.status === 'OPEN')
 
   async function reviewNow(tradeId) {
     setReviewing((current) => ({ ...current, [tradeId]: true }))
