@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, Navigate, Route, Routes } from 'react-router-dom'
+import { ALL_EXPERIMENTS, describeExperiment, filterByExperiment, listExperiments } from '../../lib/aiExperiments'
 import { postJson, useAiLedger } from '../../lib/aiTradingApi'
+import { ExperimentPicker, useAiExperiment } from './ExperimentPicker'
 import { Panel } from '../Panel'
 import { TradeHistoryStatsPanel } from '../TradeHistoryStatsPanel'
 import { TradeHistoryTable } from '../TradeHistoryTable'
@@ -13,11 +15,13 @@ const TABS = [
   { to: '/ai-history/real', label: 'Real Money Trades' },
 ]
 
-function ModeHistory({ mode, ledger, refresh }) {
+function ModeHistory({ mode, ledger, refresh, experiment }) {
   const [closing, setClosing] = useState({})
   const [error, setError] = useState('')
   const wallet = ledger.wallets.find((item) => item.mode === mode)
-  const trades = ledger.trades.filter((trade) => trade.aiTradingMode === mode)
+  // Only the selected experiment's trades: a 5-agent scalp and a 3-agent swing are different tests and must not be scored together.
+  const trades = filterByExperiment(ledger.trades.filter((trade) => trade.aiTradingMode === mode), experiment)
+  const experimentName = experiment && experiment !== ALL_EXPERIMENTS ? describeExperiment(experiment).name : ''
 
   async function closeTrade(tradeId) {
     setClosing((current) => ({ ...current, [tradeId]: true }))
@@ -36,7 +40,7 @@ function ModeHistory({ mode, ledger, refresh }) {
     return (
       <Panel title={mode === 'real' ? 'Real Money Trade History' : 'Testnet Trade History'}>
         <div className="py-8 text-center text-sm text-slate-400">
-          No {mode === 'real' ? 'real money' : 'testnet'} AI trades yet. Approved pipeline runs appear here once they are opened —
+          No {mode === 'real' ? 'real money' : 'testnet'} AI trades {experimentName ? `in the "${experimentName}" experiment ` : ''}yet. Approved pipeline runs appear here once they are opened —
           run the pipeline on the <Link to="/ai-trading" className="text-sky-300 hover:underline">AI Trading</Link> page.
         </div>
       </Panel>
@@ -51,7 +55,7 @@ function ModeHistory({ mode, ledger, refresh }) {
         livePrices={ledger.livePrices}
         trackedSymbols={Array.from(new Set(trades.map((trade) => trade.symbol)))}
         startingBalance={wallet.startingBalance}
-        title={mode === 'real' ? 'Real Money Performance' : 'Testnet Performance'}
+        title={`${mode === 'real' ? 'Real Money Performance' : 'Testnet Performance'}${experimentName ? ` · ${experimentName}` : ''}`}
         unsyncedBalanceNote="Starting balance plus what the AI's trades made — see the Wallet page for the exchange balance."
       />
       <PositionManagerPanel mode={mode} trades={trades} refresh={refresh} />
@@ -69,6 +73,8 @@ function ModeHistory({ mode, ledger, refresh }) {
 
 export function AiTradeHistoryPage() {
   const { ledger, error, loading, refresh } = useAiLedger({ pollMs: 8_000 })
+  const [experiment, setExperiment] = useAiExperiment(ledger?.currentExperiment)
+  const experiments = useMemo(() => listExperiments({ items: ledger?.trades || [], current: ledger?.currentExperiment }), [ledger])
 
   return (
     <div className="grid gap-6">
@@ -77,12 +83,13 @@ export function AiTradeHistoryPage() {
         description="Trades the AI opened from approved pipeline runs, on its own wallets. Separate from the bots' history. Testnet and real money are tracked separately."
       />
       <SubNavTabs tabs={TABS} />
+      {ledger ? <ExperimentPicker experiments={experiments} value={experiment} onChange={setExperiment} /> : null}
       {error && !ledger ? <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">{error}</div> : null}
       {loading && !ledger ? <Panel title="Trade History"><div className="py-8 text-center text-sm text-slate-400">Loading…</div></Panel> : null}
       {ledger ? (
         <Routes>
-          <Route index element={<ModeHistory mode="testnet" ledger={ledger} refresh={refresh} />} />
-          <Route path="real" element={<ModeHistory mode="real" ledger={ledger} refresh={refresh} />} />
+          <Route index element={<ModeHistory mode="testnet" ledger={ledger} refresh={refresh} experiment={experiment} />} />
+          <Route path="real" element={<ModeHistory mode="real" ledger={ledger} refresh={refresh} experiment={experiment} />} />
           <Route path="*" element={<Navigate to="/ai-history" replace />} />
         </Routes>
       ) : null}

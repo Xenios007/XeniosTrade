@@ -92,12 +92,12 @@ function SummaryTable({ summary }) {
  * Shadow outcomes: what every Analyst LONG/SHORT would have done with its own stop/target, whether or not a gate blocked it, so the gates
  * (Market Flow, Critic, Risk Manager) can be judged on many samples. Free (public candles); read-only.
  */
-export function ShadowOutcomesPanel() {
+// `experiment`: the pipeline setting picked on the page (an aiStrategyTag, or 'all'); only its signals are summarized, and its real-money
+// readiness is shown. Without one, the experiment configured now is used.
+export function ShadowOutcomesPanel({ experiment = null }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [showTest, setShowTest] = useState(false)
-  // Only the signals of the strategy configured now (timeframe + switches), which is what the real-money readiness check judges.
-  const [onlyStrategy, setOnlyStrategy] = useState(true)
   // Only signals newer than this many hours (0 = everything). Lets a prompt change be judged on the signals made after it.
   const [sinceHours, setSinceHours] = useState(0)
 
@@ -107,6 +107,7 @@ export function ShadowOutcomesPanel() {
       const params = new URLSearchParams()
       if (refresh) params.set('refresh', '1')
       if (sinceHours > 0) params.set('since', String(Date.now() - sinceHours * 3_600_000))
+      if (experiment && experiment !== 'all') params.set('strategy', experiment)
       const query = params.toString()
       fetch(`/api/ai-trading/shadow${query ? `?${query}` : ''}`)
         .then((response) => response.json().then((payload) => ({ response, payload })))
@@ -119,10 +120,11 @@ export function ShadowOutcomesPanel() {
     load(true)
     const timer = setInterval(() => { if (!document.hidden) load(false) }, 60_000)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [sinceHours])
+  }, [sinceHours, experiment])
 
-  const summary = showTest ? data?.testModeSummary : (onlyStrategy && data?.strategySummary ? data.strategySummary : data?.summary)
-  const readiness = data?.strategySummary?.readiness
+  const allExperiments = experiment === 'all'
+  const summary = showTest ? data?.testModeSummary : (!allExperiments && data?.strategySummary ? data.strategySummary : data?.summary)
+  const readiness = allExperiments ? null : data?.strategySummary?.readiness
   const criticRate = summary?.criticRejectRate
 
   return (
@@ -148,15 +150,7 @@ export function ShadowOutcomesPanel() {
           >
             {showTest ? 'Showing test-mode signals' : 'Showing normal-mode signals'}
           </button>
-          {!showTest && data?.strategy ? (
-            <button
-              type="button"
-              onClick={() => setOnlyStrategy((value) => !value)}
-              className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300 hover:border-white/20"
-            >
-              {onlyStrategy ? `Strategy: ${data.strategy}` : 'All strategies'}
-            </button>
-          ) : null}
+
         </div>
       )}
     >

@@ -10365,8 +10365,8 @@ app.put('/api/ai-trading/config', async (request, response) => {
 })
 
 app.get('/api/ai-trading/runs', async (_request, response) => {
-  const [runs, scanLog] = await Promise.all([getAiTradingRuns(), getAiScanLog()])
-  response.json({ ok: true, runs, scanLog })
+  const [runs, scanLog, config] = await Promise.all([getAiTradingRuns(), getAiScanLog(), getAiTradingConfig()])
+  response.json({ ok: true, runs, scanLog, currentExperiment: aiStrategyTag(config.strategy) })
 })
 
 // One pipeline run for a symbol, including testnet auto-execution. Shared by the Analyze button and the auto-scan
@@ -10694,7 +10694,8 @@ async function runAiScanCycle() {
     })
     const results = {}
     const stamp = Date.now()
-    for (const item of skipped) results[item.symbol] = { at: stamp, outcome: 'skipped', detail: item.reason }
+    const experiment = aiStrategyTag(config.strategy)
+    for (const item of skipped) results[item.symbol] = { at: stamp, outcome: 'skipped', detail: item.reason, strategy: experiment }
     await appendAiScanLog(skipped.map((item) => ({ symbol: item.symbol, ...results[item.symbol] })))
 
     let cycleError = null
@@ -10708,14 +10709,14 @@ async function runAiScanCycle() {
         const run = await performAiTradingRun(symbol, { trigger: 'scan' })
         const saved = shouldPersistScanRun(run)
         if (saved) await appendAiTradingRun(run)
-        results[symbol] = summarizeScanResult(run)
+        results[symbol] = { ...summarizeScanResult(run), strategy: run.strategy || experiment }
         await appendAiScanLog([{ symbol, ...results[symbol], saved, ...(run.testMode ? { testMode: true } : {}) }])
         if (run.execution?.status === 'opened') {
           console.log(`[ai-trading] Auto-scan opened ${run.final.action} ${symbol} on ${run.execution.mode}`)
         }
       } catch (error) {
         cycleError = error instanceof Error ? error.message : String(error)
-        results[symbol] = { at: Date.now(), outcome: 'error', detail: redactSecrets(cycleError).slice(0, 240) }
+        results[symbol] = { at: Date.now(), outcome: 'error', detail: redactSecrets(cycleError).slice(0, 240), strategy: aiStrategyTag(config.strategy) }
         await appendAiScanLog([{ symbol, ...results[symbol], saved: false }])
         console.warn(`[ai-trading] Auto-scan failed for ${symbol}: ${redactSecrets(cycleError)}`)
       } finally {
@@ -11285,28 +11286,38 @@ async function buildAiLedgerView({ force = false } = {}) {
   ])
   const exchangeByMode = { testnet: testnetExchange, real: realExchange }
   const wallets = ['testnet', 'real'].map((mode) => summarizeAiWallet({ mode, trades, config, livePrices, exchange: exchangeByMode[mode] }))
-  const journalWallets = wallets.map((wallet) => {
-    const walletTrades = trades.filter((trade) => trade.walletId === wallet.id)
-    const items = buildJournalItems(walletTrades)
+  const journalFor = (subset) => {
+    const journalWallets = wallets.map((wallet) => {
+      const walletTrades = subset.filter((trade) => trade.walletId === wallet.id)
+      const items = buildJournalItems(walletTrades)
+      return {
+        walletId: wallet.id,
+        walletName: wallet.name,
+        walletColorKey: AI_WALLET_TONES[wallet.mode],
+        assignedSignalModelName: `${AI_MODEL_NAME} · ${wallet.mode === 'real' ? 'Real money' : 'Testnet'}`,
+        items,
+        summary: buildJournalSummary(walletTrades, items),
+        startingBalance: wallet.startingBalance,
+      }
+    })
     return {
-      walletId: wallet.id,
-      walletName: wallet.name,
-      walletColorKey: AI_WALLET_TONES[wallet.mode],
-      assignedSignalModelName: `${AI_MODEL_NAME} · ${wallet.mode === 'real' ? 'Real money' : 'Testnet'}`,
-      items,
-      summary: buildJournalSummary(walletTrades, items),
-      startingBalance: wallet.startingBalance,
+      wallets: journalWallets,
+      availableMonths: Array.from(new Set(journalWallets.flatMap((wallet) => wallet.items.map((item) => String(item.date).slice(0, 7))))).sort((left, right) => right.localeCompare(left)),
     }
-  })
+  }
+  // Each strategy setting is its own experiment with its own journal (trades from before strategies existed are the original 'scalp').
+  const currentExperiment = aiStrategyTag(config.strategy)
+  const experimentTags = new Set([currentExperiment, ...trades.map((trade) => trade.aiStrategy || 'scalp')])
   return {
     ok: true,
     config: config.execution,
+    currentExperiment,
     trades,
     wallets,
     livePrices,
     journal: {
-      wallets: journalWallets,
-      availableMonths: Array.from(new Set(journalWallets.flatMap((wallet) => wallet.items.map((item) => String(item.date).slice(0, 7))))).sort((left, right) => right.localeCompare(left)),
+      ...journalFor(trades),
+      experiments: Object.fromEntries([...experimentTags].map((tag) => [tag, journalFor(trades.filter((trade) => (trade.aiStrategy || 'scalp') === tag))])),
     },
     credentials: {
       testnet: hasExchangeCredentials(settings, TESTNET_WALLET_ENVIRONMENT),

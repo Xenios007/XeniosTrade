@@ -395,3 +395,43 @@ test('risk evidence: swing labels the fast/slow series 1H/4H and the excursion h
   assert.match(text, /in the 24 hours after ANY 1H close/)
   assert.doesNotMatch(text, /5M/)
 })
+
+// ---- experiments (per-strategy journals) --------------------------------------------------------------------------------------------
+
+import { ALL_EXPERIMENTS, describeExperiment, experimentTagOf, filterByExperiment, listExperiments, summarizeExperimentTrades } from '../src/lib/aiExperiments.js'
+
+test('experiments: untagged data is the original 5-agent scalp; tags describe agents, timeframe and switches', () => {
+  assert.equal(experimentTagOf({}), 'scalp')
+  assert.equal(experimentTagOf({ aiStrategy: 'swing+lean' }), 'swing+lean')
+  assert.equal(experimentTagOf({ strategy: 'swing+trend' }), 'swing+trend')
+  assert.equal(describeExperiment('scalp').name, '5-agent Scalp (original)')
+  const lean = describeExperiment('swing+trend+fee+lean+maker')
+  assert.equal(lean.agents, 3)
+  assert.equal(lean.name, '3-agent Swing · trend filter, fee-aware rules, maker entry')
+  assert.match(lean.style, /1H entries, 4H trend, 1D confirmation/)
+})
+
+test('experiments: the options list the running one first (even with no data yet), then by latest activity, then All', () => {
+  const items = [{ strategy: 'scalp', startedAt: 5 }, { aiStrategy: 'swing+lean', transactTime: 9 }, { at: 1 }]
+  const options = listExperiments({ items, current: 'swing+trend+fee+lean+maker' })
+  assert.deepEqual(options.map((item) => item.tag), ['swing+trend+fee+lean+maker', 'swing+lean', 'scalp', ALL_EXPERIMENTS])
+  assert.equal(options[0].current, true)
+  assert.equal(filterByExperiment(items, 'scalp').length, 2)
+  assert.equal(filterByExperiment(items, ALL_EXPERIMENTS).length, 3)
+})
+
+test('experiments: the comparison numbers separate price PnL from estimated fees', () => {
+  const trade = (pnl, extra = {}) => ({ status: 'CLOSED', result: pnl > 0 ? 'TP' : 'SL', pnl, notional: 1000, entryPrice: 100, initialStopLoss: 99, initialTakeProfit: 102, leverage: 5, transactTime: 0, closedAt: 60 * 60_000, ...extra })
+  const stats = summarizeExperimentTrades([trade(2), trade(-1), trade(-1, { status: 'CLOSED_MANUAL', closedBy: 'position-manager', result: 'MANUAL' }), { status: 'OPEN', pnl: 0 }])
+  assert.equal(stats.closed, 3)
+  assert.equal(stats.open, 1)
+  assert.equal(stats.wins, 1)
+  assert.equal(stats.pnl, 0)
+  assert.equal(stats.estFees, 3) // 0.1% of 1000 x 3
+  assert.equal(stats.netPnl, -3)
+  assert.equal(stats.profitFactor, 1)
+  assert.equal(stats.avgStopPct, 1)
+  assert.equal(stats.avgTargetPct, 2)
+  assert.equal(stats.avgHoldMinutes, 60)
+  assert.deepEqual(stats.byExit, { tp: 1, sl: 1, 'position-manager': 1 })
+})

@@ -6,6 +6,8 @@ import {
   AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_SYMBOLS, activeAiTradingAgentIds,
 } from '../lib/aiTrading'
 import { HISTORY_FILTERS, buildHistoryFeed, filterHistoryFeed } from '../lib/aiTradingHistory'
+import { filterByExperiment, listExperiments } from '../lib/aiExperiments'
+import { ExperimentPicker, useAiExperiment } from './aiTrading/ExperimentPicker'
 import { useAiLedger } from '../lib/aiTradingApi'
 import { formatDateTime, formatPrice } from '../lib/formatters'
 import { getTradePnlAmount, isTradeOpen } from '../lib/trades'
@@ -324,6 +326,7 @@ export function AiTradingPage({ settings }) {
   const [runs, setRuns] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
   const [scanLog, setScanLog] = useState([])
+  const [currentExperiment, setCurrentExperiment] = useState(null)
   const { ledger } = useAiLedger({ pollMs: 15_000 })
   const trades = ledger?.trades || []
   const livePrices = ledger?.livePrices || {}
@@ -338,7 +341,7 @@ export function AiTradingPage({ settings }) {
       .then((payload) => { if (!cancelled) { setConfig(payload.config); setScanStatus(payload.scanStatus || null); setBacktestStats(payload.backtestStats); setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null }) } })
       .catch((err) => { if (!cancelled) setError(err.message) })
     requestJson('/api/ai-trading/runs')
-      .then((payload) => { if (!cancelled) { setRuns(payload.runs); setScanLog(payload.scanLog || []); setRunsError('') } })
+      .then((payload) => { if (!cancelled) { setRuns(payload.runs); setScanLog(payload.scanLog || []); setCurrentExperiment(payload.currentExperiment || null); setRunsError('') } })
       .catch((err) => { if (!cancelled) setRunsError(err instanceof Error ? err.message : 'Could not load run history.') })
       .finally(() => { if (!cancelled) setRunsLoading(false) })
     return () => { cancelled = true }
@@ -349,6 +352,7 @@ export function AiTradingPage({ settings }) {
       const payload = await requestJson('/api/ai-trading/runs')
       setRuns(payload.runs)
       setScanLog(payload.scanLog || [])
+      setCurrentExperiment(payload.currentExperiment || null)
       setRunsError('')
     } catch (err) {
       setRunsError(err instanceof Error ? err.message : 'Could not load run history.')
@@ -369,6 +373,13 @@ export function AiTradingPage({ settings }) {
       document.removeEventListener('visibilitychange', refresh)
     }
   }, [reloadRuns])
+
+  // Run History, trades and shadow outcomes are shown per experiment (pipeline setting); the choice is shared with the Journal / Trade History pages.
+  const [experiment, setExperiment] = useAiExperiment(currentExperiment)
+  const experiments = useMemo(() => listExperiments({ items: [...runs, ...scanLog, ...trades], current: currentExperiment }), [runs, scanLog, trades, currentExperiment])
+  const experimentRuns = useMemo(() => filterByExperiment(runs, experiment), [runs, experiment])
+  const experimentScanLog = useMemo(() => filterByExperiment(scanLog, experiment), [scanLog, experiment])
+  const experimentTrades = useMemo(() => filterByExperiment(trades, experiment), [trades, experiment])
 
   const runPipeline = useCallback(async (symbol) => {
     setRunning(true)
@@ -403,8 +414,9 @@ export function AiTradingPage({ settings }) {
           path="history"
           element={(
             <div className="grid gap-6">
-              <HistoryTab runs={runs} scanLog={scanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={trades} livePrices={livePrices} />
-              <ShadowOutcomesPanel />
+              <ExperimentPicker experiments={experiments} value={experiment} onChange={setExperiment} />
+              <HistoryTab runs={experimentRuns} scanLog={experimentScanLog} loading={runsLoading} error={runsError} scanStatus={scanStatus} scanEnabled={config?.scan?.enabled} execution={config?.execution} onExecuted={reloadRuns} onRetry={reloadRuns} trades={experimentTrades} livePrices={livePrices} />
+              <ShadowOutcomesPanel experiment={experiment} />
               <BacktestContext backtestStats={backtestStats} />
             </div>
           )}
