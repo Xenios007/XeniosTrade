@@ -94,6 +94,24 @@ test('a full sign-in for an allowlisted email issues a session and returns to th
   assert.match(res.cookies.at(-1), /Max-Age=0/, 'oauth cookie cleared')
 })
 
+test('issueSession is awaited and receives the verified, lowercased email so the caller can create/look up the account', async () => {
+  const ctx = { nonce: '' }
+  const calls = []
+  const handlers = createGoogleAuthHandlers({
+    env: ENV,
+    buildCookie,
+    parseCookies,
+    // Async on purpose: the real issueSession does a findOrCreateUserByEmail() disk read/write.
+    issueSession: async (response, email) => { await Promise.resolve(); calls.push({ email, hasResponse: Boolean(response) }) },
+    log: { info() {}, warn() {} },
+    fetchImpl: async (url, init) => ({ ok: true, status: 200, json: async () => ({ id_token: jwt(goodClaims(ctx.nonce, { email: 'Owner@Example.COM' })) }), _init: init }),
+  })
+  const b = begin(handlers); ctx.nonce = b.nonce
+  const res = await finish(handlers, b)
+  assert.deepEqual(calls, [{ email: 'owner@example.com', hasResponse: true }])
+  assert.equal(res.location, '/')
+})
+
 test('a verified Google account that is not on the allowlist is rejected, with no session', async () => {
   const ctx = { nonce: '' }
   const { handlers, sessions } = setup({ tokenReply: () => ({ json: { id_token: jwt(goodClaims(ctx.nonce, { email: 'stranger@gmail.com' })) } }) })

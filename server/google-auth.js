@@ -133,7 +133,7 @@ function unpackOauthCookie(secret, value) {
  * @param {NodeJS.ProcessEnv} [deps.env]
  * @param {(name: string, value: string, options?: object) => string} deps.buildCookie
  * @param {(header: string) => Record<string, string>} deps.parseCookies
- * @param {(response: object) => void} deps.issueSession  creates a session + sets its cookie
+ * @param {(response: object, email: string) => Promise<void>} deps.issueSession  looks up/creates the user for `email` and sets their session cookie
  * @param {typeof fetch} [deps.fetchImpl]
  * @param {{ info?: Function, warn?: Function }} [deps.log]
  * @param {() => number} [deps.now]
@@ -256,7 +256,7 @@ export function createGoogleAuthHandlers({
     }
 
     log.info?.(`[google-auth] signed in ${email}`)
-    issueSession(response)
+    await issueSession(response, email)
     response.append('Set-Cookie', oauthCookie('', 0))
     response.redirect(302, sanitizeReturnUrl(pending.returnTo, config.returnHosts))
   }

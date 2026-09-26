@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import dotenv from 'dotenv'
 import { createGoogleAuthHandlers } from './google-auth.js'
+import { findOrCreateUserByEmail, ADMIN_EMAIL, ROLE_ADMIN } from './lib/users-store.js'
 import {
   getStrategyDerivedMaxLossPerTrade,
   getTradeEffectiveStopLoss,
@@ -1636,16 +1637,25 @@ function pruneExpiredAuthSessions() {
   }
 }
 
-function createAuthSession() {
+// `user` is a users-store record ({id, email, role}). Identity is embedded in the session at
+// creation time (not re-read from disk on every request) for the same reason the rest of this
+// file caches settings in memory - this app polls its own API every few seconds from several
+// open pages, and a role only ever changes for the one admin account, so the staleness this
+// trades away (a role change needs a fresh login to take effect) is a good trade against a disk
+// read on every authenticated call.
+function createAuthSession(user) {
   pruneExpiredAuthSessions()
 
   const token = crypto.randomBytes(32).toString('hex')
   const expiresAt = Date.now() + AUTH_SESSION_TTL_MS
-  authSessions.set(token, { expiresAt })
+  authSessions.set(token, { expiresAt, userId: user.id, email: user.email, role: user.role })
 
   return {
     token,
     expiresAt,
+    userId: user.id,
+    email: user.email,
+    role: user.role,
   }
 }
 
@@ -1688,6 +1698,9 @@ function getAuthSessionFromRequest(request) {
   return {
     token,
     expiresAt: session.expiresAt,
+    userId: session.userId,
+    email: session.email,
+    role: session.role,
   }
 }
 
@@ -1741,6 +1754,7 @@ function requireAuthenticatedSession(request, response, next) {
 
   attachAuthSessionCookie(response, session.token, session.expiresAt)
   request.authSession = session
+  request.user = { id: session.userId, email: session.email, role: session.role }
   next()
 }
 
@@ -1811,10 +1825,14 @@ app.get('/api/auth/session', (request, response) => {
   attachAuthSessionCookie(response, session.token, session.expiresAt)
   response.json({
     authenticated: true,
+    user: session.userId ? { email: session.email, role: session.role } : null,
   })
 })
 
-app.post('/api/auth/login', (request, response) => {
+// Password login is the admin/dev override now that Google sign-in creates real per-user
+// accounts (see users-store.js) - there is only one password and it has always meant "you are
+// the operator of this server," so it resolves to the seeded admin account, not a new user.
+app.post('/api/auth/login', async (request, response) => {
   const password = String(request.body?.password || '')
 
   if (!password || !areSecureStringsEqual(password, appLoginPassword)) {
@@ -1825,19 +1843,22 @@ app.post('/api/auth/login', (request, response) => {
     return
   }
 
-  const session = createAuthSession()
+  const admin = await findOrCreateUserByEmail(ADMIN_EMAIL)
+  const session = createAuthSession(admin)
   attachAuthSessionCookie(response, session.token, session.expiresAt)
   response.json({
     ok: true,
     authenticated: true,
+    user: { email: admin.email, role: admin.role },
   })
 })
 
 const googleAuth = createGoogleAuthHandlers({
   buildCookie: buildCookieHeader,
   parseCookies,
-  issueSession: (response) => {
-    const session = createAuthSession()
+  issueSession: async (response, email) => {
+    const user = await findOrCreateUserByEmail(email)
+    const session = createAuthSession(user)
     attachAuthSessionCookie(response, session.token, session.expiresAt)
   },
 })
@@ -1861,13 +1882,30 @@ app.post('/api/auth/logout', (request, response) => {
   })
 })
 
+// Admin-only surfaces: Codex Console (full read access to the project working directory,
+// server/codex-console.js), Consolidated Knowledge (Bot 10's own environment), and AI Training
+// (the operator's personal research/trading space) are not part of what a regular SaaS user
+// gets. This is the real security boundary - hiding the nav link for these elsewhere is a
+// nicety, not a substitute for this check, since a hidden link never stopped a direct request.
+const ADMIN_ONLY_API_PREFIXES = ['/codex-console', '/consolidated', '/bot-10', '/learning-bot']
+
 app.use('/api', (request, response, next) => {
   if (request.path.startsWith('/auth/')) {
     next()
     return
   }
 
-  requireAuthenticatedSession(request, response, next)
+  requireAuthenticatedSession(request, response, () => {
+    if (
+      !authDisabled
+      && request.user?.role !== ROLE_ADMIN
+      && ADMIN_ONLY_API_PREFIXES.some((prefix) => request.path === prefix || request.path.startsWith(`${prefix}/`))
+    ) {
+      response.status(403).json({ error: 'Admin only.', code: 'ADMIN_REQUIRED' })
+      return
+    }
+    next()
+  })
 })
 
 async function ensureDir() {
