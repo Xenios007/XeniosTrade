@@ -20,6 +20,24 @@ function Metric({label,value,detail}) {
     <p className='mt-2 text-xs leading-5 text-slate-500'>{detail}</p>
   </div>
 }
+// Aggregates a bot 10 trade list (testnet or paper) into count/win-loss/PnL. `netPnl` is null on a testnet trade
+// whose exit fills could not be fully reconciled (EXTERNALLY_CLOSED_REVIEW) - those count toward `count` but are
+// excluded from win/loss/PnL rather than silently treated as a loss.
+function tradeSummary(trades=[]) {
+  const resolved=trades.filter(t=>Number.isFinite(t.netPnl))
+  const wins=resolved.filter(t=>t.netPnl>0),losses=resolved.filter(t=>t.netPnl<=0)
+  const total=resolved.reduce((sum,t)=>sum+Number(t.netPnl),0)
+  return {count:trades.length,resolvedCount:resolved.length,wins:wins.length,losses:losses.length,
+    winRate:resolved.length?wins.length/resolved.length:null,total,avg:resolved.length?total/resolved.length:null}
+}
+function TradeSummaryStrip({summary,unit='USDT'}) {
+  return <div className='mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4'>
+    <Metric label='Trades' value={number(summary.count,0)} detail={summary.count>summary.resolvedCount?`${summary.count-summary.resolvedCount} unresolved`:'All resolved'}/>
+    <Metric label='Win rate' value={percent(summary.winRate)} detail={`${summary.wins}W / ${summary.losses}L`}/>
+    <Metric label='Net P&L' value={summary.resolvedCount?`${summary.total>=0?'+':''}${number(summary.total,4)} ${unit}`:'—'} detail='Sum of resolved trades'/>
+    <Metric label='Avg / trade' value={summary.avg!=null?`${summary.avg>=0?'+':''}${number(summary.avg,4)} ${unit}`:'—'} detail='Net P&L ÷ resolved trades'/>
+  </div>
+}
 function StatsRow({label,stats}) {
   return <tr className='border-t border-white/5'><td className='py-3 pr-4 text-slate-300'>{label}</td>
     <td>{number(stats?.trades,0)}</td><td>{percent(stats?.winRate)}</td>
@@ -128,6 +146,7 @@ export function ConsolidatedBotPage() {
     </Panel>}
     {data.testnet&&<Panel title='Bot 10 · Actual Binance Futures testnet trades'>
       <p className='mb-4 text-sm leading-6 text-slate-400'>One position, 1x isolated leverage, 100 USDT maximum notional, 1 USDT modeled stop risk. At most three trades and 3 USDT realized losses per UTC day. Gaps can exceed the risk estimate. Existing symbol exposure blocks entry. Pausing retains position monitoring. Enabled testnet entries resume after restart.</p>
+      <TradeSummaryStrip summary={tradeSummary(data.testnet.trades)}/>
       <button className={button} disabled={disabled||data.testnet.busy} onClick={()=>act('/api/consolidated/testnet',{enabled:!data.testnet.enabled})}>{data.testnet.enabled?'Pause testnet entries':'Enable actual testnet trades'}</button>
       <p className='mt-4 text-sm text-sky-200'>{data.testnet.enabled?'Enabled — awaiting qualifying signals':'Entries paused'} · {data.testnet.endpoint}</p>
       {data.testnet.error&&<p role='alert' className='mt-3 text-sm text-amber-300'>{data.testnet.error}</p>}
@@ -146,6 +165,7 @@ export function ConsolidatedBotPage() {
     </Panel>}
     {tab==='paper'&&<Panel title='Separate paper account'>
       <p className='mb-5 text-sm leading-6 text-slate-400'>One position at a time. Simulated entry at a fresh bar open, protective stop and target inherited from the source bot, 48-hour maximum hold, modeled costs on both sides. Pausing stops new entries; an existing position continues to be monitored. The paper account is separate from your eight wallets.</p>
+      <TradeSummaryStrip summary={tradeSummary(s.trades)}/>
       {s.position?<div className='rounded-xl border border-sky-400/20 bg-sky-400/5 p-4 text-sm text-slate-300'>
         <p className='font-medium text-white'>{s.position.side} {s.position.symbol} · {number(s.position.notional,2)} USDT notional</p>
         <p className='mt-2'>Entry {number(s.position.entryPrice,8)} · stop {number(s.position.stopLoss,8)} · target {number(s.position.takeProfit,8)}</p>
