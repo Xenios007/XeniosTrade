@@ -1898,8 +1898,9 @@ export default function App() {
             <Route path="/dashboard/*" element={renderDashboard()} />
             <Route path="/mock-trading/*" element={renderMockTrading()} />
             <Route path="/ai-training/*" element={renderLearningBot()} />
-            <Route path="/bot-10" element={<ConsolidatedBotPage />} />
-            <Route path="/consolidated-bot" element={<Navigate to="/bot-10" replace />} />
+            <Route path="/consolidated-knowledge" element={<ConsolidatedBotPage />} />
+            <Route path="/bot-10" element={<Navigate to="/consolidated-knowledge" replace />} />
+            <Route path="/consolidated-bot" element={<Navigate to="/consolidated-knowledge" replace />} />
             <Route path="/wallets" element={renderWallets()} />
             <Route path="/journal/*" element={renderJournal()} />
             <Route path="/trade-history/*" element={renderTradeHistory()} />
@@ -1907,7 +1908,7 @@ export default function App() {
           </>
         ) : (
           // ai.*: the bot pages live on bot.* now.
-          [...BOT_ROUTE_SECTIONS, 'bot-10', 'consolidated-bot'].map((section) => (
+          [...BOT_ROUTE_SECTIONS, 'consolidated-knowledge', 'bot-10', 'consolidated-bot'].map((section) => (
             <Route
               key={section}
               path={`/${section}/*`}

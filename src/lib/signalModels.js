@@ -188,9 +188,9 @@ const model9Signals = [
 ]
 
 const model10Signals = [
-  { key: 'c-source-ready', label: 'A Bot 1–8 source setup is ready', detail: 'Bot 10 never invents a trade. A source engine must first emit a closed-candle setup.' },
+  { key: 'c-source-ready', label: 'A Bot 1–8 source setup is ready', detail: 'It never invents a trade. A source engine must first emit a closed-candle setup.' },
   { key: 'c-frozen-selector', label: 'Frozen expected-R selector accepts it', detail: 'Entry-time features, source identity and stop distance must pass the stored selector.' },
-  { key: 'c-ranked-candidate', label: 'Best eligible source candidate is ranked first', detail: 'Bot 10 selects one eligible candidate deterministically rather than combining positions.' },
+  { key: 'c-ranked-candidate', label: 'Best eligible source candidate is ranked first', detail: 'It selects one eligible candidate deterministically rather than combining positions.' },
   { key: 'c-testnet-guardrails', label: 'Separate testnet risk guardrails pass', detail: 'Exchange position, protective-order, daily-loss, size and freshness checks must all pass.' },
 ]
 
@@ -625,12 +625,12 @@ export const SIGNAL_MODELS = [
   },
   {
     id: 'model-10',
-    name: 'Bot 10',
-    tag: 'Consolidated Knowledge',
+    name: 'Consolidated Knowledge',
+    tag: 'Frozen Evidence Selector',
     status: 'experimental',
     strategyFamily: 'consolidated-selector',
-    description: 'The separate Bot 10 selector ranks eligible source setups from Bots 1–8 using its frozen entry-time model. It has its own wallet card and testnet ledger, but never duplicates ordinary wallet execution.',
-    executionRule: 'A source Bot 1–8 setup must be ready, accepted by the frozen selector, ranked first, current on the latest bar, and pass Bot 10’s separate Binance Futures Testnet safety checks.',
+    description: 'A separate selector that ranks eligible source setups from Bots 1–8 using its frozen entry-time model. It lives in its own environment with its own testnet ledger — see its own page — and never duplicates ordinary wallet execution.',
+    executionRule: 'A source Bot 1–8 setup must be ready, accepted by the frozen selector, ranked first, current on the latest bar, and pass its separate Binance Futures Testnet safety checks.',
     minimumScore: 4,
     totalSignals: model10Signals.length,
     professionalSignalCount: 0,
@@ -707,6 +707,21 @@ export const SIGNAL_MODELS = [
     fixedUniverseSymbols: LLM_TRADE_FIXED_UNIVERSE_SYMBOLS,
   },
 ]
+
+// UI-only exclusions — the models themselves, their dispatch code, and any already-recorded trade referencing
+// them are untouched, so a historical trade still resolves its bot name correctly via getSignalModel/getSignalModelName.
+// Only pickers/grids that offer "which bot" as a live choice read this.
+//  - model-10 (Consolidated Knowledge) lives in its own environment (own page, own testnet ledger, shares no wallet
+//    with Bots 1-9) — it never belongs in the ordinary bot grid/picker, not even once it is used again.
+//  - model-11..15 (the LLM-per-bot family: Bot Claude/GPT/Gemini/Grok/OpenRouter) are pure noise right now: none are
+//    enabled, and their environment is getting reworked before they are worth showing anyone. Nothing about their
+//    code changed — see ai-trading-strategy-switches memory / SESSION_LOG for when to bring them back.
+export const SEPARATE_ENVIRONMENT_MODEL_IDS = ['model-10']
+export const HIDDEN_MODEL_IDS = ['model-11', 'model-12', 'model-13', 'model-14', 'model-15']
+
+export function visibleSignalModels(models = SIGNAL_MODELS) {
+  return models.filter((model) => !SEPARATE_ENVIRONMENT_MODEL_IDS.includes(model.id) && !HIDDEN_MODEL_IDS.includes(model.id))
+}
 
 export function getSignalModel(modelId) {
   return SIGNAL_MODELS.find((model) => model.id === modelId) || SIGNAL_MODELS[0]

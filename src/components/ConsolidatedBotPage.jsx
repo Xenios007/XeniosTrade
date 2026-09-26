@@ -54,13 +54,13 @@ export function ConsolidatedBotPage() {
     setWorking(true);setError('')
     try {await request(url,body);await refresh()} catch(e){setError(e.message)} finally {setWorking(false)}
   }
-  if(!data) return <div><PageHeader title='Bot 10 · Consolidated Knowledge' description='Loading the frozen evidence selector built from Bots 1–8.'/>
+  if(!data) return <div><PageHeader title='Consolidated Knowledge' description='Loading the frozen evidence selector built from Bots 1–8.'/>
     {error?<p role='alert' className='text-rose-300'>{error}</p>:<p className='text-slate-400'>Loading…</p>}
     <button className={`${button} mt-4`} onClick={refresh}>Retry</button></div>
   const {report:r,state:s}=data, disabled=working||data.busy
   const approved=(r.leaves||[]).filter(l=>l.accepted)
   return <div className='space-y-6'>
-    <PageHeader title='Bot 10 · Consolidated Knowledge' description='Bots 1–8 supply setups. Bot 10 applies the frozen evidence selector and owns its separate testnet ledger.' actions={<>
+    <PageHeader title='Consolidated Knowledge' description='A separate environment, not one of the wallets: Bots 1–8 supply setups, this applies a frozen evidence selector to rank them, and it owns its own testnet ledger.' actions={<>
       <button className={button} disabled={disabled} onClick={()=>act('/api/consolidated/scan',{})}><RefreshCw size={15} className={disabled?'animate-spin':''}/>Scan signals</button>
       <button className={button} disabled={disabled} onClick={()=>act('/api/consolidated/paper',{enabled:!s.enabled})}>
         {s.enabled?<Pause size={15}/>:<Play size={15}/>} {s.enabled?'Pause paper entries':'Start paper research'}</button>
@@ -87,9 +87,9 @@ export function ConsolidatedBotPage() {
         <div className='overflow-x-auto'><table className='w-full min-w-[680px] text-left text-sm tabular-nums text-slate-400'>
           <thead className='text-xs text-slate-500'><tr><th className='pb-3'>Sample</th><th>Trades</th><th>Win rate</th><th>Mean net R</th><th>Profit factor</th><th>Approx. 95% interval</th></tr></thead>
           <tbody><StatsRow label='All source opportunities · final year' stats={r.baseline.holdout}/>
-            <StatsRow label='Bot 10 · validation' stats={r.consolidated.validation}/>
-            <StatsRow label='Bot 10 · final year' stats={r.consolidated.holdout}/>
-            <StatsRow label='Bot 10 · higher trading costs' stats={r.consolidated.holdoutStress}/></tbody>
+            <StatsRow label='Validation' stats={r.consolidated.validation}/>
+            <StatsRow label='Final year' stats={r.consolidated.holdout}/>
+            <StatsRow label='Higher trading costs' stats={r.consolidated.holdoutStress}/></tbody>
         </table></div>
         <p className='mt-4 text-xs leading-5 text-slate-500'>R measures return per unit of original stop risk. Stress adds 16 basis points of round-trip cost. Day-clustered intervals account for some correlated outcomes. These are sampled signal results, not a complete portfolio equity curve.</p>
       </Panel>
@@ -124,8 +124,8 @@ export function ConsolidatedBotPage() {
       </Panel>
     </>}
     {tab==='signals'&&<Panel title='Current source signals' action={<span className='text-xs text-slate-500'>{time(s.lastScanAt)}</span>}>
-      <p className='mb-5 text-sm text-slate-400'>Scanning {s.symbols.join(', ')} with the original eight signal engines and training-matched closed candle windows. Bot 10 does not replace them: it ranks their valid setups. Missing funding disables funding-dependent setups. Each pattern score is a training estimate, not a guaranteed return.</p>
-      {!s.signals.length&&<div className='py-10 text-center text-slate-500'><Bot className='mx-auto mb-3'/>Run a scan to inspect the eight Bot 10 source engines.</div>}
+      <p className='mb-5 text-sm text-slate-400'>Scanning {s.symbols.join(', ')} with the original eight signal engines and training-matched closed candle windows. It does not replace them: it ranks their valid setups. Missing funding disables funding-dependent setups. Each pattern score is a training estimate, not a guaranteed return.</p>
+      {!s.signals.length&&<div className='py-10 text-center text-slate-500'><Bot className='mx-auto mb-3'/>Run a scan to inspect the eight source engines.</div>}
       <div className='grid gap-3 lg:grid-cols-2'>{s.signals.map(c=><details key={`${c.symbol}-${c.sourceBot}`} className='rounded-xl border border-white/10 bg-slate-950/30 p-4'>
         <summary className='flex cursor-pointer list-none items-center justify-between gap-3'><span className='text-sm text-white'>{c.symbol} · Bot {c.sourceBot.split('-')[1]}</span>
           <span className={`text-xs ${c.selection.accepted?'text-emerald-300':'text-slate-500'}`}>{c.selection.accepted?`${c.direction} · paper candidate`:'WAIT'} <ChevronDown className='inline' size={14}/></span></summary>
@@ -135,7 +135,7 @@ export function ConsolidatedBotPage() {
       </details>)}</div>
       {s.errors?.map(e=><p key={e.symbol} className='mt-3 text-sm text-amber-300'>{e.symbol}: {e.error}</p>)}
     </Panel>}
-    {tab==='rules'&&<Panel title='Bot 10 frozen entry rules' action={<GitBranch size={18} className='text-sky-300'/>}>
+    {tab==='rules'&&<Panel title='Frozen entry rules' action={<GitBranch size={18} className='text-sky-300'/>}>
       <p className='mb-5 text-sm leading-6 text-slate-400'>An original bot must first produce a valid setup. Its source identity, stop distance, and closed 5M / 15M / 1H features then pass through this tree. A pattern must exceed {number(r.threshold)} expected R in training. These rules remain experimental because the combined selector failed validation.</p>
       <div className='space-y-4'>{approved.map(l=><details key={l.id} className='rounded-xl border border-white/10 p-4'>
         <summary className='cursor-pointer text-sm text-white'>Pattern {l.id} · {l.trainingSamples} training samples · {number(l.expectedR)} expected R</summary>
@@ -144,7 +144,7 @@ export function ConsolidatedBotPage() {
       </details>)}</div>
       <p className='mt-5 break-all font-mono text-xs text-slate-600'>Source fingerprint: {r.sourceHash}</p>
     </Panel>}
-    {data.testnet&&<Panel title='Bot 10 · Actual Binance Futures testnet trades'>
+    {data.testnet&&<Panel title='Actual Binance Futures testnet trades'>
       <p className='mb-4 text-sm leading-6 text-slate-400'>One position, 1x isolated leverage, 100 USDT maximum notional, 1 USDT modeled stop risk. At most three trades and 3 USDT realized losses per UTC day. Gaps can exceed the risk estimate. Existing symbol exposure blocks entry. Pausing retains position monitoring. Enabled testnet entries resume after restart.</p>
       <TradeSummaryStrip summary={tradeSummary(data.testnet.trades)}/>
       <button className={button} disabled={disabled||data.testnet.busy} onClick={()=>act('/api/consolidated/testnet',{enabled:!data.testnet.enabled})}>{data.testnet.enabled?'Pause testnet entries':'Enable actual testnet trades'}</button>
@@ -157,7 +157,7 @@ export function ConsolidatedBotPage() {
         <p>Protection: {data.testnet.position.protection} · Unrealized {number(data.testnet.position.unrealizedPnl,4)} USDT</p>
         <button className={`${button} mt-3`} disabled={disabled||data.testnet.busy} onClick={()=>act('/api/consolidated/testnet/close',{})}>Close position now</button>
         <p className='mt-2 text-xs text-slate-500'>Exits immediately at market instead of waiting for the stop, target, or the {'48h'} timeout. This symbol is unavailable to other bots/AI Trading on this shared testnet account until it closes.</p>
-      </div>:<p className='mt-4 text-slate-500'>No open Bot 10 testnet position.</p>}
+      </div>:<p className='mt-4 text-slate-500'>No open testnet position.</p>}
       <div className='mt-5 overflow-x-auto'><table className='w-full text-left text-sm text-slate-400'>
         <thead><tr><th>Closed</th><th>Symbol</th><th>Source</th><th>Status</th><th>Exchange net P&amp;L</th></tr></thead>
         <tbody>{data.testnet.trades.slice(0,100).map(t=><tr key={t.clientId} className='border-t border-white/5'><td className='py-3'>{time(t.closedAt)}</td><td>{t.symbol}</td><td>{t.sourceBot}</td><td>{t.status}</td><td>{number(t.netPnl,4)} USDT</td></tr>)}</tbody>

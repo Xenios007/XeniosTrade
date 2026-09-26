@@ -20,7 +20,7 @@ function workspaceRedirectFor(pathname) {
   if (section === 'ai-trading' || section === 'ai-models') {
     return getModeUrl(APP_MODE_AI, pathname)
   }
-  if (SECTIONS_BY_MODE[APP_MODE_BOT].includes(section) || section === 'bot-10' || section === 'consolidated-bot') {
+  if (SECTIONS_BY_MODE[APP_MODE_BOT].includes(section) || section === 'consolidated-knowledge' || section === 'bot-10' || section === 'consolidated-bot') {
     return getModeUrl(APP_MODE_BOT, pathname)
   }
   return null

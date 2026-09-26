@@ -2,7 +2,7 @@ import { ArrowUpDown, Bot, ListFilter } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { formatDateTime, formatPercent, formatPrice } from '../lib/formatters'
 import { getMarginModeLabel } from '../lib/marginModes'
-import { SIGNAL_MODELS } from '../lib/signalModels'
+import { visibleSignalModels } from '../lib/signalModels'
 import {
   formatTradeSource,
   getTradePnlAmount,
@@ -40,7 +40,7 @@ const TRADE_STATUS_SORT_ORDER = {
 
 const TRADE_BOT_FILTER_OPTIONS = [
   { id: 'all', label: 'All Bots' },
-  ...SIGNAL_MODELS.map((model) => ({ id: model.id, label: model.name })),
+  ...visibleSignalModels().map((model) => ({ id: model.id, label: model.name })),
 ]
 
 const TRADE_STATUS_FILTER_OPTIONS = [

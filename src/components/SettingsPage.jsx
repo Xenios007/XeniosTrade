@@ -23,7 +23,7 @@ import {
   getSignalModel,
   normalizeSignalModelStrategies,
   resolveBot3RiskPresetId,
-  SIGNAL_MODELS,
+  visibleSignalModels,
 } from '../lib/signalModels'
 import { VOLATILE_MARKET_SYMBOL_LIMIT } from '../lib/tradingConfig'
 import { formatAutoTradeSessionRange } from '../lib/tradingSessions'
@@ -713,7 +713,7 @@ export function SettingsPage({
   )
 
   const comparisonModels = useMemo(() => (
-    SIGNAL_MODELS.map((signalModel) => {
+    visibleSignalModels().map((signalModel) => {
       const modelId = signalModel.id
       const model = getSignalModel(modelId)
       const wallet = wallets.find((item) => item.assignedSignalModelId === modelId) || null

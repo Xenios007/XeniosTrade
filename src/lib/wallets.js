@@ -121,7 +121,7 @@ const DEFAULT_WALLET_BLUEPRINTS = [
     id: 'wallet-model-10',
     kind: BOT_WALLET_KIND,
     environment: TESTNET_WALLET_ENVIRONMENT,
-    name: 'Wallet 10 — Consolidated',
+    name: 'Consolidated Knowledge',
     assignedSignalModelId: 'model-10',
     colorKey: 'blue',
     allocationBalance: 100,
@@ -443,6 +443,16 @@ export function getRealMoneyWallet(wallets = []) {
 
 export function getTradingWallets(wallets = []) {
   return normalizeWallets(wallets).filter((wallet) => isTradingWallet(wallet))
+}
+
+// UI-only exclusions matching signalModels.js's SEPARATE_ENVIRONMENT_MODEL_IDS / HIDDEN_MODEL_IDS - see that file for
+// why. Nothing here changes allocation totals, settings persistence, or wallet indices; it only trims what a
+// picker/grid renders.
+const SEPARATE_ENVIRONMENT_WALLET_IDS = ['wallet-model-10']
+const HIDDEN_WALLET_IDS = ['wallet-model-11', 'wallet-model-12', 'wallet-model-13', 'wallet-model-14', 'wallet-model-15']
+
+export function visibleTradingWallets(wallets = []) {
+  return getTradingWallets(wallets).filter((wallet) => !SEPARATE_ENVIRONMENT_WALLET_IDS.includes(wallet.id) && !HIDDEN_WALLET_IDS.includes(wallet.id))
 }
 
 export function getWalletEffectiveStartingBalance(wallet = {}) {

@@ -138,7 +138,7 @@ export function registerConsolidatedBot(app, { dataDir, fetchKlines, toCandleDat
   // state and execution implementation so no active testnet state is lost.
   const statusHandler=wrap(async(_req,res)=>{
     await loadState();const report=await read('report.json')
-    res.json({botId:'model-10',botName:'Bot 10 · Consolidated Knowledge',sourceBots:SOURCE_BOTS,report,state,busy,error:lastError,testnet:testnet?await testnet.status():null})
+    res.json({botId:'model-10',botName:'Consolidated Knowledge',sourceBots:SOURCE_BOTS,report,state,busy,error:lastError,testnet:testnet?await testnet.status():null})
   })
   app.get('/api/consolidated',statusHandler)
   app.get('/api/bot-10',statusHandler)
