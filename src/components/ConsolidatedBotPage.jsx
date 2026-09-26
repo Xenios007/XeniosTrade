@@ -136,6 +136,8 @@ export function ConsolidatedBotPage() {
         <p>{data.testnet.position.side} {data.testnet.position.symbol} · Quantity {number(data.testnet.position.quantity,8)}</p>
         <p>Fill {number(data.testnet.position.entryPrice,8)} · Stop {number(data.testnet.position.stopLoss,8)} · Target {number(data.testnet.position.takeProfit,8)}</p>
         <p>Protection: {data.testnet.position.protection} · Unrealized {number(data.testnet.position.unrealizedPnl,4)} USDT</p>
+        <button className={`${button} mt-3`} disabled={disabled||data.testnet.busy} onClick={()=>act('/api/consolidated/testnet/close',{})}>Close position now</button>
+        <p className='mt-2 text-xs text-slate-500'>Exits immediately at market instead of waiting for the stop, target, or the {'48h'} timeout. This symbol is unavailable to other bots/AI Trading on this shared testnet account until it closes.</p>
       </div>:<p className='mt-4 text-slate-500'>No open Bot 10 testnet position.</p>}
       <div className='mt-5 overflow-x-auto'><table className='w-full text-left text-sm text-slate-400'>
         <thead><tr><th>Closed</th><th>Symbol</th><th>Source</th><th>Status</th><th>Exchange net P&amp;L</th></tr></thead>

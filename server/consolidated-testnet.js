@@ -228,5 +228,27 @@ export function createConsolidatedTestnet({dataDir,getCredentials,transport=fetc
   }
   const isReserved=async symbol=>{await load();return state.position?.symbol===symbol || state.pending?.symbol===symbol}
   const tick=(signal=null,modelHash=null)=>withEntryLock(()=>tickUnlocked(signal,modelHash))
-  return {status,configure,connection,tick,isReserved,withEntryLock}
+  // Manual close: the operator asked to exit right now rather than wait for stop/target/timeout. Reuses the same
+  // flatten() the automatic paths use (a tracked reduce-only market order), then reconcile() immediately records the
+  // fill as a closed trade instead of waiting for the next scan tick to notice the position is gone.
+  async function closeNow() {
+    return withEntryLock(async () => {
+      if (busy) throw new Error('Testnet reconciliation is active; try again shortly')
+      busy = true
+      try {
+        await load()
+        if (!state.position) throw new Error('No open Bot 10 testnet position to close')
+        await flatten(state.position, 'MANUAL')
+        await reconcile()
+        lastError = null
+        return status()
+      } catch (e) {
+        lastError = e.message
+        throw e
+      } finally {
+        busy = false
+      }
+    })
+  }
+  return {status,configure,connection,tick,isReserved,withEntryLock,closeNow}
 }

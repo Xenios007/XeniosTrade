@@ -158,6 +158,13 @@ export function registerConsolidatedBot(app, { dataDir, fetchKlines, toCandleDat
     if(busy)throw new Error('Wait for the current signal scan to finish')
     res.json({testnet:await testnet.configure(req.body?.enabled)})
   }))
+  // Exits the current Bot 10 testnet position right now with a reduce-only market order, instead of waiting for its
+  // stop, target, or the 48h timeout. Independent of the paper-only `busy` scan lock above (its own lock inside
+  // testnet.closeNow guards against colliding with an in-flight signal entry).
+  app.post('/api/consolidated/testnet/close',wrap(async(_req,res)=>{
+    if(!testnet)throw new Error('Testnet execution is not installed on this runtime')
+    res.json({testnet:await testnet.closeNow()})
+  }))
   if(autostart) {
     const timer=setInterval(async()=>{
       try {
