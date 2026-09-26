@@ -87,6 +87,22 @@ test('stale plans and price drift are refused', () => {
   rejects(base({ livePrice: 98.5, run: makeRun({ final: { ...makeRun().final, trade: { ...makeRun().final.trade, stopLoss: 98.6 } } }) }), /beyond/)
 })
 
+test('stale-plan window follows the run\'s entry timeframe, not a flat scalp-era number', () => {
+  const swingRun = () => makeRun({ timeframe: 'swing' })
+  // 45 min old: stale for scalp (30 min ceiling) but well inside a swing plan's 4h testnet window.
+  rejects(base({ now: NOW + 45 * 60_000 }), /min old/)
+  assertCanExecute(base({ run: swingRun(), now: NOW + 45 * 60_000 }))
+  assertCanExecute(base({ run: swingRun(), now: NOW + 3 * 60 * 60_000 + 59 * 60_000 }))
+  rejects(base({ run: swingRun(), now: NOW + 4 * 60 * 60_000 + 60_000 }), /min old.*240 min/)
+  // real money: swing gets a shorter window than testnet at the same timeframe, but still far past the old flat 10 min.
+  const armed = config({ mode: 'real', realArmed: true })
+  assertCanExecute(base({ run: swingRun(), mode: 'real', config: armed, confirm: 'BTCUSDT', now: NOW + 15 * 60_000 }))
+  assertCanExecute(base({ run: swingRun(), mode: 'real', config: armed, confirm: 'BTCUSDT', now: NOW + 90 * 60_000 }))
+  rejects(base({ run: swingRun(), mode: 'real', config: armed, confirm: 'BTCUSDT', now: NOW + 121 * 60_000 }), /min old.*120 min/)
+  // an unrecognized/missing timeframe behaves exactly like the original scalp-only code (old saved runs).
+  rejects(base({ run: makeRun({ timeframe: undefined }), now: NOW + 31 * 60_000 }), /min old.*30 min/)
+})
+
 test('real money: needs real mode, the arm switch, a fresh plan, and the typed symbol unless auto-execute is on', () => {
   const armed = config({ mode: 'real', realArmed: true })
   const real = (over = {}) => base({ mode: 'real', config: armed, confirm: 'BTCUSDT', ...over })
