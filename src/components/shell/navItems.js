@@ -9,6 +9,7 @@ import {
   Settings,
   Wallet,
   Layers,
+  Store,
 } from 'lucide-react'
 import { APP_META, APP_MODE, APP_MODE_AI, APP_MODE_ALL, SECTIONS_BY_MODE, isAiModelsTabVisible } from '../../lib/appMode.js'
 
@@ -23,7 +24,6 @@ export const NAV_GROUPS = [
         children: [
           { to: '/dashboard', label: 'Overview' },
           { to: '/dashboard/market', label: 'Market' },
-          { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
           { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
           { to: '/dashboard/workflow', label: 'Workflow Notifications' },
           { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
@@ -35,7 +35,6 @@ export const NAV_GROUPS = [
         label: 'Mock Trading',
         Icon: Bot,
         children: [
-          { to: '/mock-trading', label: 'Overview' },
           { to: '/mock-trading/signal-models', label: 'Signal Models' },
           { to: '/mock-trading/auto-trade-controller', label: 'Auto Trade Controller' },
           { to: '/mock-trading/auto-trade-activity', label: 'Auto Trade Activity' },
@@ -101,6 +100,7 @@ export const NAV_GROUPS = [
     label: 'Config',
     items: [
       { to: '/wallets', label: 'Wallets', Icon: Wallet },
+      { to: '/signals-marketplace', label: 'Signals Marketplace', Icon: Store },
       {
         to: '/ai-models',
         label: 'AI Models',
@@ -180,6 +180,31 @@ export function getNavGroups(mode = APP_MODE) {
           : item
       )),
   })).filter((group) => group.items.length > 0)
+}
+
+// SaaS Phase 4: Codex Console, Consolidated Knowledge, and AI Training are admin-only (the
+// server already 403s their API routes for anyone else - see ADMIN_ONLY_API_PREFIXES in
+// mock-trading-server.js). This is the nav half: hide the links so a regular user never sees
+// a dead end. Consolidated Knowledge is its own top-level group; AI Training is a top-level
+// item inside "Analysis"; Codex Console is a child link under Dashboard.
+export function filterAdminOnlyNav(groups, isAdmin) {
+  if (isAdmin) {
+    return groups
+  }
+
+  return groups
+    .filter((group) => group.label !== 'Consolidated Knowledge')
+    .map((group) => ({
+      ...group,
+      items: group.items
+        .filter((item) => item.to !== '/ai-training')
+        .map((item) => (
+          item.children
+            ? { ...item, children: item.children.filter((child) => child.to !== '/dashboard/codex') }
+            : item
+        )),
+    }))
+    .filter((group) => group.items.length > 0)
 }
 
 export const NAV_ITEMS = NAV_GROUPS.flatMap((group) => group.items)

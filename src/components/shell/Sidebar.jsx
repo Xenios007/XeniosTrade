@@ -3,10 +3,10 @@ import { ArrowUpRight, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
 import { BrandMark } from '../BrandMark'
 import { usePersistentBoolean } from '../../lib/usePersistentBoolean'
 import { APP_META, APP_MODE, APP_MODE_AI, APP_MODE_BOT, getModeUrl } from '../../lib/appMode'
-import { getNavGroups } from './navItems'
+import { filterAdminOnlyNav, getNavGroups } from './navItems'
 
 const SIDEBAR_COLLAPSED_KEY = 'xeniostrade:sidebar:collapsed'
-const NAV_GROUPS = getNavGroups(APP_MODE)
+const ALL_NAV_GROUPS = getNavGroups(APP_MODE)
 const BRAND = APP_META[APP_MODE]
 
 // Each workspace links to the other one. Null on the apex/dev hosts, where
@@ -62,7 +62,9 @@ function NavSubItem({ to, label, onNavigate }) {
   )
 }
 
-function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showClose }) {
+function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showClose, isAdmin }) {
+  const navGroups = filterAdminOnlyNav(ALL_NAV_GROUPS, isAdmin)
+
   return (
     <div className="flex h-full flex-col">
       <div className={`flex items-center gap-3 px-4 py-5 ${collapsed ? 'justify-center px-2' : ''}`}>
@@ -86,7 +88,7 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
       </div>
 
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 pb-4">
-        {NAV_GROUPS.map((group) => (
+        {navGroups.map((group) => (
           <div key={group.label} className="space-y-1">
             {!collapsed ? (
               <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-600">
@@ -134,7 +136,7 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
   )
 }
 
-export function Sidebar({ mobileOpen, onClose }) {
+export function Sidebar({ mobileOpen, onClose, isAdmin = false }) {
   const [collapsed, setCollapsed] = usePersistentBoolean(SIDEBAR_COLLAPSED_KEY, false)
   const toggleCollapsed = () => setCollapsed((current) => !current)
 
@@ -149,6 +151,7 @@ export function Sidebar({ mobileOpen, onClose }) {
         <SidebarBody
           collapsed={collapsed}
           onToggleCollapsed={toggleCollapsed}
+          isAdmin={isAdmin}
         />
       </aside>
 
@@ -167,6 +170,7 @@ export function Sidebar({ mobileOpen, onClose }) {
               onNavigate={onClose}
               onClose={onClose}
               showClose
+              isAdmin={isAdmin}
             />
           </aside>
         </div>

@@ -519,6 +519,27 @@ test('callAgentJson: OpenAI-compatible providers get JSON mode, a bearer key, an
   )
 })
 
+test('callAgentJson: credentialOverride bypasses the shared admin-only credential mirror entirely (SaaS Phase 3 AI Signals)', async () => {
+  const { setAiProviderCredentialsStore } = await import('../server/strategy/ai-provider-credentials-store.js')
+  const { callAgentJson } = await import('../server/ai-trading/llm.js')
+
+  await withFakeProvider(() => ({ payload: { choices: [{ message: { content: '{"accept":true}' } }] } }), async (baseUrl, requests) => {
+    // The shared mirror is empty/wrong on purpose - a real per-user call must never read it.
+    setAiProviderCredentialsStore({ custom: { apiKey: 'wrong-key', baseUrl: 'http://127.0.0.1:1', model: 'wrong-model' } })
+    const result = await callAgentJson({
+      providerId: 'custom',
+      systemPrompt: 's',
+      userPrompt: 'u',
+      credentialOverride: { apiKey: 'the-users-own-key', baseUrl, model: 'the-users-own-model' },
+    })
+    assert.deepEqual(result.json, { accept: true })
+    assert.equal(result.model, 'the-users-own-model')
+    assert.equal(requests[0].headers.authorization, 'Bearer the-users-own-key')
+  })
+
+  setAiProviderCredentialsStore({})
+})
+
 test('callAgentJson: Anthropic goes through the SDK and honours the per-agent model override', async () => {
   const { setAiProviderCredentialsStore } = await import('../server/strategy/ai-provider-credentials-store.js')
   const { callAgentJson } = await import('../server/ai-trading/llm.js')

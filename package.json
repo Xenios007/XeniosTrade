@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:server": "node server/mock-trading-server.js",
+    "dev:server": "node --max-old-space-size=6144 server/mock-trading-server.js",
     "fingpt": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\server.py",
     "finma": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\finma-server.py",
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
-    "start": "node server/mock-trading-server.js",
+    "start": "node --max-old-space-size=6144 server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",
     "ai-trading:quant-stats": "node scripts/build-ai-trading-quant-stats.js",
     "consolidated:train": "node --max-old-space-size=6144 server/backtest/train-consolidated.js",

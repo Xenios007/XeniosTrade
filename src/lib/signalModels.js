@@ -17,6 +17,12 @@ export const SIGNAL_MODEL_STRATEGY_OVERRIDE_KEYS = [
   'maxLossPerDay',
   'dailyProfitTarget',
   'useSymbolRiskProfile',
+  // SaaS Phase 3 (AI Signals): an optional advisory gate backed by the user's own AI-provider
+  // credentials (settings.aiProviderCredentials), consulted right before a trade the rule
+  // engine already accepted actually goes out - see evaluateAiSignalForCandidate in
+  // mock-trading-server.js. Empty aiSignalProviderId means "unassigned, rules-only."
+  'aiSignalProviderId',
+  'aiSignalModel',
 ]
 
 const model1Signals = [
@@ -476,6 +482,8 @@ function normalizeSignalModelStrategyOverride(modelId, override, strategy = {}) 
   normalized.useSymbolRiskProfile = normalized.useSymbolRiskProfile !== false
   normalized.tradeStylePresetId = resolveTradeStylePresetId(normalized, source.tradeStylePresetId)
   normalized.maxLossPerTrade = getStrategyDerivedMaxLossPerTrade(normalized)
+  normalized.aiSignalProviderId = String(normalized.aiSignalProviderId || '').trim()
+  normalized.aiSignalModel = String(normalized.aiSignalModel || '').trim()
   return normalized
 }
 

@@ -47,7 +47,7 @@ export const APP_META = {
 // shared (provider keys), but each side only shows its own tabs.
 export const SECTIONS_BY_MODE = {
   [APP_MODE_AI]: ['ai-trading', 'ai-models', 'ai-history', 'ai-journal', 'ai-wallet', 'ai-settings'],
-  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'trade-history', 'journal', 'ai-training', 'consolidated-knowledge', 'wallets', 'ai-models', 'settings'],
+  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'trade-history', 'journal', 'ai-training', 'consolidated-knowledge', 'wallets', 'signals-marketplace', 'ai-models', 'settings'],
 }
 
 export const AI_MODELS_TAB_PATHS = {

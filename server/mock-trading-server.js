@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import dotenv from 'dotenv'
 import { createGoogleAuthHandlers } from './google-auth.js'
-import { findOrCreateUserByEmail, ADMIN_EMAIL, ROLE_ADMIN } from './lib/users-store.js'
+import {
+  findOrCreateUserByEmail, ADMIN_EMAIL, ROLE_ADMIN, userDataPath, getAdminUserId,
+  listUsers, getUserById, updateUserPlan,
+} from './lib/users-store.js'
 import {
   getStrategyDerivedMaxLossPerTrade,
   getTradeEffectiveStopLoss,
@@ -38,10 +41,12 @@ import {
   SIGNAL_MODELS,
 } from '../src/lib/signalModels.js'
 import {
+  applyBotSlotLocks,
   buildDefaultWallets,
   EXCHANGE_SYNC_WALLET_BALANCE_MODE,
   getRealMoneyWallet,
   getTradingWallets,
+  getUnlockedBotWalletIds,
   getWalletById,
   getWalletEffectiveStartingBalance,
   hydrateWalletMetadata,
@@ -52,6 +57,7 @@ import {
   REAL_MONEY_WALLET_ENVIRONMENT,
   REAL_MONEY_WALLET_ID,
   TESTNET_WALLET_ENVIRONMENT,
+  visibleTradingWallets,
 } from '../src/lib/wallets.js'
 import { MANUAL_TRADE_STYLE_PRESET_ID } from '../src/lib/strategyPresets.js'
 import { detectChartPatterns, patternScoreForSide } from '../src/lib/chartPatterns.js'
@@ -155,8 +161,20 @@ const authDisabled = String(process.env.XENIOS_DISABLE_AUTH || '').toLowerCase()
 const AUTH_SESSION_COOKIE_NAME = 'xeniostrade_session'
 const AUTH_SESSION_TTL_MS = 1000 * 60 * 60 * 12
 const authSessions = new Map()
+// Legacy flat paths - superseded by the per-user paths below (userSettingsFilePath /
+// userHistoryFilePath) for actual settings/trade-history reads and writes. Kept only as the
+// source location the one-time admin-data migration script copies out of.
 const historyFilePath = path.join(dataDir, 'trade-history.json')
 const settingsFilePath = path.join(dataDir, 'settings.json')
+const userSettingsFilePath = (userId) => userDataPath(userId, 'settings.json')
+const userHistoryFilePath = (userId) => userDataPath(userId, 'trade-history.json')
+const userAutoTradeLogFilePath = (userId) => userDataPath(userId, 'auto-trade-log.json')
+const userWorkflowReviewLogFilePath = (userId) => userDataPath(userId, 'workflow-review-log.json')
+const userBotSettingsLogFilePath = (userId) => userDataPath(userId, 'bot-settings-log.json')
+// SaaS Phase 5 (Signals Marketplace): a small shared queue of "request access" clicks - not
+// per-user, since the admin needs to see every pending request across every account in one
+// place to action them.
+const signalAccessRequestsFilePath = path.join(dataDir, 'signal-access-requests.json')
 const settingsAuditLogFilePath = path.join(dataDir, 'settings-audit-log.json')
 const settingsRecoveryFilePath = path.join(dataDir, 'settings-recovery.json')
 const autoTradeLogFilePath = path.join(dataDir, 'auto-trade-log.json')
@@ -188,23 +206,36 @@ const MARKET_DATA_4XX_LOG_MAX_BYTES = 5 * 1024 * 1024
 const TRADE_HISTORY_LIMIT = 100000
 const AUTO_TRADE_LOG_LIMIT = 1500
 const LEARNING_BOT_REAL_MONEY_TRADE_TARGET = 1000
+// Each client is { response, userId } so the SSE stream can be filtered to the
+// subscribing user's own events (see broadcastAutoTradeEvent) - without this a user
+// would see every other user's auto-trade activity in real time.
 const autoTradeClients = new Set()
-const autoTradeRuntime = {
-  running: false,
-  currentRunId: null,
-  cancelRequested: false,
-  lastRunAt: null,
-  lastReason: 'No auto-trade run recorded yet.',
-  lastExecuted: false,
+// One run-lock/status record per user (see getAutoTradeRuntime) - a global runtime object
+// here would serialize every user's scheduled auto-trade run onto the same lock and leak
+// one user's status to another via /api/auto-trade-status.
+const autoTradeRuntimeByUser = new Map()
+function getAutoTradeRuntime(userId) {
+  if (!autoTradeRuntimeByUser.has(userId)) {
+    autoTradeRuntimeByUser.set(userId, {
+      running: false,
+      currentRunId: null,
+      cancelRequested: false,
+      lastRunAt: null,
+      lastReason: 'No auto-trade run recorded yet.',
+      lastExecuted: false,
+    })
+  }
+  return autoTradeRuntimeByUser.get(userId)
 }
 // How many symbols the auto-trader scans in parallel per wave. Keeps the scan
 // off a single serial await chain so one slow/failed upstream symbol can't
 // stall the whole run (or hold the run lock past the 5-minute interval).
 const SIGNAL_SCAN_CONCURRENCY = 5
 const TERMINAL_TRADE_MONITOR_INTERVAL_MS = 10_000
-let lastTerminalTradeMonitorAt = 0
-let lastTerminalTradeMonitorSignature = ''
-let lastBotSettingsLogSignature = ''
+// Keyed by userId - purely dedup/throttle state for log noise, not user data.
+const lastTerminalTradeMonitorAtByUser = new Map()
+const lastTerminalTradeMonitorSignatureByUser = new Map()
+const lastBotSettingsLogSignatureByUser = new Map()
 const VOLATILE_SYMBOL_LIMIT = VOLATILE_MARKET_SYMBOL_LIMIT
 const VOLATILE_MARKET_CACHE_TTL_MS = 60_000
 const EXCHANGE_INFO_CACHE_TTL_MS = 5 * 60_000
@@ -907,7 +938,8 @@ function formatLearningBotStatusLine(trainStatus = defaultLearningBotTrainStatus
   return `AI    : ${formatLearningBotRuntimeState(trainStatus)} | Framework ${framework} | Device ${device}${errorText}`
 }
 
-function buildTerminalMonitorSnapshot(settings = {}, trades = [], livePriceMap = {}, trainStatus = defaultLearningBotTrainStatus) {
+function buildTerminalMonitorSnapshot(userId, settings = {}, trades = [], livePriceMap = {}, trainStatus = defaultLearningBotTrainStatus) {
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   const enabledWallets = getTradingWallets(settings.wallets).filter((wallet) => wallet.enabled)
   const binanceCount = trades.filter((trade) => isBinanceExecutionMode(trade.mode)).length
   const paperCount = trades.filter((trade) => trade.mode === 'local-paper').length
@@ -954,13 +986,13 @@ function buildTerminalMonitorSnapshot(settings = {}, trades = [], livePriceMap =
   return { lines, signature }
 }
 
-function logTerminalMonitorSnapshot(settings = {}, trades = [], livePriceMap = {}, trainStatus = defaultLearningBotTrainStatus) {
-  const { lines, signature } = buildTerminalMonitorSnapshot(settings, trades, livePriceMap, trainStatus)
-  if (signature === lastTerminalTradeMonitorSignature) {
+function logTerminalMonitorSnapshot(userId, settings = {}, trades = [], livePriceMap = {}, trainStatus = defaultLearningBotTrainStatus) {
+  const { lines, signature } = buildTerminalMonitorSnapshot(userId, settings, trades, livePriceMap, trainStatus)
+  if (signature === lastTerminalTradeMonitorSignatureByUser.get(userId)) {
     return
   }
 
-  lastTerminalTradeMonitorSignature = signature
+  lastTerminalTradeMonitorSignatureByUser.set(userId, signature)
   logTerminalBlock(`Terminal Monitor${trades.length > 0 ? ` (${trades.length} open)` : ''}`, lines, 'live')
 }
 
@@ -1182,11 +1214,13 @@ async function persistSettingsRecoverySnapshot(settings = defaultSettings, {
   return nextSnapshot
 }
 
+// Admin-only (see the comment above getSettings()) - always called with the admin's own
+// settings, so a bare getSettings() fallback would only ever mean the admin account too.
 async function selfHealSettingsIfNeeded(settings = null, {
   source = 'settings-recovery',
   note = '',
 } = {}) {
-  const currentSettings = settings ? normalizeSettings(settings) : await getSettings()
+  const currentSettings = settings ? normalizeSettings(settings) : await getSettings(await getAdminUserId())
   const recoverySnapshot = await getSettingsRecoverySnapshot()
   const regressionRisk = inspectSettingsRegressionRisk(currentSettings, recoverySnapshot)
   const fallbackApiKey = recoverySnapshot?.apiKey || process.env.BINANCE_TESTNET_API_KEY || ''
@@ -1236,7 +1270,7 @@ async function selfHealSettingsIfNeeded(settings = null, {
       ? normalizeLearningBotSettings(recoverySnapshot.learningBot)
       : currentSettings.learningBot,
   }
-  const savedSettings = await saveSettings(nextSettings, {
+  const savedSettings = await saveSettings(await getAdminUserId(), nextSettings, {
     incrementRevision: false,
     currentSettings,
     audit: {
@@ -1735,8 +1769,13 @@ function clearAuthSessionCookie(response) {
   response.setHeader('Set-Cookie', headers)
 }
 
-function requireAuthenticatedSession(request, response, next) {
+async function requireAuthenticatedSession(request, response, next) {
   if (authDisabled) {
+    // XENIOS_DISABLE_AUTH=true is the local/dev escape hatch (never set on the live
+    // server) - every route now resolves data through request.user.id, so this still
+    // needs to identify *someone*. It always resolves to the admin account, matching
+    // what "auth disabled" meant before per-user data existed: you are the operator.
+    request.user = { id: await getAdminUserId(), email: ADMIN_EMAIL, role: ROLE_ADMIN }
     next()
     return
   }
@@ -1806,8 +1845,12 @@ app.get('/healthz', (_request, response) => {
 
 app.get('/api/auth/session', (request, response) => {
   if (authDisabled) {
+    // Same identity requireAuthenticatedSession resolves to when auth is off - the client
+    // needs to know it's the admin (e.g. to show the Admin nav link) even in this local/dev
+    // mode, now that per-user data and role exist.
     response.json({
       authenticated: true,
+      user: { email: ADMIN_EMAIL, role: ROLE_ADMIN },
     })
     return
   }
@@ -1887,7 +1930,11 @@ app.post('/api/auth/logout', (request, response) => {
 // (the operator's personal research/trading space) are not part of what a regular SaaS user
 // gets. This is the real security boundary - hiding the nav link for these elsewhere is a
 // nicety, not a substitute for this check, since a hidden link never stopped a direct request.
-const ADMIN_ONLY_API_PREFIXES = ['/codex-console', '/consolidated', '/bot-10', '/learning-bot']
+// /settings-audit-log exposes the admin's own credential-change audit trail (see the
+// admin-only self-heal/audit-log comment above getSettings()) - it was reachable by any
+// authenticated user before there were other users to worry about; now it needs the same
+// gate as the other admin-only surfaces.
+const ADMIN_ONLY_API_PREFIXES = ['/codex-console', '/consolidated', '/bot-10', '/learning-bot', '/settings-audit-log', '/admin']
 
 app.use('/api', (request, response, next) => {
   if (request.path.startsWith('/auth/')) {
@@ -2005,7 +2052,7 @@ function summarizeSettingsCredential(value = '') {
   }
 }
 
-function sanitizeSettingsForClient(settings = defaultSettings) {
+function sanitizeSettingsForClient(settings = defaultSettings, botSlots = Infinity, ownedSignalIds = []) {
   const normalizedSettings = normalizeSettings(settings)
 
   return {
@@ -2032,6 +2079,12 @@ function sanitizeSettingsForClient(settings = defaultSettings) {
         summarizeSettingsCredential(entry.apiKey),
       ]),
     ),
+    // Bot-slot entitlements (SaaS Phase 2/5): computed on the way out, never persisted - see
+    // applyBotSlotLocks. botSlots/ownedSignalIds are echoed so the UI can render "N of M
+    // unlocked" and per-signal ownership without a second round trip.
+    wallets: applyBotSlotLocks(normalizedSettings.wallets, botSlots, ownedSignalIds),
+    botSlots: Number.isFinite(botSlots) ? botSlots : null,
+    ownedSignalIds,
   }
 }
 
@@ -2092,12 +2145,150 @@ async function readSettingsFileAuditState() {
   }
 }
 
-export async function getSettings() {
-  const stored = await readJson(settingsFilePath, defaultSettings)
+// SaaS Phase 2 bot-slot entitlements (see plan.botSlots, server/lib/users-store.js). The
+// admin account is always exempt (Infinity = unlimited) - it's the operator's own
+// research/testing account, not a slot-limited SaaS seat. A regular user with no plan row
+// (or a plan that predates this field) defaults to 0 slots, matching defaultPlan().
+async function getEffectiveBotSlots(userId) {
+  if (userId === await getAdminUserId()) {
+    return Infinity
+  }
+  const user = await getUserById(userId)
+  return Number(user?.plan?.botSlots || 0)
+}
+
+// SaaS Phase 5 (Signals Marketplace): the sellable signal ids, in the same fixed order as
+// their wallets - derived from the wallet blueprints rather than hardcoded, so it can never
+// drift out of sync with getUnlockedBotWalletIds' own notion of "sellable."
+const SELLABLE_SIGNAL_MODEL_IDS = visibleTradingWallets(buildDefaultWallets()).map((wallet) => wallet.assignedSignalModelId)
+
+// plan.signals grants a SPECIFIC bot regardless of botSlots position - see
+// getUnlockedBotWalletIds' ownedSignalIds param. Admin owns everything (exempt from locking
+// entirely anyway, via getEffectiveBotSlots returning Infinity, but this keeps the
+// marketplace catalog's "owned" flag consistent for the admin's own view of it).
+async function getEffectiveOwnedSignals(userId) {
+  if (userId === await getAdminUserId()) {
+    return SELLABLE_SIGNAL_MODEL_IDS
+  }
+  const user = await getUserById(userId)
+  const signals = Array.isArray(user?.plan?.signals) ? user.plan.signals : []
+  return signals.filter((id) => SELLABLE_SIGNAL_MODEL_IDS.includes(id))
+}
+
+async function getSignalAccessRequests() {
+  const items = await readJson(signalAccessRequestsFilePath, [])
+  return Array.isArray(items) ? items : []
+}
+
+async function writeSignalAccessRequests(requests) {
+  await writeJson(signalAccessRequestsFilePath, requests)
+}
+
+/** No-op if an identical pending request already exists - repeated clicks don't queue duplicates. */
+export async function addSignalAccessRequest(userId, email, signalId) {
+  const requests = await getSignalAccessRequests()
+  const alreadyPending = requests.some((entry) => (
+    entry.userId === userId && entry.signalId === signalId && entry.status === 'pending'
+  ))
+  if (alreadyPending) {
+    return requests
+  }
+  requests.unshift({
+    id: `sig-req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    userId,
+    email,
+    signalId,
+    requestedAt: Date.now(),
+    status: 'pending',
+  })
+  await writeSignalAccessRequests(requests)
+  return requests
+}
+
+/** Called after a grant (or an admin dismissal) so a fulfilled request stops showing as pending. */
+async function clearPendingSignalAccessRequests(userId, signalId) {
+  const requests = await getSignalAccessRequests()
+  const remaining = requests.filter((entry) => (
+    !(entry.userId === userId && entry.signalId === signalId && entry.status === 'pending')
+  ))
+  if (remaining.length !== requests.length) {
+    await writeSignalAccessRequests(remaining)
+  }
+  return remaining
+}
+
+/** The most recent complete backtest run with a per-bot summary - the marketplace's one source of real numbers. */
+function getLatestBacktestSummaryByBot(registry) {
+  const latestComplete = registry.find((run) => run?.status === 'complete' && run?.summary?.perBot?.length)
+  if (!latestComplete) {
+    return { runId: null, runDate: null, perBot: {} }
+  }
+  return {
+    runId: latestComplete.id,
+    runDate: latestComplete.finishedAt || latestComplete.startedAt || null,
+    perBot: Object.fromEntries(latestComplete.summary.perBot.map((row) => [row.botId, row])),
+  }
+}
+
+/**
+ * SaaS Phase 5 catalog: one listing per sellable signal, real backtest stats (never
+ * fabricated - see getLatestBacktestSummaryByBot), owned for this specific requesting user.
+ * Name/tag/description/stats are the always-visible teaser; executionRule/minimumScore (the
+ * actual strategy detail/thresholds) stay hidden until owned.
+ */
+export async function buildSignalsMarketplaceCatalog(userId) {
+  const [ownedIds, registry] = await Promise.all([
+    getEffectiveOwnedSignals(userId),
+    getBacktestRunRegistry(),
+  ])
+  const ownedSet = new Set(ownedIds)
+  const { runId, runDate, perBot } = getLatestBacktestSummaryByBot(registry)
+
+  const listings = SELLABLE_SIGNAL_MODEL_IDS.map((signalId) => {
+    const model = getSignalModel(signalId)
+    const owned = ownedSet.has(signalId)
+    const stats = perBot[signalId] || null
+
+    return {
+      id: signalId,
+      name: model.name,
+      tag: model.tag,
+      description: model.description,
+      status: model.status,
+      owned,
+      executionRule: owned ? model.executionRule : null,
+      minimumScore: owned ? model.minimumScore : null,
+      stats: stats ? {
+        winRate: stats.winRate,
+        totalUsd: stats.totalUsd,
+        avgPerTrade: stats.avgPerTrade,
+        trades: stats.rows,
+      } : null,
+    }
+  })
+
+  return { listings, backtestRunId: runId, backtestRunDate: runDate }
+}
+
+// `userId` scopes settings.json to that user's own data subtree
+// (server/data/users/<userId>/settings.json, see server/lib/users-store.js). The
+// AI Trading / Learning Bot / Consolidated (Bot 10) subsystems and server startup are
+// deliberately NOT per-user yet - those call sites always pass getAdminUserId().
+//
+// The self-heal / recovery-snapshot / audit-log machinery below (selfHealSettingsIfNeeded,
+// appendSettingsAuditLog, persistSettingsRecoverySnapshot) stays admin-only rather than
+// becoming per-user: it exists to protect one high-stakes account's real credentials
+// against corruption/regression (it can fall back to this operator's own
+// BINANCE_TESTNET_API_KEY env var, and the "someone hand-edited the file on the box"
+// watchdog only makes sense for whoever has SSH access to the server) - applying it to
+// every SaaS user's settings would be unnecessary machinery, not extra safety.
+export async function getSettings(userId) {
+  const filePath = userSettingsFilePath(userId)
+  const stored = await readJson(filePath, defaultSettings)
   const normalized = normalizeSettings(stored)
 
   if (JSON.stringify(stored) !== JSON.stringify(normalized)) {
-    await saveSettings(normalized, {
+    await saveSettings(userId, normalized, {
       currentSettings: stored,
       incrementRevision: false,
       audit: {
@@ -2108,25 +2299,35 @@ export async function getSettings() {
     })
   }
 
-  const integrityResult = await selfHealSettingsIfNeeded(normalized, {
-    source: 'getSettings',
-    note: 'Validated loaded settings against the armed recovery snapshot.',
-  })
+  let resolved = normalized
+  if (userId === await getAdminUserId()) {
+    const integrityResult = await selfHealSettingsIfNeeded(normalized, {
+      source: 'getSettings',
+      note: 'Validated loaded settings against the armed recovery snapshot.',
+    })
+    resolved = integrityResult.healed ? integrityResult.settings : normalized
+  }
 
-  const resolved = integrityResult.healed ? integrityResult.settings : normalized
-  // Single choke point: every LLM bot reads its provider credential from this
-  // in-memory mirror rather than awaiting settings on every scan (see
-  // server/strategy/ai-provider-credentials-store.js).
-  setAiProviderCredentialsStore(resolved.aiProviderCredentials)
+  // Single choke point: every LLM bot reads its provider credential from this in-memory
+  // mirror rather than awaiting settings on every scan (see
+  // server/strategy/ai-provider-credentials-store.js). It must stay pinned to the admin's
+  // own credentials only - every live bot today is admin-owned (per-user AI-signal
+  // assignment is Phase 3, not built yet), so refreshing it from a regular user's own
+  // getSettings() call (e.g. loading their Settings or AI Models page) would silently
+  // overwrite the credentials the admin's live bots are mid-scan relying on.
+  if (userId === await getAdminUserId()) {
+    setAiProviderCredentialsStore(resolved.aiProviderCredentials)
+  }
   return resolved
 }
 
-async function saveSettings(nextSettings, {
+async function saveSettings(userId, nextSettings, {
   incrementRevision = false,
   currentSettings = null,
   audit = null,
 } = {}) {
-  const latestSettings = currentSettings ? normalizeSettings(currentSettings) : await getSettings()
+  const filePath = userSettingsFilePath(userId)
+  const latestSettings = currentSettings ? normalizeSettings(currentSettings) : await getSettings(userId)
   const nextSettingsRevision = Number(nextSettings?.settingsRevision || 0)
   const resolvedSettingsRevision = incrementRevision
     ? Number(latestSettings.settingsRevision || defaultSettings.settingsRevision) + 1
@@ -2137,30 +2338,34 @@ async function saveSettings(nextSettings, {
     ...nextSettings,
     settingsRevision: resolvedSettingsRevision,
   })
-  await writeJson(settingsFilePath, normalized)
-  setAiProviderCredentialsStore(normalized.aiProviderCredentials)
-  syncObservedSettingsAuditState(normalized)
-  await appendSettingsAuditLog({
-    trigger: audit?.trigger || 'SETTINGS_WRITE',
-    source: audit?.source || 'saveSettings',
-    note: audit?.note || '',
-    beforeSettings: latestSettings,
-    afterSettings: normalized,
-    requestMeta: audit?.requestMeta || null,
-    writeMeta: audit?.writeMeta || null,
-  })
-  await persistSettingsRecoverySnapshot(normalized, {
-    source: audit?.source || 'saveSettings',
-    note: audit?.note || '',
-  }).catch((error) => {
-    console.error('Failed to update settings recovery snapshot:', error)
-  })
+  await writeJson(filePath, normalized)
+
+  if (userId === await getAdminUserId()) {
+    setAiProviderCredentialsStore(normalized.aiProviderCredentials)
+    syncObservedSettingsAuditState(normalized)
+    await appendSettingsAuditLog({
+      trigger: audit?.trigger || 'SETTINGS_WRITE',
+      source: audit?.source || 'saveSettings',
+      note: audit?.note || '',
+      beforeSettings: latestSettings,
+      afterSettings: normalized,
+      requestMeta: audit?.requestMeta || null,
+      writeMeta: audit?.writeMeta || null,
+    })
+    await persistSettingsRecoverySnapshot(normalized, {
+      source: audit?.source || 'saveSettings',
+      note: audit?.note || '',
+    }).catch((error) => {
+      console.error('Failed to update settings recovery snapshot:', error)
+    })
+  }
+
   return normalized
 }
 
-async function getTradeHistory() {
-  const items = await readJson(historyFilePath, [])
-  const settings = await getSettings()
+async function getTradeHistory(userId) {
+  const items = await readJson(userHistoryFilePath(userId), [])
+  const settings = await getSettings(userId)
   const wallets = normalizeWallets(settings.wallets)
   const sanitized = sanitizeTradeHistoryItems(items).map((item) => (
     hydrateWalletMetadata(
@@ -2173,7 +2378,7 @@ async function getTradeHistory() {
   ))
 
   if (JSON.stringify(sanitized) !== JSON.stringify(items)) {
-    await writeJson(historyFilePath, sanitized)
+    await writeJson(userHistoryFilePath(userId), sanitized)
   }
 
   return sanitized
@@ -2708,7 +2913,9 @@ async function getFlaggedBacktestRunRows(alreadyLoadedPaths = []) {
 }
 
 async function getPreferredLearningBotDataset(config = defaultLearningBotSettings) {
-  const realHistory = await getTradeHistory()
+  // Learning Bot trains only on the admin's own trading history (it's the admin's personal
+  // research/trading space, gated by ADMIN_ONLY_API_PREFIXES) - never a regular user's.
+  const realHistory = await getTradeHistory(await getAdminUserId())
   const useBacktest = config.includeBacktestData !== false
   const backtestHistory = useBacktest ? await getBacktestHistory() : []
   const flaggedRunRows = useBacktest
@@ -2964,9 +3171,12 @@ export async function launchLearningBotTraining({ config, dataset }) {
   }
 }
 
-async function maybeRefreshLearningBotPolicy(trigger = 'UNKNOWN', settingsOverride = null) {
+// Naturally inert for a regular (non-admin) user: settings.learningBot is per-user now, but
+// only the admin-gated Learning Bot page/routes can ever turn aiEntryEnabled on, so a regular
+// user's settings always resolve to the disabled default and this returns immediately below.
+async function maybeRefreshLearningBotPolicy(userId, trigger = 'UNKNOWN', settingsOverride = null) {
   try {
-    const settings = settingsOverride || await getSettings()
+    const settings = settingsOverride || await getSettings(userId)
     const config = normalizeLearningBotSettings(settings.learningBot)
     const aiEntryEnabled = Boolean(
       config.aiTrainer.enabled
@@ -3179,6 +3389,79 @@ export function scoreCandidateWithAiFilter(candidate = {}, trainStatus = null, c
     provenLoser,
     provenWinner,
     accept,
+  }
+}
+
+const AI_SIGNAL_TIMEOUT_MS = 15_000
+
+function buildAiSignalPrompts(candidate, signalModelName) {
+  const systemPrompt = [
+    'You are an advisory trade-signal reviewer for an automated crypto futures bot.',
+    'You do not execute trades - the bot\'s own rule engine has already decided this setup qualifies on its own terms.',
+    'Your only job is to confirm or veto it as a second opinion, using your own judgement of the setup described below.',
+    'Respond with a single JSON object only, no other text: {"accept": boolean, "confidence": number from 0 to 100, "reason": a short one-sentence explanation, 200 characters or fewer}.',
+  ].join(' ')
+
+  const userPrompt = [
+    `Bot: ${signalModelName}`,
+    `Symbol: ${candidate.symbol}`,
+    `Side: ${candidate.side} (${candidate.direction || candidate.side})`,
+    `Entry: ${Number(candidate.entryPrice || 0)}`,
+    `Stop loss: ${Number(candidate.stopLoss || 0)}`,
+    `Take profit: ${Number(candidate.takeProfit || 0)}`,
+    `Position notional: ${Number(candidate.positionNotional || 0)} USDT`,
+    `Rule engine's own summary of the setup: ${candidate.summary || 'n/a'}`,
+    '',
+    'Should this trade be taken?',
+  ].join('\n')
+
+  return { systemPrompt, userPrompt }
+}
+
+/**
+ * SaaS Phase 3 (AI Signals): an optional per-bot advisory gate backed by the trading user's
+ * own AI-provider credentials (never the shared admin-only credential mirror - see
+ * resolveProviderCall's credentialOverride param). Called only for a candidate the rule
+ * engine has already accepted, right before recordTrade.
+ *
+ * Fails open on purpose: an unreachable/misconfigured/slow provider must never silently stop
+ * a bot from trading just because the assigned AI signal had one bad response - it returns
+ * `{accept: true, unavailable: true, ...}` rather than throwing, so a caller that ignores the
+ * `unavailable` flag still gets a safe default.
+ */
+export async function evaluateAiSignalForCandidate({ providerId, model, credential, candidate, signalModelName }) {
+  const { systemPrompt, userPrompt } = buildAiSignalPrompts(candidate, signalModelName)
+
+  try {
+    const result = await callAgentJson({
+      providerId,
+      model,
+      systemPrompt,
+      userPrompt,
+      timeoutMs: AI_SIGNAL_TIMEOUT_MS,
+      credentialOverride: credential,
+    })
+    const accept = Boolean(result.json?.accept)
+    const confidence = Math.max(0, Math.min(100, Number(result.json?.confidence) || 0))
+    const reason = String(result.json?.reason || '').slice(0, 240)
+    return {
+      accept,
+      confidence,
+      reason: reason || (accept ? 'AI signal accepted the setup.' : 'AI signal rejected the setup.'),
+      unavailable: false,
+      providerId,
+      model: result.model,
+    }
+  } catch (error) {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error))
+    return {
+      accept: true,
+      confidence: null,
+      reason: `AI signal unavailable, proceeded on rules alone: ${message}`,
+      unavailable: true,
+      providerId,
+      model,
+    }
   }
 }
 
@@ -3545,17 +3828,17 @@ function buildSignalAnalysisAiAdvisory(
   }
 }
 
-async function saveTradeHistory(history) {
-  await writeJson(historyFilePath, history.slice(0, TRADE_HISTORY_LIMIT))
+async function saveTradeHistory(userId, history) {
+  await writeJson(userHistoryFilePath(userId), history.slice(0, TRADE_HISTORY_LIMIT))
   return history
 }
 
-async function appendTradeHistory(orderRecord) {
-  const history = await getTradeHistory()
+async function appendTradeHistory(userId, orderRecord) {
+  const history = await getTradeHistory(userId)
   history.unshift(orderRecord)
-  await saveTradeHistory(history)
+  await saveTradeHistory(userId, history)
   logTradeOpenedToTerminal(orderRecord)
-  await persistBotSettingsLog({
+  await persistBotSettingsLog(userId, {
     trigger: 'TRADE_OPEN',
     note: `Captured after opening ${orderRecord.symbol} ${orderRecord.side} (${orderRecord.source || 'UNKNOWN'}).`,
     history,
@@ -3565,10 +3848,10 @@ async function appendTradeHistory(orderRecord) {
   return orderRecord
 }
 
-async function getAutoTradeLog() {
-  const items = await readJson(autoTradeLogFilePath, [])
+async function getAutoTradeLog(userId) {
+  const items = await readJson(userAutoTradeLogFilePath(userId), [])
   const sanitized = sanitizeAutoTradeLogItems(items)
-  const settings = await getSettings()
+  const settings = await getSettings(userId)
   const wallets = normalizeWallets(settings.wallets)
   const hydrated = sanitized.map((item) => {
     const normalizedItem = replaceLegacySignalModelLabels(item)
@@ -3591,18 +3874,18 @@ async function getAutoTradeLog() {
   })
 
   if (JSON.stringify(hydrated) !== JSON.stringify(items)) {
-    await writeJson(autoTradeLogFilePath, hydrated)
+    await writeJson(userAutoTradeLogFilePath(userId), hydrated)
   }
 
   return hydrated
 }
 
-async function getWorkflowReviewLog() {
-  return readJson(workflowReviewLogFilePath, [])
+async function getWorkflowReviewLog(userId) {
+  return readJson(userWorkflowReviewLogFilePath(userId), [])
 }
 
-async function getBotSettingsLog() {
-  return readJson(botSettingsLogFilePath, [])
+async function getBotSettingsLog(userId) {
+  return readJson(userBotSettingsLogFilePath(userId), [])
 }
 
 function toLoggedNumber(value, decimals = 2) {
@@ -3916,25 +4199,25 @@ function buildBotSettingsSnapshot(settings = {}, trades = [], livePrices = {}) {
   }
 }
 
-async function persistBotSettingsLog({
+async function persistBotSettingsLog(userId, {
   trigger = 'SYSTEM',
   note = '',
   settings = null,
   history = null,
   livePrices = null,
 } = {}) {
-  const resolvedSettings = settings ? normalizeSettings(settings) : await getSettings()
-  const resolvedHistory = history || await getTradeHistory()
+  const resolvedSettings = settings ? normalizeSettings(settings) : await getSettings(userId)
+  const resolvedHistory = history || await getTradeHistory(userId)
   const resolvedLivePrices = livePrices || (
     resolvedHistory.some((trade) => trade.status === 'OPEN')
       ? await getLivePriceMapForTrades(resolvedHistory.filter((trade) => trade.status === 'OPEN')).catch(() => ({}))
       : {}
   )
   const snapshot = buildBotSettingsSnapshot(resolvedSettings, resolvedHistory, resolvedLivePrices)
-  const items = await getBotSettingsLog()
+  const items = await getBotSettingsLog(userId)
 
-  if (snapshot.signature === lastBotSettingsLogSignature || items[0]?.signature === snapshot.signature) {
-    lastBotSettingsLogSignature = snapshot.signature
+  if (snapshot.signature === lastBotSettingsLogSignatureByUser.get(userId) || items[0]?.signature === snapshot.signature) {
+    lastBotSettingsLogSignatureByUser.set(userId, snapshot.signature)
     return items
   }
 
@@ -3949,21 +4232,21 @@ async function persistBotSettingsLog({
   }
 
   items.unshift(entry)
-  await writeJson(botSettingsLogFilePath, items.slice(0, 200))
-  lastBotSettingsLogSignature = snapshot.signature
+  await writeJson(userBotSettingsLogFilePath(userId), items.slice(0, 200))
+  lastBotSettingsLogSignatureByUser.set(userId, snapshot.signature)
   return items
 }
 
-async function appendAutoTradeLog(entry) {
-  const items = await getAutoTradeLog()
+async function appendAutoTradeLog(userId, entry) {
+  const items = await getAutoTradeLog(userId)
   const record = {
     id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     timestamp: Date.now(),
     ...entry,
   }
   items.unshift(record)
-  await writeJson(autoTradeLogFilePath, items.slice(0, AUTO_TRADE_LOG_LIMIT))
-  broadcastAutoTradeEvent('log', record)
+  await writeJson(userAutoTradeLogFilePath(userId), items.slice(0, AUTO_TRADE_LOG_LIMIT))
+  broadcastAutoTradeEvent(userId, 'log', record)
 
   if (record.type === 'AUTO_RUN') {
     const walletName = record.walletName || 'Wallet'
@@ -3976,14 +4259,17 @@ async function appendAutoTradeLog(entry) {
   }
 }
 
-function broadcastAutoTradeEvent(type, payload) {
+function broadcastAutoTradeEvent(userId, type, payload) {
   const message = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`
   for (const client of autoTradeClients) {
-    client.write(message)
+    if (client.userId === userId) {
+      client.response.write(message)
+    }
   }
 }
 
-function setAutoTradeRunningState(running, currentRunId = null) {
+function setAutoTradeRunningState(userId, running, currentRunId = null) {
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   autoTradeRuntime.running = running
   autoTradeRuntime.currentRunId = currentRunId
   if (!running) {
@@ -4003,7 +4289,7 @@ function setAutoTradeRunningState(running, currentRunId = null) {
     running ? 'accent' : 'muted',
   )
 
-  broadcastAutoTradeEvent('state', {
+  broadcastAutoTradeEvent(userId, 'state', {
     running,
     currentRunId,
     cancelRequested: autoTradeRuntime.cancelRequested,
@@ -4013,7 +4299,8 @@ function setAutoTradeRunningState(running, currentRunId = null) {
   })
 }
 
-function setAutoTradeOutcome(result) {
+function setAutoTradeOutcome(userId, result) {
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   autoTradeRuntime.lastRunAt = Date.now()
   autoTradeRuntime.lastReason = result.reason
   autoTradeRuntime.lastExecuted = Boolean(result.executed)
@@ -4034,7 +4321,7 @@ function setAutoTradeOutcome(result) {
     result.executed ? 'success' : 'warning',
   )
 
-  broadcastAutoTradeEvent('state', {
+  broadcastAutoTradeEvent(userId, 'state', {
     running: autoTradeRuntime.running,
     currentRunId: autoTradeRuntime.currentRunId,
     cancelRequested: autoTradeRuntime.cancelRequested,
@@ -4044,8 +4331,8 @@ function setAutoTradeOutcome(result) {
   })
 }
 
-function ensureNotCancelled(runSteps) {
-  if (autoTradeRuntime.cancelRequested) {
+function ensureNotCancelled(userId, runSteps) {
+  if (getAutoTradeRuntime(userId).cancelRequested) {
     runSteps.push({ message: 'Manual stop requested. Aborting auto-trade run.', status: 'blocked' })
     return false
   }
@@ -4924,7 +5211,7 @@ async function getVolatileMarketsSnapshot({ limit = VOLATILE_SYMBOL_LIMIT, excha
   }
 }
 
-async function syncPreferredSymbolsWithVolatility(settings, exchangeInfo = null) {
+async function syncPreferredSymbolsWithVolatility(userId, settings, exchangeInfo = null) {
   try {
     const volatileMarkets = await getVolatileMarketsSnapshot({ limit: VOLATILE_SYMBOL_LIMIT, exchangeInfo })
     const preferredSymbols = volatileMarkets.map((item) => item.symbol)
@@ -4933,7 +5220,7 @@ async function syncPreferredSymbolsWithVolatility(settings, exchangeInfo = null)
       return settings
     }
 
-    const latestSettings = await getSettings()
+    const latestSettings = await getSettings(userId)
 
     if (JSON.stringify(preferredSymbols) === JSON.stringify(latestSettings.strategy.preferredSymbols || [])) {
       return latestSettings
@@ -4947,7 +5234,7 @@ async function syncPreferredSymbolsWithVolatility(settings, exchangeInfo = null)
       },
     }
 
-    await saveSettings(nextSettings, {
+    await saveSettings(userId, nextSettings, {
       currentSettings: latestSettings,
       audit: {
         trigger: 'PREFERRED_SYMBOLS_SYNC',
@@ -7845,8 +8132,8 @@ function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotT
   }
 }
 
-async function persistWorkflowReview(snapshot) {
-  const items = await getWorkflowReviewLog()
+async function persistWorkflowReview(userId, snapshot) {
+  const items = await getWorkflowReviewLog(userId)
   if (items[0]?.signature === snapshot.signature) {
     return items
   }
@@ -7869,7 +8156,7 @@ async function persistWorkflowReview(snapshot) {
   }
 
   items.unshift(entry)
-  await writeJson(workflowReviewLogFilePath, items.slice(0, 80))
+  await writeJson(userWorkflowReviewLogFilePath(userId), items.slice(0, 80))
   return items.slice(0, 80)
 }
 
@@ -7897,12 +8184,12 @@ function updateWalletSyncState(wallets, walletId, productionUpdates = {}) {
   ))
 }
 
-async function persistWalletSyncResult(settings, walletId, productionUpdates = {}) {
+async function persistWalletSyncResult(userId, settings, walletId, productionUpdates = {}) {
   if (!walletId) {
     return settings
   }
 
-  const latestSettings = await getSettings()
+  const latestSettings = await getSettings(userId)
   const nextWallets = updateWalletSyncState(latestSettings.wallets, walletId, productionUpdates)
   const nextSettings = {
     ...latestSettings,
@@ -7913,7 +8200,7 @@ async function persistWalletSyncResult(settings, walletId, productionUpdates = {
     return latestSettings
   }
 
-  return saveSettings(nextSettings, {
+  return saveSettings(userId, nextSettings, {
     currentSettings: latestSettings,
     audit: {
       trigger: 'WALLET_SYNC_RESULT',
@@ -7928,11 +8215,12 @@ async function persistWalletSyncResult(settings, walletId, productionUpdates = {
 }
 
 async function syncExchangeWalletBalance({
+  userId,
   settings = null,
   walletId = null,
   suppressErrors = false,
 } = {}) {
-  const currentSettings = settings ? normalizeSettings(settings) : await getSettings()
+  const currentSettings = settings ? normalizeSettings(settings) : await getSettings(userId)
   const syncedWallet = walletId
     ? getWalletById(walletId, currentSettings.wallets)
     : getPrimaryExchangeSyncedWallet(currentSettings.wallets)
@@ -7951,7 +8239,7 @@ async function syncExchangeWalletBalance({
     : 'Binance Futures Testnet'
   const { apiKey, secretKey } = getEffectiveCredentials(currentSettings, walletEnvironment)
   if (!apiKey || !secretKey) {
-    const nextSettings = await persistWalletSyncResult(currentSettings, syncedWallet.id, {
+    const nextSettings = await persistWalletSyncResult(userId, currentSettings, syncedWallet.id, {
       syncStatus: 'MISSING_CREDENTIALS',
       lastError: `${environmentLabel} API key and secret are required for this wallet to sync.`,
       lastSyncedAt: Date.now(),
@@ -7979,7 +8267,7 @@ async function syncExchangeWalletBalance({
     const openPositionCount = Array.isArray(accountSnapshot.positions)
       ? accountSnapshot.positions.filter((position) => Math.abs(Number(position?.positionAmt || 0)) > 1e-8).length
       : 0
-    const nextSettings = await persistWalletSyncResult(currentSettings, syncedWallet.id, {
+    const nextSettings = await persistWalletSyncResult(userId, currentSettings, syncedWallet.id, {
       syncStatus: 'CONNECTED',
       lastSyncedBalance: Number(accountSnapshot.totalWalletBalance || 0),
       lastSyncedAvailableBalance: Number(accountSnapshot.availableBalance || 0),
@@ -7995,7 +8283,7 @@ async function syncExchangeWalletBalance({
       accountSnapshot,
     }
   } catch (error) {
-    const nextSettings = await persistWalletSyncResult(currentSettings, syncedWallet.id, {
+    const nextSettings = await persistWalletSyncResult(userId, currentSettings, syncedWallet.id, {
       syncStatus: 'ERROR',
       lastError: error instanceof Error ? error.message : String(error),
       lastSyncedAt: Date.now(),
@@ -8512,7 +8800,7 @@ async function reconcileExchangeTradeState(trade, accountSnapshot, { apiKey, sec
   })
 }
 
-async function recordTrade({
+async function recordTrade(userId, {
   symbol,
   side,
   quantity,
@@ -8534,9 +8822,21 @@ async function recordTrade({
   walletId,
   walletName,
 }) {
-  const settings = await getSettings()
+  const settings = await getSettings(userId)
   const wallets = normalizeWallets(settings.wallets)
   const wallet = getWalletById(walletId, wallets)
+
+  // Bot-slot entitlements (SaaS Phase 2): reject a trade on a locked bot wallet even if the
+  // caller bypassed the UI (e.g. a direct /api/mock-order call) - this is the one choke
+  // point every trade (manual or auto) actually goes through, so it's the real enforcement,
+  // not the runAutoTrader-side filtering (which is just there to avoid a doomed attempt).
+  if (wallet && visibleTradingWallets(wallets).some((v) => v.id === wallet.id)) {
+    const unlockedIds = new Set(getUnlockedBotWalletIds(wallets, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
+    if (!unlockedIds.has(wallet.id)) {
+      throw new Error(`${wallet.name} is a locked bot slot on your account. Contact the admin to unlock it.`)
+    }
+  }
+
   const environment = resolveAuthorizedWalletEnvironment(wallet, settings)
   const environmentLabel = environment === REAL_MONEY_WALLET_ENVIRONMENT
     ? 'Binance Futures Live'
@@ -8630,9 +8930,10 @@ async function recordTrade({
     result: null,
   }
 
-  await appendTradeHistory(order)
+  await appendTradeHistory(userId, order)
   if (wallet && isExchangeSyncWallet(wallet)) {
     await syncExchangeWalletBalance({
+      userId,
       settings,
       walletId: wallet.id,
       suppressErrors: true,
@@ -8908,8 +9209,8 @@ export function evaluateAiLossExit(trade = {}, currentPrice = 0, trainStatus = n
   }
 }
 
-async function updateOpenTrades() {
-  let settings = await getSettings()
+async function updateOpenTrades(userId) {
+  let settings = await getSettings(userId)
   const learningBotTrainStatus = await getLearningBotTrainStatus().catch(() => defaultLearningBotTrainStatus)
   const walletExchangeContextCache = new Map()
 
@@ -8931,6 +9232,7 @@ async function updateOpenTrades() {
 
     if (wallet && credentials.apiKey && credentials.secretKey) {
       const syncResult = await syncExchangeWalletBalance({
+        userId,
         settings,
         walletId: wallet.id,
         suppressErrors: true,
@@ -8944,16 +9246,16 @@ async function updateOpenTrades() {
     return context
   }
 
-  const history = await getTradeHistory()
+  const history = await getTradeHistory(userId)
   const openTrades = history.filter((item) => item.status === 'OPEN')
-  const shouldRefreshTerminalMonitor = Date.now() - lastTerminalTradeMonitorAt >= TERMINAL_TRADE_MONITOR_INTERVAL_MS
+  const shouldRefreshTerminalMonitor = Date.now() - (lastTerminalTradeMonitorAtByUser.get(userId) || 0) >= TERMINAL_TRADE_MONITOR_INTERVAL_MS
 
   if (shouldRefreshTerminalMonitor) {
     const livePriceMap = openTrades.length > 0
       ? await getLivePriceMapForTrades(openTrades).catch(() => ({}))
       : {}
-    logTerminalMonitorSnapshot(settings, openTrades, livePriceMap, learningBotTrainStatus)
-    lastTerminalTradeMonitorAt = Date.now()
+    logTerminalMonitorSnapshot(userId, settings, openTrades, livePriceMap, learningBotTrainStatus)
+    lastTerminalTradeMonitorAtByUser.set(userId, Date.now())
   }
 
   if (openTrades.length === 0) {
@@ -9148,9 +9450,9 @@ async function updateOpenTrades() {
   }
 
   if (changed) {
-    await saveTradeHistory(updated)
-    await maybeRefreshLearningBotPolicy('TRADE_RECONCILE_CLOSE', settings)
-    await persistBotSettingsLog({
+    await saveTradeHistory(userId, updated)
+    await maybeRefreshLearningBotPolicy(userId, 'TRADE_RECONCILE_CLOSE', settings)
+    await persistBotSettingsLog(userId, {
       trigger: 'TRADE_RECONCILE',
       note: 'Captured after open-trade reconciliation updated the saved trade history.',
       settings,
@@ -9178,49 +9480,50 @@ async function mapWithConcurrency(items, limit, worker) {
   return results
 }
 
-async function runAutoTrader(trigger = 'MANUAL') {
+async function runAutoTrader(userId, trigger = 'MANUAL') {
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   const runSteps = []
   const pushStep = (message, status = 'info', extra = {}) => {
     const step = { message, status, ...extra }
     runSteps.push(step)
     logAutoTradeStepToTerminal(step)
-    broadcastAutoTradeEvent('step', step)
+    broadcastAutoTradeEvent(userId, 'step', step)
   }
   const runId = `run-${Date.now()}`
 
   if (autoTradeRuntime.running) {
     const result = { executed: false, reason: 'Auto trade is already running.', steps: runSteps, runId }
-    setAutoTradeOutcome(result)
+    setAutoTradeOutcome(userId, result)
     return result
   }
 
-  setAutoTradeRunningState(true, runId)
+  setAutoTradeRunningState(userId, true, runId)
 
   try {
-    let settings = await getSettings()
+    let settings = await getSettings(userId)
     pushStep('Loaded strategy settings.', 'info')
 
     if (trigger === 'SCHEDULED' && !settings.strategy.autoTradingEnabled) {
       pushStep('Auto trading is disabled in settings.', 'blocked')
       const result = { executed: false, reason: 'Auto trading is disabled.', steps: runSteps, runId }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
     if (trigger === 'SCHEDULED' && !isWithinTradingSession(settings.strategy)) {
       pushStep('Skipped run because current Manila time is outside trading sessions.', 'blocked')
       const result = { executed: false, reason: 'Outside configured trading sessions.', steps: runSteps, runId }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
-    if (!ensureNotCancelled(runSteps)) {
+    if (!ensureNotCancelled(userId, runSteps)) {
       const result = { executed: false, reason: 'Auto trade stopped by user.', steps: runSteps, runId }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
-    const history = await getTradeHistory()
+    const history = await getTradeHistory(userId)
     const todayKey = manilaDateKey()
     const openTrades = history.filter((item) => item.status === 'OPEN')
     const openTradePrices = await getLivePriceMapForTrades(openTrades)
@@ -9235,14 +9538,14 @@ async function runAutoTrader(trigger = 'MANUAL') {
         steps: runSteps,
         runId,
       }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
     let exchangeInfo
 
     try {
       exchangeInfo = await fetchFuturesExchangeInfo()
-      settings = await syncPreferredSymbolsWithVolatility(settings, exchangeInfo)
+      settings = await syncPreferredSymbolsWithVolatility(userId, settings, exchangeInfo)
     } catch (error) {
       pushStep('Skipped run because Binance market data is temporarily unavailable.', 'blocked')
       const result = {
@@ -9251,12 +9554,19 @@ async function runAutoTrader(trigger = 'MANUAL') {
         steps: runSteps,
         runId,
       }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
     const universeSymbols = settings.strategy.preferredSymbols || []
-    const enabledWallets = getTradingWallets(settings.wallets).filter((wallet) => wallet.enabled)
+    // Bot-slot entitlements (SaaS Phase 2): a locked bot wallet never joins an auto-trade
+    // run, even if its own `enabled` flag is on - see getEffectiveBotSlots/getUnlockedBotWalletIds.
+    // Only the sellable wallets (visibleTradingWallets) are subject to this at all - Bot 10
+    // and the hidden LLM bots 11-15 are separate mechanisms, unaffected by slot count.
+    const sellableWalletIds = new Set(visibleTradingWallets(settings.wallets).map((wallet) => wallet.id))
+    const unlockedBotWalletIds = new Set(getUnlockedBotWalletIds(settings.wallets, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
+    const enabledWallets = getTradingWallets(settings.wallets)
+      .filter((wallet) => wallet.enabled && (!sellableWalletIds.has(wallet.id) || unlockedBotWalletIds.has(wallet.id)))
 
     // wallet-real-money is a MAIN-kind wallet and is intentionally excluded
     // from getTradingWallets()/enabled above - it only ever joins a run when
@@ -9282,13 +9592,13 @@ async function runAutoTrader(trigger = 'MANUAL') {
     if (universeSymbols.length === 0) {
       pushStep('No volatile futures symbols available to scan.', 'blocked')
       const result = { executed: false, reason: 'No volatile futures symbols available.', steps: runSteps, runId }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
     if (enabledWallets.length === 0) {
       const result = { executed: false, reason: 'No enabled wallets are configured for automated testing.', steps: runSteps, runId }
-      setAutoTradeOutcome(result)
+      setAutoTradeOutcome(userId, result)
       return result
     }
 
@@ -9396,7 +9706,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
           ...result,
         }
         walletResults.push(walletResult)
-        await appendAutoTradeLog({
+        await appendAutoTradeLog(userId, {
           type: 'AUTO_RUN',
           trigger,
           walletId: resolvedWallet.id,
@@ -9425,6 +9735,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
 
       if (isExchangeSyncWallet(wallet)) {
         const syncResult = await syncExchangeWalletBalance({
+          userId,
           settings,
           walletId: wallet.id,
           suppressErrors: true,
@@ -9708,7 +10019,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
 
       if (autoTradeRuntime.cancelRequested) {
         const result = await walletCancelled()
-        setAutoTradeOutcome(result)
+        setAutoTradeOutcome(userId, result)
         return result
       }
 
@@ -9768,7 +10079,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
 
       if (scanCancelled) {
         const result = await walletCancelled()
-        setAutoTradeOutcome(result)
+        setAutoTradeOutcome(userId, result)
         return result
       }
 
@@ -9899,7 +10210,7 @@ async function runAutoTrader(trigger = 'MANUAL') {
 
       if (autoTradeRuntime.cancelRequested) {
         const result = await walletCancelled()
-        setAutoTradeOutcome(result)
+        setAutoTradeOutcome(userId, result)
         return result
       }
 
@@ -9987,8 +10298,43 @@ async function runAutoTrader(trigger = 'MANUAL') {
         }
       }
 
+      // SaaS Phase 3 (AI Signals): an optional per-bot advisory gate, distinct from the
+      // admin-only AI Entry Filter above - backed by this user's own AI-provider credentials,
+      // assigned per bot via Settings > Bot Strategy. Unassigned (the common case, and the
+      // default) skips this entirely - candidateAiSignalVerdict stays null and recordTrade's
+      // aiReview below is null, exactly as if this feature did not exist.
+      let candidateAiSignalVerdict = null
+      const aiSignalProviderId = String(walletStrategy.aiSignalProviderId || '').trim()
+      if (aiSignalProviderId) {
+        const aiSignalCredential = settings.aiProviderCredentials?.[aiSignalProviderId] || null
+        candidateAiSignalVerdict = await evaluateAiSignalForCandidate({
+          providerId: aiSignalProviderId,
+          model: walletStrategy.aiSignalModel || '',
+          credential: aiSignalCredential,
+          candidate,
+          signalModelName: candidate.signalModelName,
+        })
+
+        pushWalletStep(
+          candidateAiSignalVerdict.unavailable
+            ? `AI signal (${aiSignalProviderId}) unavailable for ${candidate.symbol}, proceeding on rules alone: ${candidateAiSignalVerdict.reason}`
+            : `AI signal (${aiSignalProviderId}) ${candidateAiSignalVerdict.accept ? 'confirmed' : 'vetoed'} ${candidate.symbol}${candidateAiSignalVerdict.confidence != null ? ` at ${candidateAiSignalVerdict.confidence}% confidence` : ''}: ${candidateAiSignalVerdict.reason}`,
+          candidateAiSignalVerdict.unavailable ? 'info' : (candidateAiSignalVerdict.accept ? 'pass' : 'blocked'),
+          { symbol: candidate.symbol, aiSignalProviderId },
+        )
+
+        if (!candidateAiSignalVerdict.accept) {
+          await finishWallet({
+            executed: false,
+            reason: `AI signal vetoed ${candidate.symbol}: ${candidateAiSignalVerdict.reason}`,
+            order: null,
+          })
+          continue
+        }
+      }
+
       try {
-        const tradeResult = await recordTrade({
+        const tradeResult = await recordTrade(userId, {
           symbol: candidate.symbol,
           side: candidate.side,
           quantity,
@@ -10020,6 +10366,15 @@ async function runAutoTrader(trigger = 'MANUAL') {
             forecastScoreDelta: aiFilterDecision.forecastScoreDelta ?? 0,
             forecastDirection: leaveOneOutForecast.direction,
             forecastPercent: leaveOneOutForecast.percent,
+          } : null,
+          aiReview: candidateAiSignalVerdict ? {
+            source: 'ai-signal',
+            providerId: candidateAiSignalVerdict.providerId,
+            model: candidateAiSignalVerdict.model,
+            accept: candidateAiSignalVerdict.accept,
+            confidence: candidateAiSignalVerdict.confidence,
+            reason: candidateAiSignalVerdict.reason,
+            unavailable: candidateAiSignalVerdict.unavailable,
           } : null,
           walletId: resolvedWallet.id,
           walletName: resolvedWallet.name,
@@ -10069,15 +10424,15 @@ async function runAutoTrader(trigger = 'MANUAL') {
       runId,
     }
 
-    setAutoTradeOutcome(output)
+    setAutoTradeOutcome(userId, output)
     return output
   } finally {
-    setAutoTradeRunningState(false, null)
+    setAutoTradeRunningState(userId, false, null)
   }
 }
 
-app.get('/api/health', async (_request, response) => {
-  const settings = await getSettings()
+app.get('/api/health', async (request, response) => {
+  const settings = await getSettings(request.user.id)
   const { apiKey, secretKey } = getEffectiveCredentials(settings)
   response.json({
     ok: true,
@@ -10094,13 +10449,15 @@ app.get('/api/market-data-health', async (_request, response) => {
   })
 })
 
-app.get('/api/settings', async (_request, response) => {
-  const settings = await syncPreferredSymbolsWithVolatility(await getSettings())
-  response.json(sanitizeSettingsForClient(settings))
+app.get('/api/settings', async (request, response) => {
+  const settings = await syncPreferredSymbolsWithVolatility(request.user.id, await getSettings(request.user.id))
+  response.json(sanitizeSettingsForClient(settings, await getEffectiveBotSlots(request.user.id), await getEffectiveOwnedSignals(request.user.id)))
 })
 
 app.put('/api/settings', async (request, response) => {
-  const currentSettings = await getSettings()
+  const userId = request.user.id
+  const isAdmin = userId === await getAdminUserId()
+  const currentSettings = await getSettings(userId)
   const learningBotTrainStatus = await getLearningBotTrainStatus().catch(() => defaultLearningBotTrainStatus)
   const requestedSettingsRevision = Number(request.body?.settingsRevision || 0)
   const currentSettingsRevision = Number(currentSettings.settingsRevision || defaultSettings.settingsRevision)
@@ -10113,17 +10470,19 @@ app.put('/api/settings', async (request, response) => {
   }
 
   if (!Number.isSafeInteger(requestedSettingsRevision) || requestedSettingsRevision !== currentSettingsRevision) {
-    await appendSettingsAuditLog({
-      trigger: 'SETTINGS_SAVE_REJECTED',
-      source: 'api.settings.put',
-      note: 'Rejected stale settings save due to revision mismatch.',
-      beforeSettings: currentSettings,
-      afterSettings: currentSettings,
-      requestMeta,
-      writeMeta: {
-        reason: 'revision-mismatch',
-      },
-    })
+    if (isAdmin) {
+      await appendSettingsAuditLog({
+        trigger: 'SETTINGS_SAVE_REJECTED',
+        source: 'api.settings.put',
+        note: 'Rejected stale settings save due to revision mismatch.',
+        beforeSettings: currentSettings,
+        afterSettings: currentSettings,
+        requestMeta,
+        writeMeta: {
+          reason: 'revision-mismatch',
+        },
+      })
+    }
     logTerminalLine(
       'BLOCK',
       `Rejected stale settings save. Client revision ${requestedSettingsRevision || 'missing'} does not match current revision ${currentSettingsRevision}.`,
@@ -10145,7 +10504,7 @@ app.put('/api/settings', async (request, response) => {
   }
 
   const nextSettings = mergeSettingsUpdate(currentSettings, request.body)
-  const savedSettings = await saveSettings(nextSettings, {
+  const savedSettings = await saveSettings(userId, nextSettings, {
     incrementRevision: true,
     currentSettings,
     audit: {
@@ -10155,19 +10514,20 @@ app.put('/api/settings', async (request, response) => {
       requestMeta,
     },
   })
-  let hydratedSettings = await syncPreferredSymbolsWithVolatility(savedSettings)
+  let hydratedSettings = await syncPreferredSymbolsWithVolatility(userId, savedSettings)
   const syncedWallet = getPrimaryExchangeSyncedWallet(hydratedSettings.wallets)
 
   if (syncedWallet) {
     const syncResult = await syncExchangeWalletBalance({
+      userId,
       settings: hydratedSettings,
       walletId: syncedWallet.id,
       suppressErrors: true,
     })
-    hydratedSettings = await syncPreferredSymbolsWithVolatility(syncResult.settings)
+    hydratedSettings = await syncPreferredSymbolsWithVolatility(userId, syncResult.settings)
   }
 
-  await persistBotSettingsLog({
+  await persistBotSettingsLog(userId, {
     trigger: 'SETTINGS_SAVE',
     note: 'Captured after saving settings.',
     settings: hydratedSettings,
@@ -10175,11 +10535,11 @@ app.put('/api/settings', async (request, response) => {
     console.error('Failed to persist bot settings log after saving settings:', error)
   })
 
-  maybeRefreshLearningBotPolicy('SETTINGS_SAVE', hydratedSettings).catch((error) => {
+  maybeRefreshLearningBotPolicy(userId, 'SETTINGS_SAVE', hydratedSettings).catch((error) => {
     console.error('Failed to auto-refresh AI policy after settings save:', error)
   })
 
-  response.json(sanitizeSettingsForClient(hydratedSettings))
+  response.json(sanitizeSettingsForClient(hydratedSettings, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
 })
 
 app.post('/api/wallets/:walletId/sync', async (request, response) => {
@@ -10191,7 +10551,7 @@ app.post('/api/wallets/:walletId/sync', async (request, response) => {
   }
 
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(request.user.id)
     const wallet = getWalletById(walletId, settings.wallets)
 
     if (!wallet) {
@@ -10207,16 +10567,17 @@ app.post('/api/wallets/:walletId/sync', async (request, response) => {
     }
 
     const syncResult = await syncExchangeWalletBalance({
+      userId: request.user.id,
       settings,
       walletId,
       suppressErrors: false,
     })
-    const hydratedSettings = await syncPreferredSymbolsWithVolatility(syncResult.settings)
+    const hydratedSettings = await syncPreferredSymbolsWithVolatility(request.user.id, syncResult.settings)
 
     response.json({
       ok: true,
       wallet: getWalletById(walletId, hydratedSettings.wallets),
-      settings: sanitizeSettingsForClient(hydratedSettings),
+      settings: sanitizeSettingsForClient(hydratedSettings, await getEffectiveBotSlots(request.user.id), await getEffectiveOwnedSignals(request.user.id)),
       syncedAt: Date.now(),
     })
   } catch (error) {
@@ -10226,11 +10587,11 @@ app.post('/api/wallets/:walletId/sync', async (request, response) => {
   }
 })
 
-app.get('/api/volatile-markets', async (_request, response) => {
+app.get('/api/volatile-markets', async (request, response) => {
   try {
     const exchangeInfo = await fetchFuturesExchangeInfo()
     const items = await getVolatileMarketsSnapshot({ limit: VOLATILE_SYMBOL_LIMIT, exchangeInfo })
-    const settings = await syncPreferredSymbolsWithVolatility(await getSettings(), exchangeInfo)
+    const settings = await syncPreferredSymbolsWithVolatility(request.user.id, await getSettings(request.user.id), exchangeInfo)
 
     response.json({
       ok: true,
@@ -10246,7 +10607,7 @@ app.get('/api/volatile-markets', async (_request, response) => {
 
 app.get('/api/signal-model-analysis', async (request, response) => {
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(request.user.id)
     const symbol = String(request.query.symbol || '').toUpperCase()
     const signalModelId = ensureSignalModelId(request.query.modelId || settings.strategy.activeSignalModelId)
 
@@ -10257,7 +10618,7 @@ app.get('/api/signal-model-analysis', async (request, response) => {
 
     const wallets = normalizeWallets(settings.wallets)
     const analysisWallet = wallets.find((wallet) => wallet.assignedSignalModelId === signalModelId) || null
-    const analysisHistory = analysisWallet ? await getTradeHistory() : []
+    const analysisHistory = analysisWallet ? await getTradeHistory(request.user.id) : []
     const analysisWalletTrades = analysisWallet
       ? analysisHistory.filter((trade) => trade.walletId === analysisWallet.id)
       : []
@@ -10318,7 +10679,7 @@ app.get('/api/signal-model-analysis', async (request, response) => {
 // OpenRouter's public catalog incl. free models. See server/ai-models/catalog.js.
 app.get('/api/ai-models/browse', async (request, response) => {
   try {
-    await getSettings() // refreshes the credential mirror the catalog reads
+    await getSettings(request.user.id) // admin: refreshes the credential mirror the catalog reads
     const force = request.query.refresh === '1'
     const providerId = String(request.query.provider || 'all')
     const providers = providerId === 'all'
@@ -10341,7 +10702,7 @@ app.post('/api/ai-models/test', async (request, response) => {
   }
   const startedAt = Date.now()
   try {
-    await getSettings()
+    await getSettings(request.user.id)
     const result = await callAgentJson({
       providerId,
       model,
@@ -10467,7 +10828,7 @@ function getMinOrderUsdt(symbolInfo, price) {
 // wallet may use. Same balance source and cap rule the executor uses (openAiTrade / scalePlanToWallet). Never fatal: the pipeline
 // treats a failure as "no constraints" and the executor still enforces the rule.
 async function getAiExchangeConstraints(symbol, snapshot) {
-  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings(await getAdminUserId())])
   const mode = config.execution.mode
   const environment = getAiEnvironment(mode)
   const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
@@ -10637,7 +10998,7 @@ async function getAiTradeConstraints(symbol, snapshot) {
 
 async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
   // Refresh the provider-credential mirror the LLM caller reads.
-  await getSettings()
+  await getSettings(await getAdminUserId())
   const [config, quantStats] = await Promise.all([getAiTradingConfig(), loadQuantStats()])
   const run = await runAiTradingPipeline({
     symbol,
@@ -10877,7 +11238,7 @@ async function describeBlockingPosition(symbol, mode, snapshot, positionAmount) 
 // The body of openAiTrade, run one-at-a-time per mode (see withAiModeExecutionLock).
 async function openAiTradeLocked({ run, mode, confirm, auto }) {
   try {
-    const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+    const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings(await getAdminUserId())])
     const ticker = await fetchTickerPrice(run.symbol).catch(() => null)
     const { plan } = assertCanExecute({ run, mode, config, trades, livePrice: Number(ticker?.price), confirm, auto })
 
@@ -10996,7 +11357,7 @@ function toAiExchangeSide(side) {
 }
 
 async function closeAiTradeNow(tradeId, { closedBy = null } = {}) {
-  const settings = await getSettings()
+  const settings = await getSettings(await getAdminUserId())
   const trade = (await getAiTrades()).find((item) => item.id === tradeId)
   if (!trade) {
     throw new AiExecutionError('Trade not found.', 404)
@@ -11049,7 +11410,7 @@ async function monitorAiTrades() {
   try {
     const open = (await getAiTrades()).filter(isOpenAiTrade)
     if (open.length === 0) return
-    const settings = await getSettings()
+    const settings = await getSettings(await getAdminUserId())
     const latestPrices = new Map()
     const snapshots = new Map()
     const changes = new Map()
@@ -11216,7 +11577,7 @@ async function runPositionManagerReview(tradeId) {
   try {
     const trade = (await getAiTrades()).find((item) => item.id === tradeId)
     if (!trade || !isOpenAiTrade(trade)) return null
-    await getSettings() // refresh the provider-credential mirror the LLM caller reads
+    await getSettings(await getAdminUserId()) // refresh the provider-credential mirror the LLM caller reads
     const config = await getAiTradingConfig()
     const agent = config.agents.manager
     const canAct = trade.aiTradingMode === 'testnet' || config.execution.positionManagerActsOnReal
@@ -11258,7 +11619,7 @@ async function runPositionManagerReview(tradeId) {
       await persistAiTradeReview(tradeId, null, review, { ...recordOptions, advisoryOnly: true })
     } else {
       const environment = getAiEnvironment(trade.aiTradingMode)
-      const settings = await getSettings()
+      const settings = await getSettings(await getAdminUserId())
       const { apiKey, secretKey } = getEffectiveCredentials(settings, environment)
       const credentials = { apiKey, secretKey, baseUrl: getFuturesBaseUrl(environment) }
       try {
@@ -11336,7 +11697,7 @@ function sendAiExecutionError(response, error) {
 const AI_WALLET_TONES = { testnet: 'sky', real: 'amber' }
 
 async function buildAiLedgerView({ force = false } = {}) {
-  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings()])
+  const [config, trades, settings] = await Promise.all([getAiTradingConfig(), getAiTrades(), getSettings(await getAdminUserId())])
   const livePrices = await getLivePriceMapForTrades(trades.filter(isOpenAiTrade))
   const [testnetExchange, realExchange] = await Promise.all([
     getAiExchangeSummary('testnet', settings, { force }),
@@ -11414,8 +11775,8 @@ app.post('/api/ai-trading/trades/:tradeId/close', async (request, response) => {
   }
 })
 
-app.get('/api/trade-history', async (_request, response) => {
-  const items = await getTradeHistory()
+app.get('/api/trade-history', async (request, response) => {
+  const items = await getTradeHistory(request.user.id)
   response.json({
     ok: true,
     items,
@@ -11424,7 +11785,7 @@ app.get('/api/trade-history', async (_request, response) => {
 
 app.get('/api/learning-bot/summary', async (_request, response) => {
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(await getAdminUserId())
     const config = normalizeLearningBotSettings(settings.learningBot)
     const { dataset, source, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady } = await refreshLearningBotDatasetArtifact(config)
     const summary = buildLearningBotSummary(dataset, config)
@@ -11455,7 +11816,7 @@ app.get('/api/learning-bot/summary', async (_request, response) => {
 
 app.get('/api/learning-bot/dataset', async (_request, response) => {
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(await getAdminUserId())
     const config = normalizeLearningBotSettings(settings.learningBot)
     const { artifact, source, eligibleClosedTradeCount, realMoneyTradeTarget, realMoneyTradeReady } = await refreshLearningBotDatasetArtifact(config)
 
@@ -11484,7 +11845,7 @@ app.get('/api/learning-bot/dataset', async (_request, response) => {
 
 app.get('/api/learning-bot/train-status', async (_request, response) => {
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(await getAdminUserId())
     const config = normalizeLearningBotSettings(settings.learningBot)
     const datasetSnapshot = await refreshLearningBotDatasetArtifact(config)
     const status = hydrateLearningBotTrainStatus(await getLearningBotTrainStatus(), datasetSnapshot)
@@ -11501,7 +11862,7 @@ app.get('/api/learning-bot/train-status', async (_request, response) => {
 
 app.post('/api/learning-bot/train', async (_request, response) => {
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(await getAdminUserId())
     const config = normalizeLearningBotSettings(settings.learningBot)
 
     if (!config.aiTrainer.enabled) {
@@ -11775,8 +12136,9 @@ app.post('/api/trade-history/:tradeId/manual-close', async (request, response) =
   }
 
   try {
-    let settings = await getSettings()
-    const history = await getTradeHistory()
+    const userId = request.user.id
+    let settings = await getSettings(userId)
+    const history = await getTradeHistory(userId)
     const tradeIndex = history.findIndex((trade) => trade.id === tradeId)
 
     if (tradeIndex === -1) {
@@ -11857,9 +12219,9 @@ app.post('/api/trade-history/:tradeId/manual-close', async (request, response) =
 
     const items = history.map((item, index) => (index === tradeIndex ? updatedTrade : item))
 
-    await saveTradeHistory(items)
-    await maybeRefreshLearningBotPolicy('MANUAL_CLOSE', settings)
-    await persistBotSettingsLog({
+    await saveTradeHistory(userId, items)
+    await maybeRefreshLearningBotPolicy(userId, 'MANUAL_CLOSE', settings)
+    await persistBotSettingsLog(userId, {
       trigger: 'MANUAL_CLOSE',
       note: `Captured after manually closing ${trade.symbol} ${trade.side}.`,
       settings,
@@ -11872,6 +12234,7 @@ app.post('/api/trade-history/:tradeId/manual-close', async (request, response) =
       const wallet = getWalletById(trade.walletId, settings.wallets)
       if (wallet && isExchangeSyncWallet(wallet)) {
         const syncResult = await syncExchangeWalletBalance({
+          userId,
           settings,
           walletId: wallet.id,
           suppressErrors: true,
@@ -11919,7 +12282,7 @@ app.post('/api/mock-order', async (request, response) => {
   }
 
   try {
-    const settings = await getSettings()
+    const settings = await getSettings(request.user.id)
     const exchangeInfo = await fetchFuturesExchangeInfo()
     const symbolInfo = findSymbolRules(exchangeInfo, symbol)
 
@@ -11930,7 +12293,7 @@ app.post('/api/mock-order', async (request, response) => {
 
     const normalizedQuantity = buildFuturesQuantity(symbolInfo, Number(notional), Number(entryPrice))
 
-    const result = await recordTrade({
+    const result = await recordTrade(request.user.id, {
       symbol,
       side,
       quantity: normalizedQuantity,
@@ -11959,10 +12322,10 @@ app.post('/api/mock-order', async (request, response) => {
   }
 })
 
-app.get('/api/journal-summary', async (_request, response) => {
-  const settings = await getSettings()
+app.get('/api/journal-summary', async (request, response) => {
+  const settings = await getSettings(request.user.id)
   const wallets = normalizeWallets(settings.wallets)
-  const history = (await getTradeHistory()).filter((trade) => isAutoTradeSource(trade.source))
+  const history = (await getTradeHistory(request.user.id)).filter((trade) => isAutoTradeSource(trade.source))
   const items = buildJournalItems(history)
   const walletItems = getTradingWallets(wallets).map((wallet) => {
     const walletTrades = history.filter((trade) => trade.walletId === wallet.id)
@@ -11994,10 +12357,12 @@ app.get('/api/journal-summary', async (_request, response) => {
   })
 })
 
-app.get('/api/auto-trade-status', async (_request, response) => {
-  const settings = await syncPreferredSymbolsWithVolatility(await getSettings())
-  const history = await getTradeHistory()
+app.get('/api/auto-trade-status', async (request, response) => {
+  const userId = request.user.id
+  const settings = await syncPreferredSymbolsWithVolatility(userId, await getSettings(userId))
+  const history = await getTradeHistory(userId)
   const wallets = normalizeWallets(settings.wallets)
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   response.json({
     enabled: settings.strategy.autoTradingEnabled,
     today: summarizeToday(history, manilaDateKey()),
@@ -12016,16 +12381,16 @@ app.get('/api/auto-trade-status', async (_request, response) => {
   })
 })
 
-app.get('/api/auto-trade-log', async (_request, response) => {
-  const items = await getAutoTradeLog()
+app.get('/api/auto-trade-log', async (request, response) => {
+  const items = await getAutoTradeLog(request.user.id)
   response.json({
     ok: true,
     items,
   })
 })
 
-app.get('/api/bot-settings-log', async (_request, response) => {
-  const items = await getBotSettingsLog()
+app.get('/api/bot-settings-log', async (request, response) => {
+  const items = await getBotSettingsLog(request.user.id)
   response.json({
     ok: true,
     items,
@@ -12040,16 +12405,135 @@ app.get('/api/settings-audit-log', async (_request, response) => {
   })
 })
 
-app.get('/api/workflow-readiness', async (_request, response) => {
+// Admin entitlement screen (SaaS Phase 2): the whole "billing" surface for the test phase -
+// grants are made by hand here, no payment gateway yet (see users-store.js updateUserPlan).
+// Both routes are under /admin, already gated to role: admin by ADMIN_ONLY_API_PREFIXES.
+app.get('/api/admin/users', async (_request, response) => {
+  const users = await listUsers()
+  response.json({
+    ok: true,
+    users: users
+      .map((user) => ({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        plan: { botSlots: 0, signals: [], ...user.plan },
+        createdAt: user.createdAt,
+      }))
+      .sort((left, right) => left.createdAt - right.createdAt),
+  })
+})
+
+app.post('/api/admin/users/:userId/plan', async (request, response) => {
+  const targetUserId = String(request.params.userId || '').trim()
+  const target = await getUserById(targetUserId)
+
+  if (!target) {
+    response.status(404).json({ error: 'User not found' })
+    return
+  }
+
+  const patch = {}
+
+  if ('botSlots' in (request.body || {})) {
+    const botSlots = Number(request.body.botSlots)
+    if (!Number.isInteger(botSlots) || botSlots < 0) {
+      response.status(400).json({ error: 'botSlots must be a non-negative integer.' })
+      return
+    }
+    patch.botSlots = botSlots
+  }
+
+  // SaaS Phase 5: grants specific signals regardless of botSlots position - see
+  // getUnlockedBotWalletIds' additive ownedSignalIds path.
+  if ('signals' in (request.body || {})) {
+    const requestedSignals = request.body.signals
+    if (!Array.isArray(requestedSignals) || requestedSignals.some((id) => typeof id !== 'string')) {
+      response.status(400).json({ error: 'signals must be an array of signal ids.' })
+      return
+    }
+    const unknownIds = requestedSignals.filter((id) => !SELLABLE_SIGNAL_MODEL_IDS.includes(id))
+    if (unknownIds.length > 0) {
+      response.status(400).json({ error: `Unknown signal id(s): ${unknownIds.join(', ')}` })
+      return
+    }
+    patch.signals = [...new Set(requestedSignals)]
+  }
+
+  if (Object.keys(patch).length === 0) {
+    response.status(400).json({ error: 'Nothing to update - pass botSlots and/or signals.' })
+    return
+  }
+
+  const updated = await updateUserPlan(targetUserId, patch)
+
+  if (Array.isArray(patch.signals)) {
+    await Promise.all(patch.signals.map((signalId) => clearPendingSignalAccessRequests(targetUserId, signalId)))
+  }
+
+  logTerminalLine(
+    'ADMIN',
+    `${request.user.email} set ${updated.email}'s plan: ${JSON.stringify(patch)}`,
+    'info',
+  )
+  response.json({
+    ok: true,
+    user: { id: updated.id, email: updated.email, role: updated.role, plan: updated.plan, createdAt: updated.createdAt },
+  })
+})
+
+// SaaS Phase 5 (Signals Marketplace): the catalog itself is NOT admin-gated - any
+// authenticated account should be able to browse what's available and request access. Only
+// the admin's grant/revoke and the pending-requests inbox are admin-only.
+app.get('/api/signals-marketplace', async (request, response) => {
+  const catalog = await buildSignalsMarketplaceCatalog(request.user.id)
+  response.json({ ok: true, ...catalog })
+})
+
+app.post('/api/signals-marketplace/:signalId/request', async (request, response) => {
+  const signalId = String(request.params.signalId || '').trim()
+  if (!SELLABLE_SIGNAL_MODEL_IDS.includes(signalId)) {
+    response.status(404).json({ error: `Unknown signal id "${signalId}".` })
+    return
+  }
+
+  const ownedIds = await getEffectiveOwnedSignals(request.user.id)
+  if (ownedIds.includes(signalId)) {
+    response.status(409).json({ error: 'You already own this signal.' })
+    return
+  }
+
+  await addSignalAccessRequest(request.user.id, request.user.email, signalId)
+  logTerminalLine(
+    'SIGNALS',
+    `${request.user.email} requested access to ${getSignalModel(signalId)?.name || signalId}.`,
+    'info',
+  )
+  response.json({ ok: true })
+})
+
+app.get('/api/admin/signal-requests', async (_request, response) => {
+  const requests = (await getSignalAccessRequests()).filter((entry) => entry.status === 'pending')
+  response.json({
+    ok: true,
+    requests: requests.map((entry) => ({
+      ...entry,
+      signalName: getSignalModel(entry.signalId)?.name || entry.signalId,
+    })),
+  })
+})
+
+app.get('/api/workflow-readiness', async (request, response) => {
+  const userId = request.user.id
   const [settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns] = await Promise.all([
-    syncPreferredSymbolsWithVolatility(await getSettings()),
-    getTradeHistory(),
-    getAutoTradeLog(),
+    syncPreferredSymbolsWithVolatility(userId, await getSettings(userId)),
+    getTradeHistory(userId),
+    getAutoTradeLog(userId),
     getLearningBotTrainStatus(),
     getBacktestRunRegistry().catch(() => []),
   ])
   const snapshot = evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns)
-  const reviewLog = await persistWorkflowReview(snapshot)
+  const reviewLog = await persistWorkflowReview(userId, snapshot)
 
   response.json({
     ok: true,
@@ -12092,6 +12576,8 @@ app.post('/api/codex-console/message', async (request, response) => {
 })
 
 app.get('/api/auto-trade-events', (request, response) => {
+  const userId = request.user.id
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   response.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -12107,16 +12593,17 @@ app.get('/api/auto-trade-events', (request, response) => {
     lastExecuted: autoTradeRuntime.lastExecuted,
   })}\n\n`)
 
-  autoTradeClients.add(response)
+  const client = { response, userId }
+  autoTradeClients.add(client)
 
   request.on('close', () => {
-    autoTradeClients.delete(response)
+    autoTradeClients.delete(client)
   })
 })
 
-app.post('/api/auto-trade/run', async (_request, response) => {
+app.post('/api/auto-trade/run', async (request, response) => {
   try {
-    const result = await runAutoTrader('MANUAL')
+    const result = await runAutoTrader(request.user.id, 'MANUAL')
     response.json(result)
   } catch (error) {
     response.status(500).json({
@@ -12125,7 +12612,9 @@ app.post('/api/auto-trade/run', async (_request, response) => {
   }
 })
 
-app.post('/api/auto-trade/stop', async (_request, response) => {
+app.post('/api/auto-trade/stop', async (request, response) => {
+  const userId = request.user.id
+  const autoTradeRuntime = getAutoTradeRuntime(userId)
   if (!autoTradeRuntime.running) {
     response.json({
       ok: true,
@@ -12136,7 +12625,7 @@ app.post('/api/auto-trade/stop', async (_request, response) => {
   }
 
   autoTradeRuntime.cancelRequested = true
-  broadcastAutoTradeEvent('state', {
+  broadcastAutoTradeEvent(userId, 'state', {
     running: true,
     currentRunId: autoTradeRuntime.currentRunId,
     cancelRequested: true,
@@ -12175,7 +12664,7 @@ if (IS_MAIN_MODULE) {
 // credential fields (settings.apiKey/secretKey, env-fallback) the rest of
 // the app's Binance Testnet execution already uses.
 async function getConsolidatedTestnetCredentials() {
-  const currentSettings = await getSettings()
+  const currentSettings = await getSettings(await getAdminUserId())
   return {
     apiKey: currentSettings.apiKey || process.env.BINANCE_TESTNET_API_KEY || '',
     secretKey: currentSettings.secretKey || process.env.BINANCE_TESTNET_SECRET_KEY || '',
@@ -12187,13 +12676,39 @@ registerConsolidatedBot(app, {
   fetchKlines,
   toCandleData,
   buildSignalAnalysisSnapshot,
-  getSettings,
+  // Bot 10 (Consolidated Knowledge) is the admin's own environment - always the admin's
+  // settings, regardless of who else may be signed in elsewhere.
+  getSettings: async () => getSettings(await getAdminUserId()),
   getTestnetCredentials: getConsolidatedTestnetCredentials,
   autostart: IS_MAIN_MODULE,
 })
 
+// Bots 1-9 are per-user now (Phase 1) - these background jobs used to run once globally
+// against the one shared settings/trade-history file; they now run once per registered
+// user in turn. There is no real bot-slot entitlement system yet (Phase 2), so every
+// registered user is tried - a user with no enabled wallets is a cheap early-return inside
+// updateOpenTrades/runAutoTrader, not a wasted full scan.
+async function forEachUserWithBots(fn) {
+  const users = await listUsers()
+  for (const user of users) {
+    try {
+      await fn(user.id)
+    } catch (error) {
+      console.error(`Failed running per-user bot job for user ${user.id}:`, error)
+    }
+  }
+}
+
+async function runUpdateOpenTradesForAllUsers() {
+  await forEachUserWithBots((userId) => updateOpenTrades(userId))
+}
+
+async function runAutoTraderForAllUsers(reason) {
+  await forEachUserWithBots((userId) => runAutoTrader(userId, reason))
+}
+
 setInterval(() => {
-  updateOpenTrades().catch((error) => {
+  runUpdateOpenTradesForAllUsers().catch((error) => {
     console.error('Failed to update open trades:', error)
   })
 }, 10_000)
@@ -12220,7 +12735,7 @@ if (IS_MAIN_MODULE) {
 }
 
 setInterval(() => {
-  runAutoTrader('SCHEDULED').catch((error) => {
+  runAutoTraderForAllUsers('SCHEDULED').catch((error) => {
     console.error('Failed to run auto trader:', error)
   })
 }, 5 * 60_000)
@@ -12232,13 +12747,14 @@ setInterval(() => {
 }, SETTINGS_FILE_AUDIT_INTERVAL_MS)
 
 setTimeout(() => {
-  runAutoTrader('SCHEDULED').catch((error) => {
+  runAutoTraderForAllUsers('SCHEDULED').catch((error) => {
     console.error('Initial auto trader check failed:', error)
   })
 }, 10_000)
 
 app.listen(port, host, async () => {
-  let startupSettings = await getSettings().catch(() => defaultSettings)
+  const adminUserId = await getAdminUserId()
+  let startupSettings = await getSettings(adminUserId).catch(() => defaultSettings)
   const learningBotTrainStatus = await getLearningBotTrainStatus().catch(() => defaultLearningBotTrainStatus)
   const recoveryResult = await selfHealSettingsIfNeeded(startupSettings, {
     source: 'app.listen',
@@ -12280,21 +12796,21 @@ app.listen(port, host, async () => {
         : appLoginPasswordSource === 'environment'
           ? 'Access : private login password loaded from APP_LOGIN_PASSWORD'
           : `Access : using a generated login password for this run only -> ${appLoginPassword}`,
-      `Auto   : ${formatTerminalEnabledState(Boolean(startupSettings?.strategy?.autoTradingEnabled))} | Runtime ${formatTerminalRuntimeState(autoTradeRuntime.running)}`,
+      `Auto   : ${formatTerminalEnabledState(Boolean(startupSettings?.strategy?.autoTradingEnabled))} | Runtime ${formatTerminalRuntimeState(getAutoTradeRuntime(adminUserId).running)}`,
       formatLearningBotStatusLine(learningBotTrainStatus),
       'Loops  : terminal monitor every 10s | open-trade update every 10s | auto-trader scan every 5m',
       'View   : terminal-first live monitoring enabled',
     ],
     'success',
   )
-  persistBotSettingsLog({
+  persistBotSettingsLog(adminUserId, {
     trigger: 'STARTUP',
     note: 'Captured on server startup.',
     settings: startupSettings,
   }).catch((error) => {
     console.error('Failed to persist bot settings log on startup:', error)
   })
-  maybeRefreshLearningBotPolicy('SERVER_STARTUP', startupSettings).catch((error) => {
+  maybeRefreshLearningBotPolicy(adminUserId, 'SERVER_STARTUP', startupSettings).catch((error) => {
     console.error('Failed to auto-refresh AI policy on startup:', error)
   })
 })

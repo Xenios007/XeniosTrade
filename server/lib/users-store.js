@@ -128,6 +128,22 @@ export function createUsersStore({ dataDir = DEFAULT_DATA_DIR } = {}) {
     return user
   }
 
+  async function getUserById(userId) {
+    return findUserById(await readUsers(), userId)
+  }
+
+  // Phase 1: surfaces that are deliberately NOT per-user yet (AI Trading, Learning Bot,
+  // Consolidated/Bot 10, server startup) always resolve to the admin account regardless of
+  // who is logged in. Cached per store instance - the admin's id never changes once created,
+  // and this is called on nearly every request these subsystems handle.
+  let cachedAdminUserId = null
+  async function getAdminUserId() {
+    if (cachedAdminUserId) return cachedAdminUserId
+    const admin = await findOrCreateUserByEmail(ADMIN_EMAIL)
+    cachedAdminUserId = admin.id
+    return cachedAdminUserId
+  }
+
   return {
     dataDir,
     registryPath,
@@ -138,6 +154,8 @@ export function createUsersStore({ dataDir = DEFAULT_DATA_DIR } = {}) {
     listUsers: readUsers,
     findOrCreateUserByEmail,
     updateUserPlan,
+    getAdminUserId,
+    getUserById,
   }
 }
 
@@ -149,3 +167,5 @@ export const readUsers = defaultStore.readUsers
 export const listUsers = defaultStore.listUsers
 export const findOrCreateUserByEmail = defaultStore.findOrCreateUserByEmail
 export const updateUserPlan = defaultStore.updateUserPlan
+export const getAdminUserId = defaultStore.getAdminUserId
+export const getUserById = defaultStore.getUserById

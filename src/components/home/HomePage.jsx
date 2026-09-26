@@ -53,8 +53,8 @@ const PLATFORM = [
   },
   {
     Icon: Bot,
-    title: 'A fleet of trading bots',
-    body: '15 bots run side by side — rule-based strategies and LLM-driven bots — each with its own wallet, so you can compare them on equal terms.',
+    title: 'Your own bots, your own account',
+    body: 'Nine rule-based strategies, each with its own wallet and trade history that never mixes with anyone else’s. Unlock the ones you run from a signals marketplace with real backtest results, and optionally assign your own AI model as a second opinion on any bot you own.',
   },
   {
     Icon: Layers,
@@ -381,12 +381,12 @@ export function HomePage({ authChecked, authenticated, googleEnabled, loginError
               Icon={Bot}
               name="Bot Trading"
               host="bot.projxenios.trade"
-              blurb="The bot fleet: strategies scanning markets on isolated wallets, with the dashboards to see what each one is doing and why."
+              blurb="Your own account, your own bots: rule-based strategies scanning markets on isolated wallets, with a marketplace to unlock more and the dashboards to see what each one is doing and why."
               points={[
-                '15 rule-based and LLM-driven bots, one wallet each',
-                'Auto-trade controller, activity feed and signal models',
-                'Trade history, journal and head-to-head comparisons',
-                'Backtesting and adaptive AI training',
+                'A private account — your own wallets, trade history and bot slots',
+                'Unlock bots from a signals marketplace with real backtest results',
+                'Optionally assign your own AI model as an advisory signal on any bot you own',
+                'Mock trading first; real-money execution is a separate, explicitly armed switch',
               ]}
               href={botUrl}
               cta="Open Bot Trading"

@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { LoaderCircle, LockKeyhole } from 'lucide-react'
 import { AppShell } from './components/shell/AppShell'
 import { BrandMark } from './components/BrandMark'
@@ -28,7 +28,8 @@ import { AiSettingsPage } from './components/aiTrading/AiSettingsPage'
 import { AiTradeHistoryPage } from './components/aiTrading/AiTradeHistoryPage'
 import { AiWalletPage } from './components/aiTrading/AiWalletPage'
 import { AIAssistantSidebar } from './components/AIAssistantSidebar'
-import { AutoTradeStatusPanel } from './components/AutoTradeStatusPanel'
+import { DashboardOpenPositions } from './components/DashboardOpenPositions'
+import { DashboardActivityFeed } from './components/DashboardActivityFeed'
 import { BotStatusGrid } from './components/BotStatusGrid'
 import { ProExitStrategy } from './components/ProExitStrategy'
 import { ForecastPanel } from './components/ForecastPanel'
@@ -42,6 +43,8 @@ import { StatsBar } from './components/StatsBar'
 import { TradeHistoryStatsPanel } from './components/TradeHistoryStatsPanel'
 import { TradeHistoryTable } from './components/TradeHistoryTable'
 import { WalletsPage } from './components/WalletsPage'
+import { AdminUsersPage } from './components/AdminUsersPage'
+import { SignalsMarketplacePage } from './components/SignalsMarketplacePage'
 import { SelfReviewLogPanel, WorkflowNotificationsPanel } from './components/WorkflowReadinessPanel'
 import { getKlines, getSignalModelAnalysis, getVolatileMarkets } from './lib/api'
 import { getStrategyDerivedMaxLossPerTrade, isTradeClosed, summarizeAccount } from './lib/accountMetrics'
@@ -190,7 +193,6 @@ const TRADE_HISTORY_TABS = [
 const DASHBOARD_TABS = [
   { to: '/dashboard', label: 'Overview', end: true },
   { to: '/dashboard/market', label: 'Market' },
-  { to: '/dashboard/auto-trade-status', label: 'Auto Trade Status' },
   { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
   { to: '/dashboard/workflow', label: 'Workflow Notifications' },
   { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
@@ -334,6 +336,22 @@ function ExternalRedirect({ to, label }) {
   )
 }
 
+// SaaS Phase 4: route-level fallback for a non-admin who navigates straight to an admin-only
+// URL (Codex Console, Consolidated Knowledge, AI Training) - the nav link is already hidden
+// for them (see Sidebar), and their API calls already 403 server-side (the real boundary,
+// ADMIN_ONLY_API_PREFIXES in mock-trading-server.js); this just avoids a broken-looking page.
+function AdminOnlyGate({ isAdmin, label, children }) {
+  if (isAdmin) {
+    return children
+  }
+
+  return (
+    <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-6 text-sm text-amber-100">
+      {label} is only available to the workspace admin.
+    </div>
+  )
+}
+
 // Which workspace's pages this location serves ('all' serves everything).
 const BOT_ROUTE_SECTIONS = SECTIONS_BY_MODE[APP_MODE_BOT].filter((section) => section !== 'ai-models')
 const showsBotPages = APP_MODE !== APP_MODE_AI
@@ -345,6 +363,12 @@ export default function App() {
   const tradePriceReconnectTimeoutRef = useRef(null)
   const hasLoadedSettingsRef = useRef(false)
   const [authState, setAuthState] = useState(AUTH_STATE_CHECKING)
+  const [currentUser, setCurrentUser] = useState(null)
+  // SaaS Phase 4: gates the three admin-only surfaces (Codex Console, Consolidated Knowledge,
+  // AI Training) both in the nav (Sidebar) and as a route-level fallback for a non-admin who
+  // types the URL directly - the real security boundary is the server-side 403 on their API
+  // routes (ADMIN_ONLY_API_PREFIXES in mock-trading-server.js), this is just UX.
+  const isAdmin = currentUser?.role === 'admin'
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
   const [authStatusMessage, setAuthStatusMessage] = useState('')
@@ -421,12 +445,14 @@ export default function App() {
 
         if (response.ok && payload.authenticated) {
           setAuthState(AUTH_STATE_AUTHENTICATED)
+          setCurrentUser(payload.user || null)
           setAuthStatusMessage('')
           setLoginError('')
           return
         }
 
         setAuthState(AUTH_STATE_UNAUTHENTICATED)
+        setCurrentUser(null)
         setAuthStatusMessage('')
       } catch (sessionError) {
         if (ignore) {
@@ -956,15 +982,6 @@ export default function App() {
     () => getEffectiveSignalModelStrategy(settings.strategy, settings.strategy.activeSignalModelId),
     [settings.strategy],
   )
-  const latestAutoOrder = useMemo(() => {
-    const latestFromLog = autoTradeLog.find((entry) => entry.result?.order)?.result.order
-    if (latestFromLog) {
-      return latestFromLog
-    }
-
-    return tradeHistory.find((trade) => isAutoTradeSource(trade.source)) || null
-  }, [autoTradeLog, tradeHistory])
-
   const signalModelPerformance = useMemo(() => {
     const emptyStats = Object.fromEntries(SIGNAL_MODELS.map((model) => [model.id, {
       tradeCount: 0,
@@ -1166,11 +1183,12 @@ export default function App() {
     setAuthStatusMessage('')
 
     try {
-      await postJsonResource('/api/auth/login', {
+      const payload = await postJsonResource('/api/auth/login', {
         password: loginPassword,
       })
       setLoginPassword('')
       setError('')
+      setCurrentUser(payload.user || null)
       setAuthState(AUTH_STATE_AUTHENTICATED)
     } catch (loginRequestError) {
       setLoginError(
@@ -1479,6 +1497,19 @@ export default function App() {
           activeSignalModelId={settings.strategy.activeSignalModelId}
           activeModelAnalysis={sidebarModelAnalysis}
         />
+
+        <div className="grid gap-6 xl:grid-cols-2">
+          <DashboardOpenPositions trades={tradeHistory} livePrices={liveTradePrices} />
+          <DashboardActivityFeed autoTradeLog={autoTradeLog} />
+        </div>
+
+        <Link
+          to="/mock-trading/auto-trade-controller"
+          className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 text-sm text-slate-200 transition hover:border-sky-400/30 hover:bg-white/[0.05]"
+        >
+          <span>Full runtime detail, controls, and the scheduler's live decision trail live on <span className="font-semibold text-white">Auto Trade Controller</span>.</span>
+          <span className="shrink-0 font-semibold text-sky-300">Open →</span>
+        </Link>
       </>
     )
   }
@@ -1538,27 +1569,18 @@ export default function App() {
   }
 
   function renderDashboard() {
+    const dashboardTabs = isAdmin ? DASHBOARD_TABS : DASHBOARD_TABS.filter((tab) => tab.to !== '/dashboard/codex')
+
     return (
       <div className="grid gap-6">
         <PageHeader
           title="Dashboard"
-          description="Live market and model signal for the selected pair, plus automation status, workflow, and the Codex console."
+          description="Your bots at a glance - open positions, recent activity, and where to dig deeper."
         />
-        <SubNavTabs tabs={DASHBOARD_TABS} />
+        <SubNavTabs tabs={dashboardTabs} />
         <Routes>
           <Route index element={renderDashboardOverview()} />
           <Route path="market" element={renderDashboardMarket()} />
-          <Route
-            path="auto-trade-status"
-            element={(
-              <AutoTradeStatusPanel
-                autoTradeStatus={autoTradeStatus}
-                autoTradePhase={autoTradePhase}
-                trackedSymbols={settings.strategy.preferredSymbols}
-                latestAutoOrder={latestAutoOrder}
-              />
-            )}
-          />
           <Route
             path="real-money-trading"
             element={(
@@ -1575,7 +1597,7 @@ export default function App() {
           />
           <Route path="workflow" element={<WorkflowNotificationsPanel workflow={workflow} />} />
           <Route path="self-review-log" element={<SelfReviewLogPanel workflow={workflow} />} />
-          <Route path="codex" element={<CodexConsole />} />
+          <Route path="codex" element={<AdminOnlyGate isAdmin={isAdmin} label="Codex Console"><CodexConsole /></AdminOnlyGate>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </div>
@@ -1890,6 +1912,7 @@ export default function App() {
       account={accountSummary}
       onLogout={handleLogout}
       loggingOut={loggingOut}
+      isAdmin={isAdmin}
     >
       <Routes>
         <Route path="/" element={<Navigate to={initialPath} replace />} />
@@ -1897,11 +1920,13 @@ export default function App() {
           <>
             <Route path="/dashboard/*" element={renderDashboard()} />
             <Route path="/mock-trading/*" element={renderMockTrading()} />
-            <Route path="/ai-training/*" element={renderLearningBot()} />
-            <Route path="/consolidated-knowledge" element={<ConsolidatedBotPage />} />
+            <Route path="/ai-training/*" element={<AdminOnlyGate isAdmin={isAdmin} label="AI Training">{renderLearningBot()}</AdminOnlyGate>} />
+            <Route path="/consolidated-knowledge" element={<AdminOnlyGate isAdmin={isAdmin} label="Consolidated Knowledge"><ConsolidatedBotPage /></AdminOnlyGate>} />
             <Route path="/bot-10" element={<Navigate to="/consolidated-knowledge" replace />} />
             <Route path="/consolidated-bot" element={<Navigate to="/consolidated-knowledge" replace />} />
             <Route path="/wallets" element={renderWallets()} />
+            <Route path="/signals-marketplace" element={<SignalsMarketplacePage />} />
+            <Route path="/admin" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/journal/*" element={renderJournal()} />
             <Route path="/trade-history/*" element={renderTradeHistory()} />
             <Route path="/settings/*" element={renderSettings()} />

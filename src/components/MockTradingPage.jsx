@@ -13,9 +13,8 @@ import { TradeDirectionBadge } from './TradeDirectionBadge'
 const MOCK_ACTIVITY_PAGE_SIZE = 20
 
 const MOCK_TRADING_TABS = [
-  { to: '/mock-trading', label: 'Overview', end: true },
   { to: '/mock-trading/signal-models', label: 'Signal Models' },
-  { to: '/mock-trading/auto-trade-controller', label: 'Auto Trade Controller' },
+  { to: '/mock-trading/auto-trade-controller', label: 'Auto Trade Controller', end: true },
   { to: '/mock-trading/auto-trade-activity', label: 'Auto Trade Activity' },
 ]
 
@@ -48,11 +47,6 @@ function formatWinRate(winRate, closedTrades) {
   }
 
   return `${(winRate * 100).toFixed(2)}% win rate`
-}
-
-function formatTradeCount(value) {
-  const count = Number(value || 0)
-  return `${count} trade${count === 1 ? '' : 's'}`
 }
 
 function getRuntimeLabel(autoTradePhase) {
@@ -185,16 +179,6 @@ function getAiDecisionSummary(entry) {
   }
 
   return null
-}
-
-function FriendlyStatCard({ label, value, detail, tone = 'text-white' }) {
-  return (
-    <div className="rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4 shadow-[0_12px_30px_rgba(15,23,42,0.18)]">
-      <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">{label}</div>
-      <div className={`mt-2 text-2xl font-semibold ${tone}`}>{value}</div>
-      <div className="mt-2 text-sm leading-relaxed text-slate-400">{detail}</div>
-    </div>
-  )
 }
 
 function AutoTradeActivityEntry({ entry, defaultExpanded = false }) {
@@ -510,7 +494,6 @@ export function MockTradingPage({
 }) {
   const trackedSymbols = settings.strategy.preferredSymbols || []
   const latestAutoOrder = autoTradeLog.find((entry) => entry.result?.order)?.result.order || null
-  const latestActivityEntry = autoTradeLog[0] || null
   const activeModel = getSignalModel(activeSignalModelId)
   const activeModelStrategy = getEffectiveSignalModelStrategy(settings.strategy, activeSignalModelId)
   const activeModelStats = signalModelPerformance[activeModel.id] || {
@@ -552,79 +535,6 @@ export function MockTradingPage({
       : isStarting
         ? 'bg-amber-400/12 text-amber-300 border-amber-400/20'
         : 'bg-slate-900 text-slate-300 border-white/10'
-
-  const latestDecisionSummary = latestActivityEntry
-    ? latestActivityEntry.result?.reason || 'Latest decision captured.'
-    : 'The scanner is waiting for the next review cycle.'
-  const nextActionHint = latestActivityEntry?.result?.executed
-    ? 'An order was sent on the latest run.'
-    : 'No order was sent on the latest run.'
-
-  const overviewSection = (
-    <section className="overflow-hidden rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_24%),radial-gradient(circle_at_bottom_right,rgba(34,197,94,0.08),transparent_20%),rgba(15,23,42,0.92)] p-6 shadow-[0_24px_60px_rgba(15,23,42,0.24)]">
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.95fr)]">
-        <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-sky-100">
-            <Bot className="h-4 w-4" />
-            Mock Trading Control Room
-          </div>
-          <h1 className="mt-4 text-3xl font-semibold text-white sm:text-4xl">
-            See what the bots are doing, why they acted, and where AI changed the decision.
-          </h1>
-          <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
-            This tab is split into focused pages: which bot is active, what the latest scan decided, and the full scheduler
-            activity log. The AI advisory and assistant readouts now live under the AI Training tab.
-          </p>
-          <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <FriendlyStatCard
-              label="Runtime"
-              value={getRuntimeLabel(autoTradePhase)}
-              detail={autoTradeStatus.enabled ? 'Auto trading is enabled.' : 'Auto trading is currently off.'}
-              tone={isRunning ? 'text-emerald-300' : isStopping ? 'text-rose-300' : isStarting ? 'text-amber-300' : 'text-white'}
-            />
-            <FriendlyStatCard
-              label="Today"
-              value={formatTradeCount(autoTradeStatus.today?.tradeCount || 0)}
-              detail={`${autoTradeStatus.today?.lossCount || 0} losing trade${autoTradeStatus.today?.lossCount === 1 ? '' : 's'} today.`}
-              tone="text-sky-200"
-            />
-            <FriendlyStatCard
-              label="Active Bot"
-              value={activeModel.name}
-              detail={`${activeModel.tag} is the current analysis focus.`}
-              tone="text-white"
-            />
-            <FriendlyStatCard
-              label="Model Win Rate"
-              value={activeModelStats.closedTrades ? `${(activeModelStats.winRate * 100).toFixed(1)}%` : 'No data'}
-              detail={activeModelStats.closedTrades ? `${activeModelStats.closedTrades} closed trades tracked.` : 'The bot needs more closed trades for a useful read.'}
-              tone={getWinRateTone(activeModelStats.winRate, activeModelStats.closedTrades)}
-            />
-          </div>
-        </div>
-
-        <div className="grid gap-4 self-start">
-          <div className="rounded-[26px] border border-white/10 bg-slate-950/70 p-5">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Latest Decision</div>
-            <div className="mt-3 text-xl font-semibold text-white">
-              {latestActivityEntry ? (latestActivityEntry.result?.executed ? 'Trade Approved' : 'Trade Skipped') : 'Waiting For First Scan'}
-            </div>
-            <div className="mt-3 text-sm leading-7 text-slate-300">{latestDecisionSummary}</div>
-            <div className="mt-3 text-sm text-slate-400">{nextActionHint}</div>
-          </div>
-          <div className="rounded-[26px] border border-white/10 bg-slate-950/70 p-5">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">How To Read This Tab</div>
-            <div className="mt-3 space-y-2 text-sm text-slate-300">
-              <div><span className="font-semibold text-slate-100">Signal Models</span> explains what each bot is built to look for.</div>
-              <div><span className="font-semibold text-slate-100">Auto Trade Controller</span> shows the live runtime and current trading conditions.</div>
-              <div><span className="font-semibold text-slate-100">Auto Trade Activity</span> is where you see why a trade was taken or skipped.</div>
-              <div><span className="font-semibold text-slate-100">AI Advisory</span> and <span className="font-semibold text-slate-100">AI Assistant</span> now live under the AI Training tab.</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
 
   const signalModelsSection = (
     <Panel title="Signal Models" action={<FlaskConical className="h-4 w-4 text-sky-300" />}>
@@ -857,15 +767,15 @@ export function MockTradingPage({
     <div className="grid gap-6">
       <PageHeader
         title="Mock Trading"
-        description="Bot analysis focus, the auto-trade controller, and the full scheduler activity log."
+        description="Signal Models explains what each bot looks for, Auto Trade Controller shows the live runtime and current trading conditions, and Auto Trade Activity is where you see why a trade was taken or skipped."
       />
       <MockTradingTabs />
       <Routes>
-        <Route index element={overviewSection} />
+        <Route index element={<Navigate to="auto-trade-controller" replace />} />
         <Route path="signal-models" element={signalModelsSection} />
         <Route path="auto-trade-controller" element={controllerSection} />
         <Route path="auto-trade-activity" element={<AutoTradeActivityView autoTradeLog={autoTradeLog} />} />
-        <Route path="*" element={<Navigate to="/mock-trading" replace />} />
+        <Route path="*" element={<Navigate to="/mock-trading/auto-trade-controller" replace />} />
       </Routes>
     </div>
   )

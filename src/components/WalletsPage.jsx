@@ -5,10 +5,12 @@ import { evaluateAutoTradeReadiness } from '../lib/autoTradeReadiness'
 import { formatPercent } from '../lib/formatters'
 import { getEffectiveSignalModelStrategy, getSignalModel, visibleSignalModels } from '../lib/signalModels'
 import {
+  applyBotSlotLocks,
   getMainWallet,
   buildPhase3ChampionAllocation,
   getMainWalletAllocatedBalance,
   getRealMoneyWallet,
+  getUnlockedBotWalletIds,
   visibleTradingWallets,
   getWalletAllocationFundingBalance,
   getWalletAllocationBalance,
@@ -541,7 +543,7 @@ function BotWalletCard({ wallet, view, onUpdateWallet }) {
   ]
 
   return (
-    <div className={`rounded-[28px] border p-5 shadow-[0_18px_50px_rgba(15,23,42,0.22)] ${tone.frame}`}>
+    <div className={`rounded-[28px] border p-5 shadow-[0_18px_50px_rgba(15,23,42,0.22)] ${tone.frame} ${wallet.locked ? 'opacity-60' : ''}`}>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Bot Wallet</div>
@@ -557,27 +559,39 @@ function BotWalletCard({ wallet, view, onUpdateWallet }) {
             <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-300">
               Allocated From Main Wallet
             </span>
-            <span className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${
-              wallet.enabled
-                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
-                : 'border-white/10 bg-white/[0.04] text-slate-400'
-            }`}>
-              {wallet.enabled ? 'Automation Enabled' : 'Paused'}
-            </span>
+            {wallet.locked ? (
+              <span className="rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-amber-100">
+                Locked Bot Slot
+              </span>
+            ) : (
+              <span className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${
+                wallet.enabled
+                  ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                  : 'border-white/10 bg-white/[0.04] text-slate-400'
+              }`}>
+                {wallet.enabled ? 'Automation Enabled' : 'Paused'}
+              </span>
+            )}
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() => onUpdateWallet(wallet.id, { enabled: !wallet.enabled })}
-          className={`rounded-2xl px-4 py-3 text-sm font-semibold transition ${
-            wallet.enabled
-              ? 'bg-emerald-400/15 text-emerald-100 ring-1 ring-emerald-400/30'
-              : 'bg-white/[0.04] text-slate-200 ring-1 ring-white/10 hover:bg-white/[0.06]'
-          }`}
-        >
-          {wallet.enabled ? 'Enabled' : 'Enable Wallet'}
-        </button>
+        {wallet.locked ? (
+          <div className="rounded-2xl bg-white/[0.04] px-4 py-3 text-right text-sm font-semibold text-slate-400 ring-1 ring-white/10">
+            Locked — contact the admin
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onUpdateWallet(wallet.id, { enabled: !wallet.enabled })}
+            className={`rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+              wallet.enabled
+                ? 'bg-emerald-400/15 text-emerald-100 ring-1 ring-emerald-400/30'
+                : 'bg-white/[0.04] text-slate-200 ring-1 ring-white/10 hover:bg-white/[0.06]'
+            }`}
+          >
+            {wallet.enabled ? 'Enabled' : 'Enable Wallet'}
+          </button>
+        )}
       </div>
 
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -666,6 +680,17 @@ export function WalletsPage({
     () => normalizeWallets(walletForm),
     [walletForm],
   )
+  // Bot-slot entitlements (SaaS Phase 2): the server sends the account's slot count as
+  // settings.botSlots (null = unlimited, the admin account) alongside the raw wallets -
+  // `locked` itself doesn't survive normalizeWallets (only known fields round-trip), so it's
+  // recomputed here from the same shared helper the server uses, driven by that count.
+  const botSlots = Number.isFinite(settings.botSlots) ? settings.botSlots : Infinity
+  const walletsWithSlotLocks = useMemo(
+    () => applyBotSlotLocks(normalizedWalletForm, botSlots),
+    [normalizedWalletForm, botSlots],
+  )
+  const totalBotSlotCount = visibleTradingWallets(normalizedWalletForm).length
+  const unlockedBotSlotCount = getUnlockedBotWalletIds(normalizedWalletForm, botSlots).length
   const [activeEnvironment, setActiveEnvironment] = useState(TESTNET_WALLET_ENVIRONMENT)
   const hasExchangeCredentials = Boolean(
     settings.credentials?.apiKey?.present
@@ -685,7 +710,7 @@ export function WalletsPage({
   )
 
   const walletViews = useMemo(() => (
-    visibleTradingWallets(normalizedWalletForm).map((wallet) => {
+    visibleTradingWallets(walletsWithSlotLocks).map((wallet) => {
       const walletTrades = trades.filter((trade) => trade.walletId === wallet.id)
       const baseAccountSnapshot = summarizeAccount({
         trades: walletTrades,
@@ -719,7 +744,7 @@ export function WalletsPage({
         winRate,
       }
     })
-  ), [livePrices, normalizedWalletForm, settings.strategy, trades])
+  ), [livePrices, walletsWithSlotLocks, settings.strategy, trades])
 
   const phase3Recommendation = useMemo(() => buildPhase3ChampionAllocation({
     wallets: normalizedWalletForm,
@@ -852,7 +877,13 @@ export function WalletsPage({
           ) : null}
         </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <WalletStatCard
+            label="Bot Slots"
+            value={Number.isFinite(botSlots) ? `${unlockedBotSlotCount} of ${totalBotSlotCount}` : 'Unlimited'}
+            tone={Number.isFinite(botSlots) && unlockedBotSlotCount < totalBotSlotCount ? 'text-amber-300' : 'text-emerald-300'}
+            Icon={Bot}
+          />
           <WalletStatCard
             label="Bot Running Balance"
             value={formatUsdt(comparison.totalRunningBalance)}
@@ -878,6 +909,12 @@ export function WalletsPage({
             Icon={ShieldAlert}
           />
         </div>
+        {Number.isFinite(botSlots) && unlockedBotSlotCount < totalBotSlotCount ? (
+          <p className="mt-4 text-sm text-amber-200/80">
+            {unlockedBotSlotCount} of {totalBotSlotCount} bots unlocked on your account. The rest are shown locked below —
+            contact the admin to unlock more slots.
+          </p>
+        ) : null}
       </Panel>
 
       {mainWallet ? (

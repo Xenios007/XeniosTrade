@@ -41,8 +41,14 @@ const TRANSIENT_RETRY_DELAY_MS = 1500
 /**
  * Resolves what a provider call would use, without calling anything.
  * `configured` is false when a required key/base URL is missing.
+ *
+ * `credentialOverride`: an explicit {apiKey, baseUrl, model} to use instead of the shared
+ * in-memory credential mirror. That mirror is deliberately pinned to the admin account only
+ * (see mock-trading-server.js getSettings/saveSettings) - a per-user caller (SaaS Phase 3's
+ * AI Signals, which reads the calling user's own settings.aiProviderCredentials) must pass
+ * its own credential here rather than relying on the mirror.
  */
-export function resolveProviderCall(providerId, modelOverride = '') {
+export function resolveProviderCall(providerId, modelOverride = '', credentialOverride = null) {
   const provider = getAiProvider(providerId)
   if (!provider) {
     return { configured: false, reason: providerId ? `Unknown provider "${providerId}".` : 'No provider assigned.' }
@@ -51,7 +57,7 @@ export function resolveProviderCall(providerId, modelOverride = '') {
   // Codex / Claude sign in with the machine's own login (checked when called), so they have no key, base URL or default model here.
   if (provider.localLogin && !provider.localServer) return { configured: true, provider, model: String(modelOverride || '').trim() }
 
-  const credential = getAiProviderCredential(providerId) || {}
+  const credential = credentialOverride || getAiProviderCredential(providerId) || {}
   const envName = ENV_KEY_FALLBACKS[providerId]
   const apiKey = String(credential.apiKey || (envName ? process.env[envName] : '') || '').trim()
   const baseUrl = String(credential.baseUrl || provider.baseUrl || '').trim()
@@ -199,8 +205,8 @@ async function callOpenAiCompatible({ apiKey, baseUrl, model, systemPrompt, user
  * @returns {Promise<{ json: object, providerId: string, model: string }>}
  * Throws when the provider is unconfigured, the call fails, or the reply is not JSON.
  */
-export async function callAgentJson({ providerId, model = '', systemPrompt, userPrompt, timeoutMs }) {
-  const resolved = resolveProviderCall(providerId, model)
+export async function callAgentJson({ providerId, model = '', systemPrompt, userPrompt, timeoutMs, credentialOverride = null }) {
+  const resolved = resolveProviderCall(providerId, model, credentialOverride)
   if (!resolved.configured) {
     const error = new Error(resolved.reason)
     error.code = 'NOT_CONFIGURED'

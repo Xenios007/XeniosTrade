@@ -11,6 +11,7 @@ export function AppShell({
   account,
   onLogout,
   loggingOut,
+  isAdmin = false,
   children,
 }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -27,7 +28,7 @@ export function AppShell({
       />
 
       <div className="relative flex min-h-screen">
-        <Sidebar mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
+        <Sidebar mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} isAdmin={isAdmin} />
 
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar
@@ -40,6 +41,7 @@ export function AppShell({
             onLogout={onLogout}
             loggingOut={loggingOut}
             onOpenNav={() => setMobileNavOpen(true)}
+            isAdmin={isAdmin}
           />
 
           <main className="min-w-0 flex-1 px-4 py-6 lg:px-6">

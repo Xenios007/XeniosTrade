@@ -455,6 +455,46 @@ export function visibleTradingWallets(wallets = []) {
   return getTradingWallets(wallets).filter((wallet) => !SEPARATE_ENVIRONMENT_WALLET_IDS.includes(wallet.id) && !HIDDEN_WALLET_IDS.includes(wallet.id))
 }
 
+// SaaS Phase 2 bot-slot entitlements: a user's plan.botSlots caps how many of the sellable
+// bot wallets (visibleTradingWallets, in their fixed wallet-model-1..9+ order) are actually
+// usable. The first N in that order are unlocked; the rest stay visible - so a locked bot's
+// config/history is never hidden - but are never tradeable. Pass Infinity for an unlimited
+// account (the admin's own research/testing account is always exempt from this cap).
+//
+// SaaS Phase 5 (Signals Marketplace) adds a second, additive unlock path on top of this one:
+// `ownedSignalIds` (from plan.signals) unlocks a wallet by its specific assigned signal
+// model, regardless of position - so the admin can grant one specific bot (e.g. "model-7")
+// without also unlocking everything ahead of it in the fixed order the way raising botSlots
+// would. Neither path takes anything away from the other; a wallet is unlocked if either
+// grants it.
+export function getUnlockedBotWalletIds(wallets = [], botSlots = Infinity, ownedSignalIds = []) {
+  const cap = Number.isFinite(botSlots) ? Math.max(0, Math.trunc(botSlots)) : Infinity
+  const sellable = visibleTradingWallets(wallets)
+  const bySlotCount = sellable.slice(0, cap).map((wallet) => wallet.id)
+  const ownedIds = new Set(ownedSignalIds)
+  const bySignalOwnership = sellable
+    .filter((wallet) => ownedIds.has(wallet.assignedSignalModelId))
+    .map((wallet) => wallet.id)
+  return [...new Set([...bySlotCount, ...bySignalOwnership])]
+}
+
+// Adds a computed, non-persisted `locked` flag to each sellable bot wallet (see
+// getUnlockedBotWalletIds). Never call this on a settings object before it is saved - the
+// flag must never round-trip into storage as if it were user data (server callers apply it
+// only to a response/working copy, after any save has already happened against the
+// unlocked, unaugmented wallets array).
+export function applyBotSlotLocks(wallets = [], botSlots = Infinity, ownedSignalIds = []) {
+  const normalizedWallets = normalizeWallets(wallets)
+  const unlockedIds = new Set(getUnlockedBotWalletIds(normalizedWallets, botSlots, ownedSignalIds))
+  const sellableIds = new Set(visibleTradingWallets(normalizedWallets).map((wallet) => wallet.id))
+
+  return normalizedWallets.map((wallet) => (
+    sellableIds.has(wallet.id)
+      ? { ...wallet, locked: !unlockedIds.has(wallet.id) }
+      : { ...wallet, locked: false }
+  ))
+}
+
 export function getWalletEffectiveStartingBalance(wallet = {}) {
   if (isMainWallet(wallet)) {
     return getWalletFundingBalance(wallet)

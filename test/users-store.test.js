@@ -92,6 +92,24 @@ test('two stores against different dataDirs never see each other\'s users (real 
   assert.deepEqual(await storeB.readUsers(), [])
 })
 
+test('getAdminUserId resolves and caches the seeded admin account', async (t) => {
+  const store = await fixture(t)
+  const id = await store.getAdminUserId()
+  const admin = await store.findOrCreateUserByEmail(ADMIN_EMAIL)
+  assert.equal(id, admin.id)
+  assert.equal((await store.readUsers()).length, 1, 'still only the one admin row')
+
+  const idAgain = await store.getAdminUserId()
+  assert.equal(idAgain, id, 'cached, not re-derived')
+})
+
+test('getUserById reads the current registry by id, or null if unknown', async (t) => {
+  const store = await fixture(t)
+  const user = await store.findOrCreateUserByEmail('user@example.com')
+  assert.equal((await store.getUserById(user.id)).email, 'user@example.com')
+  assert.equal(await store.getUserById('nope'), null)
+})
+
 test('findUserByEmail / findUserById are pure helpers over an already-loaded array, case-insensitive on email', () => {
   const users = [{ id: 'u1', email: 'a@example.com' }, { id: 'u2', email: 'b@example.com' }]
   assert.equal(findUserByEmail(users, 'A@Example.com').id, 'u1')

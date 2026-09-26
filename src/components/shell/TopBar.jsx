@@ -1,4 +1,5 @@
-import { LogOut, Menu } from 'lucide-react'
+import { LogOut, Menu, ShieldCheck } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { CoinAvatar } from '../CoinAvatar'
 import { BrandMark } from '../BrandMark'
 import { IS_AI_APP } from '../../lib/appMode'
@@ -57,6 +58,7 @@ export function TopBar({
   onLogout,
   loggingOut,
   onOpenNav,
+  isAdmin = false,
 }) {
   const symbolOptions = symbols.length > 0 ? symbols : symbol ? [symbol] : []
 
@@ -120,6 +122,16 @@ export function TopBar({
                 {formatSignedUsdt(account.realizedPnl)}
               </div>
             </div>
+          ) : null}
+
+          {isAdmin ? (
+            <Link
+              to="/admin"
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-sm font-semibold text-sky-100 transition hover:border-sky-400/30 hover:bg-sky-400/15"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              <span className="hidden sm:inline">Admin</span>
+            </Link>
           ) : null}
 
           <button

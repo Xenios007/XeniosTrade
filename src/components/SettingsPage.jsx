@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Bot, CandlestickChart, ChevronDown, CircleHelp, Clock3, ShieldAlert, Target, WalletCards } from 'lucide-react'
+import { Activity, BarChart3, Bot, CandlestickChart, ChevronDown, CircleHelp, Clock3, ShieldAlert, Sparkles, Target, WalletCards } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
 import {
@@ -7,6 +7,7 @@ import {
   getStrategyPositionNotional,
   summarizeAccount,
 } from '../lib/accountMetrics'
+import { AI_PROVIDERS, isProviderListed, providerDisplayName } from '../lib/aiProviders'
 import { getMarginModeLabel, MARGIN_MODE_OPTIONS } from '../lib/marginModes'
 import {
   applyTradeStylePreset,
@@ -454,6 +455,88 @@ function MarginModeControl({ value, editable, onChange }) {
   )
 }
 
+// SaaS Phase 3 (AI Signals): an optional advisory gate on top of this bot's own rule engine,
+// backed by the user's own AI-provider credentials (Settings > API Credentials / the AI
+// Models page) - never the shared admin-only credential mirror every live LLM bot reads.
+// Excludes localLogin providers (Codex, Claude via the operator's own machine login) since
+// those can't work for a regular SaaS account. Empty providerId = unassigned = rules-only,
+// exactly as if this feature did not exist for that bot.
+function AiSignalAssignment({ modelId, strategy, onUpdateStrategy, aiProviderCredentials = {} }) {
+  const providerId = strategy?.aiSignalProviderId || ''
+  const model = strategy?.aiSignalModel || ''
+  const assignableProviders = AI_PROVIDERS.filter((item) => (
+    !item.localLogin && (isProviderListed(item, aiProviderCredentials) || item.id === providerId)
+  ))
+  const selectedProvider = assignableProviders.find((item) => item.id === providerId) || null
+  const hasKey = selectedProvider ? Boolean(aiProviderCredentials?.[selectedProvider.id]?.apiKey) : false
+
+  return (
+    <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-white">
+            <Sparkles className="h-4 w-4 text-sky-300" />
+            AI Signal (optional)
+          </div>
+          <div className="mt-1 text-xs leading-relaxed text-slate-400">
+            When assigned, your own AI model reviews each setup this bot&apos;s rules already accepted before the trade goes out — an extra opinion, not a replacement for the rules.
+          </div>
+        </div>
+        {providerId ? (
+          <span className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] ${hasKey ? 'border-sky-300/30 bg-sky-400/15 text-sky-100' : 'border-amber-300/30 bg-amber-400/10 text-amber-200'}`}>
+            {hasKey ? 'Assigned' : 'Needs API key'}
+          </span>
+        ) : (
+          <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+            Unassigned
+          </span>
+        )}
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Provider</span>
+          <select
+            value={providerId}
+            onChange={(event) => {
+              onUpdateStrategy?.(modelId, 'aiSignalProviderId', event.target.value)
+              onUpdateStrategy?.(modelId, 'aiSignalModel', '')
+            }}
+            className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
+          >
+            <option value="">Unassigned — rules only</option>
+            {assignableProviders.map((item) => (
+              <option key={item.id} value={item.id}>
+                {providerDisplayName(item, aiProviderCredentials)}{aiProviderCredentials?.[item.id]?.apiKey ? ' ✓' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Model id (optional)</span>
+          <input
+            value={model}
+            disabled={!providerId}
+            onChange={(event) => onUpdateStrategy?.(modelId, 'aiSignalModel', event.target.value)}
+            placeholder={selectedProvider?.suggested?.[0] || 'model id'}
+            list={`ai-signal-model-suggestions-${modelId}`}
+            className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none disabled:opacity-40"
+          />
+          {selectedProvider?.suggested?.length ? (
+            <datalist id={`ai-signal-model-suggestions-${modelId}`}>
+              {selectedProvider.suggested.map((suggestedModel) => <option key={suggestedModel} value={suggestedModel} />)}
+            </datalist>
+          ) : null}
+        </label>
+      </div>
+      {providerId && !hasKey ? (
+        <div className="mt-3 text-xs leading-relaxed text-amber-200/80">
+          Add an API key for {providerDisplayName(selectedProvider, aiProviderCredentials)} on the AI Models page — until then this bot trades on rules alone.
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function StrategyCard({
   model,
   wallet,
@@ -463,6 +546,7 @@ function StrategyCard({
   onUpdateStrategy,
   onApplyPreset,
   onApplyBot3Preset,
+  aiProviderCredentials = {},
 }) {
   const tone = getBotStrategyTone(model.id)
   const isBot3 = model.id === 'model-3'
@@ -555,6 +639,15 @@ function StrategyCard({
         )}
         </div>
       </div>
+
+      {isEditable ? (
+        <AiSignalAssignment
+          modelId={model.id}
+          strategy={editableStrategy}
+          onUpdateStrategy={onUpdateStrategy}
+          aiProviderCredentials={aiProviderCredentials}
+        />
+      ) : null}
 
       {isEditable || isBot3 ? (
         <div className="mt-4">
@@ -1051,6 +1144,7 @@ export function SettingsPage({
               onUpdateStrategy={updateSignalModelStrategy}
               onApplyPreset={applySignalModelTradeStylePreset}
               onApplyBot3Preset={applyBot3RiskPreset}
+              aiProviderCredentials={settings.aiProviderCredentials}
             />
           </div>
         ) : null}
