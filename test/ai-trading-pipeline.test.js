@@ -848,6 +848,8 @@ test('describeProviderError: surfaces the upstream reason OpenRouter hides in me
   assert.equal(describeProviderError({ error: { message: 'Bad key' } }, 401), 'Bad key')
   assert.equal(describeProviderError([{ error: { message: 'Quota exceeded' } }], 429), 'Quota exceeded')
   assert.equal(describeProviderError({}, 502), 'HTTP 502')
+  assert.equal(describeProviderError({ raw: 'Internal Server Error' }, 500), 'HTTP 500 Internal Server Error')
+  assert.equal(describeProviderError({ detail: 'FinGPT is still loading.' }, 503), 'FinGPT is still loading.')
   assert.equal(
     describeProviderError({ error: { message: 'Provider returned error', metadata: { provider_name: 'Z.AI', raw: 'rate limit exceeded: free-models-per-min' } } }, 429),
     'Provider returned error (Z.AI: rate limit exceeded: free-models-per-min)',

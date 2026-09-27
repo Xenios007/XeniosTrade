@@ -11103,12 +11103,15 @@ async function runAiScanCycle() {
       if (!config.scan.enabled) break // switched off mid-cycle
       if (aiTradingRunsInFlight.has(symbol)) continue
       aiTradingRunsInFlight.add(symbol)
-      aiScanLastRunAt[symbol] = Date.now()
       try {
         const run = await performAiTradingRun(symbol, { trigger: 'scan' })
         const saved = shouldPersistScanRun(run)
         if (saved) await appendAiTradingRun(run)
         results[symbol] = { ...summarizeScanResult(run), strategy: run.strategy || experiment }
+        // Only advance the entry-candle gate on a real analysis. An infra-level failure (e.g. the
+        // Analyst host erroring) never actually read the candle, so let the next tick retry it
+        // instead of locking the symbol out for the rest of the swing-timeframe window.
+        if (results[symbol].outcome !== 'error') aiScanLastRunAt[symbol] = Date.now()
         await appendAiScanLog([{ symbol, ...results[symbol], saved, ...(run.testMode ? { testMode: true } : {}) }])
         if (run.execution?.status === 'opened') {
           console.log(`[ai-trading] Auto-scan opened ${run.final.action} ${symbol} on ${run.execution.mode}`)
