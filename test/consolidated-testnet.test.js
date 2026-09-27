@@ -33,6 +33,7 @@ async function fixture(t,options={}) {
     } else if(route==='GET /fapi/v1/algoOrder'){result=algos.get(p.clientAlgoId);if(!result)return fail()}
     else if(route==='DELETE /fapi/v1/algoOrder'){algos.delete(p.clientAlgoId);result={}}
     else if(route==='GET /fapi/v2/positionRisk')result=[{symbol:'SOLUSDT',positionSide:'BOTH',positionAmt:String(amount),markPrice:'100',unRealizedProfit:'0'}]
+    else if(route==='GET /fapi/v1/userTrades')result=[...orders.values()].map(o=>({orderId:o.orderId,realizedPnl:'0',commission:'0',commissionAsset:'USDT',qty:o.executedQty,price:o.avgPrice}))
     else throw new Error(`Unexpected ${route}`)
     return {ok:true,json:async()=>result}
   }
@@ -69,6 +70,20 @@ test('existing shared account position prevents any mutation',async t=>{
   const f=await fixture(t,{existing:true});await f.adapter.configure(true)
   await assert.rejects(f.adapter.tick(signal()),/Existing account position/)
   assert.equal(f.calls.filter(c=>c.route.startsWith('POST')).length,0)
+})
+test('closeNow exits the open position at market and records it as a manually closed trade',async t=>{
+  const f=await fixture(t);await f.adapter.configure(true);await f.adapter.tick(signal(),'frozen')
+  assert.equal((await f.adapter.status()).position.protection,'confirmed')
+  const result=await f.adapter.closeNow()
+  assert.equal(result.position,null);assert.equal(result.trades.length,1)
+  assert.equal(result.trades[0].status,'CLOSED');assert.equal(result.trades[0].closeReason,'MANUAL')
+  const close=f.calls.filter(c=>c.route==='POST /fapi/v1/order').at(-1)
+  assert.equal(close.p.reduceOnly,'true');assert.equal(close.p.side,'SELL');assert.equal(close.p.type,'MARKET')
+  assert.equal(await f.adapter.isReserved('SOLUSDT'),false)
+})
+test('closeNow refuses when there is nothing open',async t=>{
+  const f=await fixture(t)
+  await assert.rejects(f.adapter.closeNow(),/No open Bot 10 testnet position/)
 })
 test('shared entry lock serializes legacy and consolidated entry work',async t=>{
   const f=await fixture(t),sequence=[]

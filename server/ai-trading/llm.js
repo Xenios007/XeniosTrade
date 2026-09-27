@@ -148,7 +148,11 @@ async function postChatCompletion({ apiKey, baseUrl, body, timeoutMs }) {
  */
 export function describeProviderError(payload, status) {
   const error = payload?.error || payload?.[0]?.error
-  const base = error?.message || payload?.raw?.slice?.(0, 200) || `HTTP ${status}`
+  // FastAPI (the local FinGPT / FinMA servers) answers {"detail": "..."}; an unhandled server crash is a bare text body
+  // such as "Internal Server Error", which on its own reads like a message, so keep the status code with it.
+  const detailText = typeof payload?.detail === 'string' ? payload.detail : ''
+  const rawText = typeof payload?.raw === 'string' ? payload.raw.trim().slice(0, 200) : ''
+  const base = error?.message || detailText || (rawText ? `HTTP ${status} ${rawText}` : `HTTP ${status}`)
   const meta = error?.metadata
   if (!meta || typeof meta !== 'object') return base
   let raw = meta.raw
@@ -185,7 +189,11 @@ async function callOpenAiCompatible({ apiKey, baseUrl, model, systemPrompt, user
   }
 
   if (!response.ok) {
-    throw new Error(redactSecrets(describeProviderError(payload, response.status)))
+    // Name the host: with several agents on different providers, "HTTP 500" alone does not say which one failed.
+    let host = ''
+    try { host = new URL(baseUrl).host } catch {}
+    const reason = describeProviderError(payload, response.status)
+    throw new Error(redactSecrets(host ? `${host}: ${reason}` : reason))
   }
   const choice = payload?.choices?.[0]
   if (choice?.finish_reason === 'length') {

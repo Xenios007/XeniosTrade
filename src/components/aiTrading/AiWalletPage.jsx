@@ -71,7 +71,7 @@ function WalletCard({ wallet, ledger, active, onClose, closingId }) {
         </div>
 
         {openTrades.length > 0 ? (
-          <div className="grid gap-2">
+          <div className="grid grid-cols-1 gap-2">
             <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Open positions</div>
             {openTrades.map((trade) => {
               const live = ledger.livePrices[trade.symbol]

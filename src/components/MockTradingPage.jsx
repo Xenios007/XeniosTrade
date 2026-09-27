@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Bot, ChevronDown, FlaskConical, Lock, PlayCircle } from 'lucide-react'
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
 import { CoinAvatar } from './CoinAvatar'
-import { getEffectiveSignalModelStrategy, SIGNAL_MODELS, getSignalModel } from '../lib/signalModels'
+import { getEffectiveSignalModelStrategy, visibleSignalModels, getSignalModel } from '../lib/signalModels'
 import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
 import { usePersistentBoolean } from '../lib/usePersistentBoolean'
 import { formatTradeSource } from '../lib/trades'
@@ -651,7 +651,7 @@ export function MockTradingPage({
               onChange={(event) => setPreviewModelId(event.target.value)}
               className="w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 pr-11 text-sm font-semibold text-white outline-none transition focus:border-sky-400/40"
             >
-              {SIGNAL_MODELS.map((model) => (
+              {visibleSignalModels().map((model) => (
                 <option key={model.id} value={model.id} className="bg-slate-900 text-white">
                   {model.name} — {model.tag}
                   {model.id === activeSignalModelId ? ' (active)' : ''}
@@ -664,8 +664,8 @@ export function MockTradingPage({
 
         <button
           type="button"
-          disabled={(previewModel.status === 'blank' && previewModel.id !== 'model-10') || previewModelIsActive || switchingSignalModel}
-          onClick={() => previewModel.id === 'model-10' ? window.location.assign('/bot-10') : onSelectSignalModel(previewModel.id)}
+          disabled={previewModel.status === 'blank' || previewModelIsActive || switchingSignalModel}
+          onClick={() => onSelectSignalModel(previewModel.id)}
           className={`inline-flex shrink-0 items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold transition ${
             previewModel.status === 'blank'
               ? 'cursor-not-allowed border border-white/10 bg-white/[0.03] text-slate-500'
@@ -674,9 +674,7 @@ export function MockTradingPage({
               : 'bg-sky-400 text-slate-950 hover:bg-sky-300 disabled:bg-slate-700 disabled:text-slate-400'
           }`}
         >
-          {previewModel.id === 'model-10'
-            ? 'Open Bot 10 Controls'
-            : previewModel.status === 'blank'
+          {previewModel.status === 'blank'
             ? 'Waiting For Rules'
             : previewModelIsActive
               ? 'Analysis Focus'

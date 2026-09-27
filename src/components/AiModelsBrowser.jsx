@@ -160,7 +160,7 @@ function AssignModal({ model, config, saving, feedback, onClose, onSave }) {
         Pick which AI Trading agents should answer with <span className="font-mono text-slate-200">{model.id}</span> via {model.providerLabel}.
         Agents you leave unticked keep their current model.
       </p>
-      <div className="grid gap-2">
+      <div className="grid grid-cols-1 gap-2">
         {AI_TRADING_LLM_AGENT_IDS.map((agentId) => {
           const agent = AI_TRADING_AGENTS.find((item) => item.id === agentId)
           const current = config?.agents?.[agentId]

@@ -22,9 +22,16 @@ export const AI_MODEL_NAME = 'AI Trading'
 export const AI_WALLET_IDS = { testnet: 'wallet-ai-testnet', real: 'wallet-ai-real' }
 export const AI_WALLET_NAMES = { testnet: 'AI Testnet Wallet', real: 'AI Real Money Wallet' }
 
-// A plan is priced off the candle at run time; the older it is, the less it
-// describes the market you would actually enter.
-export const MAX_PLAN_AGE_MS = { testnet: 30 * 60_000, real: 10 * 60_000 }
+// A plan is priced off the candle at run time; the older it is, the less it describes the market you would actually
+// enter. How stale is "too stale" depends on the entry timeframe it was priced off: a scalp plan (5M entries) is
+// describing a market that has likely already moved on past 30 minutes, but a swing plan (1H entries, 4H trend, held
+// 12-48h) is not - the scan loop itself only re-analyses a symbol once an hour (minRunGapMs in aiTrading.js), so a
+// ceiling this tight made every swing run's Execute button unusable long before the next real analysis existed to
+// replace it. Missing/unrecognized run.timeframe falls back to the original scalp numbers (unchanged for old runs).
+export const MAX_PLAN_AGE_MS = {
+  testnet: { scalp: 30 * 60_000, swing: 4 * 60 * 60_000 },
+  real: { scalp: 10 * 60_000, swing: 2 * 60 * 60_000 },
+}
 export const MAX_ENTRY_DRIFT_PCT = { testnet: 1.5, real: 0.5 }
 export const MAX_OPEN_POSITIONS = { testnet: 5, real: 1 }
 // Never commit more than this share of the available balance as margin on one trade.
@@ -108,8 +115,9 @@ export function assertCanExecute({ run, mode, config, trades = [], livePrice, no
   }
 
   const ageMs = now - Number(run.finishedAt || run.startedAt || 0)
-  if (!(ageMs >= -60_000) || ageMs > MAX_PLAN_AGE_MS[mode]) {
-    throw new AiExecutionError(`This run is ${Math.round(ageMs / 60_000)} min old; the plan is only tradable for ${MAX_PLAN_AGE_MS[mode] / 60_000} min. Run the pipeline again.`)
+  const maxPlanAgeMs = MAX_PLAN_AGE_MS[mode][run.timeframe === 'swing' ? 'swing' : 'scalp']
+  if (!(ageMs >= -60_000) || ageMs > maxPlanAgeMs) {
+    throw new AiExecutionError(`This run is ${Math.round(ageMs / 60_000)} min old; the plan is only tradable for ${maxPlanAgeMs / 60_000} min. Run the pipeline again.`)
   }
   if (!isFinitePositive(livePrice)) {
     throw new AiExecutionError('No live price is available to check the plan against; not trading blind.', 502)
