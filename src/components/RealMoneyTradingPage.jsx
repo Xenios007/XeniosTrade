@@ -10,7 +10,9 @@ import {
   isRealMoneyWallet,
 } from '../lib/wallets'
 import { isTradeOpen } from '../lib/trades'
+import { AutoTradeActivityView } from './AutoTradeActivityView'
 import { Panel } from './Panel'
+import { PageHeader } from './ui/PageHeader'
 
 function formatUsdt(value, withSign = false) {
   const number = Number(value || 0)
@@ -83,18 +85,6 @@ function getLiveStatusMeta({ hasLiveCredentials, syncStatus, armed }) {
   }
 }
 
-function formatReadinessProgress(learningStatus = {}) {
-  const reviewed = Number(learningStatus.eligibleClosedTradeCount || learningStatus.currentDatasetRows || 0)
-  const target = Number(learningStatus.realMoneyTradeTarget || 1000)
-  const remaining = Math.max(Number(learningStatus.realMoneyTradesRemaining ?? target - reviewed), 0)
-
-  if (learningStatus.realMoneyTradeReady) {
-    return `${reviewed} / ${target} reviewed trades`
-  }
-
-  return `${reviewed} / ${target} reviewed trades, ${remaining} remaining`
-}
-
 function StatCard({ label, value, detail = '', tone = 'text-white', Icon }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
@@ -122,11 +112,14 @@ function isRealMoneyTrade(trade, wallets = []) {
 export function RealMoneyTradingPage({
   settings,
   trades = [],
+  autoTradeLog = [],
   livePrices = {},
-  aiTrainingStatus = {},
   onSave,
   saving = false,
   ready = true,
+  // SaaS Phase 8B/8E: the user's owned/unlocked bot model ids - null (admin) means no
+  // filtering. Restricts the "Assign Real Money Bot" picker to bots this account actually owns.
+  ownedBotModelIds = null,
 }) {
   const wallets = useMemo(() => settings.wallets || [], [settings.wallets])
   const fundingWallet = useMemo(() => getRealMoneyWallet(wallets), [wallets])
@@ -134,6 +127,13 @@ export function RealMoneyTradingPage({
     () => trades.filter((trade) => isRealMoneyTrade(trade, wallets)),
     [trades, wallets],
   )
+  const realMoneyAutoTradeLog = useMemo(
+    () => autoTradeLog.filter((entry) => fundingWallet && entry.walletId === fundingWallet.id),
+    [autoTradeLog, fundingWallet],
+  )
+  const assignableModels = useMemo(() => (
+    ownedBotModelIds ? visibleSignalModels().filter((model) => ownedBotModelIds.includes(model.id)) : visibleSignalModels()
+  ), [ownedBotModelIds])
   const assignedModelId = settings.strategy?.realMoneySignalModelId || settings.strategy?.activeSignalModelId || SIGNAL_MODELS[0]?.id || ''
   const [selectedModelId, setSelectedModelId] = useState(assignedModelId)
 
@@ -198,6 +198,10 @@ export function RealMoneyTradingPage({
 
   return (
     <div className="grid gap-6">
+      <PageHeader
+        title="Real Money Trading"
+        description="The one bot armed for live Binance Futures execution - hard-capped in size, monitored here alongside its own activity log."
+      />
       <Panel title="Real Money Trading Summary">
         <div className={`rounded-2xl border px-4 py-4 text-sm ${armed ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-red-400/30 bg-red-400/10 text-red-100'}`}>
           {armed
@@ -248,7 +252,7 @@ export function RealMoneyTradingPage({
       </Panel>
 
       <Panel title="Real Money Status">
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid gap-4 lg:grid-cols-2">
           <div className={`rounded-2xl border px-4 py-4 ${liveStatus.tone}`}>
             <div className="flex items-start gap-3">
               <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-950/60 text-current">
@@ -284,19 +288,6 @@ export function RealMoneyTradingPage({
                   <div className="mt-2 text-xs leading-relaxed opacity-80">{fundingWallet.production.lastError}</div>
                 ) : null}
               </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4">
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-slate-500">
-              <ShieldAlert className="h-4 w-4" />
-              Training Data Depth
-            </div>
-            <div className="mt-3 text-lg font-semibold text-white">
-              {aiTrainingStatus.realMoneyTradeReady ? 'Review target reached' : 'Still growing'}
-            </div>
-            <div className="mt-2 text-xs leading-relaxed text-slate-400">
-              {formatReadinessProgress(aiTrainingStatus)} - informational only, does not block live execution.
             </div>
           </div>
         </div>
@@ -339,7 +330,7 @@ export function RealMoneyTradingPage({
               disabled={!ready || saving}
               className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white outline-none disabled:cursor-not-allowed disabled:text-slate-500"
             >
-              {visibleSignalModels().map((model) => (
+              {assignableModels.map((model) => (
                 <option key={model.id} value={model.id} className="bg-slate-900 text-white">
                   {model.name} - {model.tag}
                 </option>
@@ -365,6 +356,12 @@ export function RealMoneyTradingPage({
           </div>
         </div>
       </Panel>
+
+      <AutoTradeActivityView
+        autoTradeLog={realMoneyAutoTradeLog}
+        title="Real Money Auto Trade Activity"
+        emptyMessage="No real-money auto-trade activity yet - arm live trading above to start."
+      />
     </div>
   )
 }

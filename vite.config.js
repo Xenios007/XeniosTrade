@@ -8,6 +8,10 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
+      // Lets ai.localhost / bot.localhost hit this dev server directly (Vite's
+      // DNS-rebinding guard otherwise only allows the plain hostname), so local
+      // dev can mirror production's ai.<domain> / bot.<domain> subdomain split.
+      allowedHosts: ['localhost', '.localhost'],
       proxy: {
         '/api': `http://127.0.0.1:${apiPort}`,
       },

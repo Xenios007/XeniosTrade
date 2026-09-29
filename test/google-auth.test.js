@@ -189,6 +189,16 @@ test('return URLs are limited to our own hosts (no open redirect)', () => {
   }
 })
 
+test('a plain http return is accepted for localhost and *.localhost, but not for any other host', () => {
+  const localHosts = ['localhost', 'ai.localhost', 'bot.localhost', '127.0.0.1']
+  for (const host of localHosts) {
+    assert.equal(sanitizeReturnUrl(`http://${host}:5173/dashboard?x=1`, localHosts), `http://${host}:5173/dashboard?x=1`, host)
+  }
+  // Still no open redirect: http is only ever allowed for the recognized local dev hosts.
+  assert.equal(sanitizeReturnUrl('http://bot.example.test/', HOSTS), '/')
+  assert.equal(sanitizeReturnUrl('http://evil.com/', localHosts), '/')
+})
+
 test('config derives the return hosts from the redirect URI and lowercases the allowlist', () => {
   const config = readGoogleAuthConfig(ENV)
   assert.deepEqual(config.returnHosts, HOSTS)

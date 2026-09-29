@@ -23,7 +23,14 @@ const sampleGroups = [
   {
     label: 'Analysis',
     items: [
-      { to: '/journal', label: 'Journal' },
+      {
+        to: '/journal',
+        label: 'Journal',
+        children: [
+          { to: '/journal', label: 'Summary' },
+          { to: '/journal/head-to-head', label: 'Head to Head' },
+        ],
+      },
       { to: '/ai-training', label: 'AI Training' },
     ],
   },
@@ -51,6 +58,13 @@ test('filterAdminOnlyNav: a non-admin loses the Codex Console child link, keeps 
   const dashboard = result.find((group) => group.label === 'Trading').items.find((item) => item.to === '/dashboard')
   assert.equal(dashboard.children.find((child) => child.to === '/dashboard/codex'), undefined)
   assert.ok(dashboard.children.find((child) => child.to === '/dashboard'), 'unrelated children are untouched')
+})
+
+test('filterAdminOnlyNav: a non-admin loses the Head to Head child link, keeps Summary', () => {
+  const result = filterAdminOnlyNav(sampleGroups, false)
+  const journal = result.find((group) => group.label === 'Analysis').items.find((item) => item.to === '/journal')
+  assert.equal(journal.children.find((child) => child.to === '/journal/head-to-head'), undefined)
+  assert.ok(journal.children.find((child) => child.to === '/journal'), 'unrelated children are untouched')
 })
 
 test('filterAdminOnlyNav: a group left with zero items after filtering is dropped, not shown empty', () => {

@@ -17,23 +17,33 @@ test('resolveAppMode picks the workspace from the subdomain', () => {
   assert.equal(resolveAppMode(''), 'all')
 })
 
-test('the ?app= override only works on a dev host', () => {
+test('a bare dev host is home by default, mirroring the apex; ?app= still overrides it', () => {
+  assert.equal(resolveAppMode('localhost', ''), 'home')
+  assert.equal(resolveAppMode('127.0.0.1', ''), 'home')
   assert.equal(resolveAppMode('localhost', 'ai'), 'ai')
   assert.equal(resolveAppMode('127.0.0.1', 'bot'), 'bot')
-  assert.equal(resolveAppMode('localhost', 'nonsense'), 'all')
+  assert.equal(resolveAppMode('localhost', 'nonsense'), 'home')
   assert.equal(resolveAppMode('localhost', 'home'), 'home')
+  assert.equal(resolveAppMode('localhost', 'all'), 'all')
   assert.equal(resolveAppMode('projxenios.trade', 'ai'), 'home')
   assert.equal(resolveAppMode('bot.projxenios.trade', 'ai'), 'bot')
 })
 
-test('getModeUrl links to the sibling subdomain and never on dev hosts', () => {
+test('getModeUrl links to the sibling subdomain, or a same-host ?app= override on dev hosts', () => {
   const loc = (hostname, port = '') => ({ protocol: 'https:', hostname, port })
   assert.equal(getBaseDomain('bot.projxenios.trade'), 'projxenios.trade')
   assert.equal(getBaseDomain('projxenios.trade'), 'projxenios.trade')
   assert.equal(getModeUrl('ai', '/ai-trading', loc('bot.projxenios.trade')), 'https://ai.projxenios.trade/ai-trading')
   assert.equal(getModeUrl('bot', '/dashboard', loc('ai.projxenios.trade')), 'https://bot.projxenios.trade/dashboard')
   assert.equal(getModeUrl('ai', '/x', loc('bot.example.test', '8443')), 'https://ai.example.test:8443/x')
-  assert.equal(getModeUrl('ai', '/', loc('localhost', '5173')), null)
+  // Dev hosts: ai.localhost/bot.localhost render but can never finish a Google
+  // login (the OAuth callback is fixed to the apex, so its cookie never
+  // matches a subdomain) - stay on the current dev host via ?app= instead.
+  assert.equal(getModeUrl('ai', '/', loc('localhost', '5173')), 'https://localhost:5173/?app=ai')
+  assert.equal(getModeUrl('bot', '/dashboard', loc('127.0.0.1', '5173')), 'https://127.0.0.1:5173/dashboard?app=bot')
+  // A path that already carries its own ?app= (e.g. a mode-mismatched route
+  // redirect) gets that param replaced, not duplicated.
+  assert.equal(getModeUrl('ai', '/ai-trading?app=bot', loc('localhost', '5173')), 'https://localhost:5173/ai-trading?app=ai')
   assert.equal(getModeUrl('all', '/', loc('bot.projxenios.trade')), null)
 })
 
@@ -88,4 +98,16 @@ test('Google sign-in starts on the apex, wherever the login screen is', () => {
   )
   assert.equal(getGoogleLoginUrl('', loc('projxenios.trade')), '/api/auth/google/start')
   assert.equal(getGoogleLoginUrl('', loc('localhost')), '/api/auth/google/start')
+})
+
+test('Google sign-in from a local ai./bot.localhost subdomain preserves the dev port', () => {
+  const loc = (hostname, port) => ({ protocol: 'http:', hostname, port })
+  assert.equal(
+    getGoogleLoginUrl('http://ai.localhost:5173/ai-trading', loc('ai.localhost', '5173')),
+    'http://localhost:5173/api/auth/google/start?return=http%3A%2F%2Fai.localhost%3A5173%2Fai-trading',
+  )
+  assert.equal(
+    getGoogleLoginUrl('', loc('bot.localhost', '5173')),
+    'http://localhost:5173/api/auth/google/start',
+  )
 })

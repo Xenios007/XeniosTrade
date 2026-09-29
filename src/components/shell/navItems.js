@@ -2,10 +2,14 @@ import {
   BrainCircuit,
   Bot,
   CalendarDays,
+  Coins,
+  CreditCard,
+  Hammer,
   History,
   KeyRound,
   LayoutDashboard,
   Network,
+  PlusSquare,
   Settings,
   Wallet,
   Layers,
@@ -13,6 +17,10 @@ import {
 } from 'lucide-react'
 import { APP_META, APP_MODE, APP_MODE_AI, APP_MODE_ALL, SECTIONS_BY_MODE, isAiModelsTabVisible } from '../../lib/appMode.js'
 
+// SaaS Phase 8: restructured into three top-level sections per the redesign spec - Trading
+// (what your bots are doing), Marketplace (buying entitlements), Config (account/bot setup).
+// Consolidated Knowledge keeps its own standalone group (see the comment on it below);
+// AI Training folds into Config instead of a separate "Analysis" group, which no longer exists.
 export const NAV_GROUPS = [
   {
     label: 'Trading',
@@ -24,22 +32,11 @@ export const NAV_GROUPS = [
         children: [
           { to: '/dashboard', label: 'Overview' },
           { to: '/dashboard/market', label: 'Market' },
-          { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
-          { to: '/dashboard/workflow', label: 'Workflow Notifications' },
-          { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
           { to: '/dashboard/codex', label: 'Codex Console' },
         ],
       },
-      {
-        to: '/mock-trading',
-        label: 'Mock Trading',
-        Icon: Bot,
-        children: [
-          { to: '/mock-trading/signal-models', label: 'Signal Models' },
-          { to: '/mock-trading/auto-trade-controller', label: 'Auto Trade Controller' },
-          { to: '/mock-trading/auto-trade-activity', label: 'Auto Trade Activity' },
-        ],
-      },
+      { to: '/mock-trading', label: 'Mock Trading', Icon: Bot },
+      { to: '/real-money-trading', label: 'Real Money Trading', Icon: Wallet },
       {
         to: '/ai-trading',
         label: 'AI Trading',
@@ -58,6 +55,16 @@ export const NAV_GROUPS = [
           { to: '/trade-history/real-money', label: 'Real Money Trades' },
         ],
       },
+      {
+        to: '/journal',
+        label: 'Journal',
+        Icon: CalendarDays,
+        children: [
+          { to: '/journal', label: 'Summary' },
+          { to: '/journal/head-to-head', label: 'Head to Head' },
+          { to: '/journal/wallet', label: 'Wallet Journal' },
+        ],
+      },
     ],
   },
   {
@@ -70,16 +77,28 @@ export const NAV_GROUPS = [
     ],
   },
   {
-    label: 'Analysis',
+    label: 'Marketplace',
     items: [
+      { to: '/marketplace/bot-slot', label: 'Bot Slot', Icon: PlusSquare },
+      { to: '/marketplace/symbol-slot', label: 'Symbol Slot', Icon: Coins },
+      { to: '/marketplace/subscription', label: 'Subscription', Icon: CreditCard },
+      { to: '/marketplace/bot-signal', label: 'Bot Signal', Icon: Store },
+    ],
+  },
+  {
+    label: 'Config',
+    items: [
+      { to: '/wallets', label: 'Wallets', Icon: Wallet },
+      { to: '/bot-creation', label: 'Bot Creation', Icon: Hammer },
       {
-        to: '/journal',
-        label: 'Journal',
-        Icon: CalendarDays,
+        to: '/ai-models',
+        label: 'AI Models',
+        Icon: KeyRound,
         children: [
-          { to: '/journal', label: 'Summary' },
-          { to: '/journal/head-to-head', label: 'Head to Head' },
-          { to: '/journal/wallet', label: 'Wallet Journal' },
+          { to: '/ai-models', label: 'Providers & Keys' },
+          { to: '/ai-models/browse', label: 'Browse Models' },
+          { to: '/ai-models/bots', label: 'Bot Assignments' },
+          { to: '/ai-models/agents', label: 'Agent Assignments' },
         ],
       },
       {
@@ -92,24 +111,6 @@ export const NAV_GROUPS = [
           { to: '/ai-training/insights', label: 'Signal Insights' },
           { to: '/ai-training/advisory', label: 'AI Advisory' },
           { to: '/ai-training/assistant', label: 'AI Assistant' },
-        ],
-      },
-    ],
-  },
-  {
-    label: 'Config',
-    items: [
-      { to: '/wallets', label: 'Wallets', Icon: Wallet },
-      { to: '/signals-marketplace', label: 'Signals Marketplace', Icon: Store },
-      {
-        to: '/ai-models',
-        label: 'AI Models',
-        Icon: KeyRound,
-        children: [
-          { to: '/ai-models', label: 'Providers & Keys' },
-          { to: '/ai-models/browse', label: 'Browse Models' },
-          { to: '/ai-models/bots', label: 'Bot Assignments' },
-          { to: '/ai-models/agents', label: 'Agent Assignments' },
         ],
       },
       {
@@ -200,7 +201,7 @@ export function filterAdminOnlyNav(groups, isAdmin) {
         .filter((item) => item.to !== '/ai-training')
         .map((item) => (
           item.children
-            ? { ...item, children: item.children.filter((child) => child.to !== '/dashboard/codex') }
+            ? { ...item, children: item.children.filter((child) => child.to !== '/dashboard/codex' && child.to !== '/journal/head-to-head') }
             : item
         )),
     }))

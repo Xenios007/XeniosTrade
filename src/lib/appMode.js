@@ -14,7 +14,7 @@ export const APEX_DOMAIN = 'projxenios.trade'
 
 const MODE_OVERRIDE_KEY = 'xeniostrade:app-mode'
 const MODE_BY_SUBDOMAIN = { ai: APP_MODE_AI, bot: APP_MODE_BOT }
-const DEV_OVERRIDE_MODES = [APP_MODE_AI, APP_MODE_BOT, APP_MODE_HOME]
+const DEV_OVERRIDE_MODES = [APP_MODE_AI, APP_MODE_BOT, APP_MODE_HOME, APP_MODE_ALL]
 
 export const APP_META = {
   [APP_MODE_ALL]: {
@@ -47,7 +47,7 @@ export const APP_META = {
 // shared (provider keys), but each side only shows its own tabs.
 export const SECTIONS_BY_MODE = {
   [APP_MODE_AI]: ['ai-trading', 'ai-models', 'ai-history', 'ai-journal', 'ai-wallet', 'ai-settings'],
-  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'trade-history', 'journal', 'ai-training', 'consolidated-knowledge', 'wallets', 'signals-marketplace', 'ai-models', 'settings'],
+  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'real-money-trading', 'trade-history', 'journal', 'ai-training', 'consolidated-knowledge', 'wallets', 'bot-creation', 'marketplace', 'ai-models', 'settings'],
 }
 
 export const AI_MODELS_TAB_PATHS = {
@@ -77,8 +77,12 @@ export function resolveAppMode(hostname, override = '') {
   if (host === APEX_DOMAIN || host === `www.${APEX_DOMAIN}`) {
     return APP_MODE_HOME
   }
-  if (isDevHost(host) && DEV_OVERRIDE_MODES.includes(override)) {
-    return override
+  if (isDevHost(host)) {
+    // Mirrors the apex domain: a bare dev host is 'home' by default, same as
+    // projxenios.trade itself, now that ai.localhost/bot.localhost are real,
+    // working subdomains to hand off to. `?app=all` is the escape hatch back
+    // to the old single-host combined workspace.
+    return DEV_OVERRIDE_MODES.includes(override) ? override : APP_MODE_HOME
   }
   return APP_MODE_ALL
 }
@@ -91,17 +95,27 @@ export function getBaseDomain(hostname) {
 }
 
 // Absolute URL of the other workspace, or null when there is no subdomain split
-// to link to (dev host, or the apex 'all' workspace).
+// to link to (the apex 'all' workspace, or a non-dev host with no dot at all).
 export function getModeUrl(targetMode, path = '/', location = globalThis.window?.location) {
   if (!location || !Object.values(MODE_BY_SUBDOMAIN).includes(targetMode)) {
     return null
   }
   const host = String(location.hostname || '').toLowerCase()
-  if (isDevHost(host) || !host.includes('.')) {
-    return null
-  }
   const label = targetMode === APP_MODE_AI ? 'ai' : 'bot'
   const port = location.port ? `:${location.port}` : ''
+  if (isDevHost(host)) {
+    // ai.localhost / bot.localhost resolve and render fine, but can never
+    // complete a Google login: the OAuth callback is fixed to the apex host,
+    // so the session cookie it sets never matches a subdomain and the login
+    // silently fails there. Use the ?app= override instead, which stays on
+    // the one dev host where login actually works.
+    const url = new URL(path, `${location.protocol}//${host}${port}`)
+    url.searchParams.set('app', label)
+    return url.toString()
+  }
+  if (!host.includes('.')) {
+    return null
+  }
   return `${location.protocol}//${label}.${getBaseDomain(host)}${port}${path}`
 }
 
@@ -113,7 +127,10 @@ export function getGoogleLoginUrl(returnTo = '', location = globalThis.window?.l
   if (!location || isDevHost(host) || !host.includes('.') || host === APEX_DOMAIN || host === `www.${APEX_DOMAIN}`) {
     return `/api/auth/google/start${suffix}`
   }
-  return `${location.protocol}//${getBaseDomain(host)}/api/auth/google/start${suffix}`
+  // Production has no port to preserve; a local ai.localhost:5173 / bot.localhost:5173
+  // does, and dropping it would send the browser to the apex on the wrong port.
+  const port = location.port ? `:${location.port}` : ''
+  return `${location.protocol}//${getBaseDomain(host)}${port}/api/auth/google/start${suffix}`
 }
 
 function readModeOverride(search) {

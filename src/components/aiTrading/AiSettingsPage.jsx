@@ -2,6 +2,7 @@ import { ShieldAlert } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { APP_MODE_BOT, getModeUrl } from '../../lib/appMode'
+import { ExternalHostLink } from '../ExternalHostLink'
 import { AI_SCAN_INTERVAL_MS, AI_TRADING_EXECUTION_LIMITS, AI_TRADING_MIN_NET_REWARD_RISK, AI_TRADING_MIN_TARGET_FEE_MULTIPLE, AI_TRADING_ROUND_TRIP_FEE_PCT, AI_TRADING_SYMBOLS, AI_TRADING_TIMEFRAMES, DEFAULT_AI_TRADING_STRATEGY, aiStrategyTag } from '../../lib/aiTrading'
 import { formatDateTime } from '../../lib/formatters'
 import { MODE_LABEL, requestJson, useAiLedger } from '../../lib/aiTradingApi'
@@ -589,7 +590,7 @@ export function AiSettingsPage({ settings }) {
           </div>
           <p className="leading-relaxed text-slate-500">
             Exchange keys are shared with the bot workspace and edited there
-            {botCredentialsUrl ? <> (<a href={botCredentialsUrl} className="text-sky-300 hover:underline">API Credentials</a>)</> : ' (Settings → API Credentials)'}.
+            {botCredentialsUrl ? <> (<ExternalHostLink href={botCredentialsUrl} className="text-sky-300 hover:underline">API Credentials</ExternalHostLink>)</> : ' (Settings → API Credentials)'}.
             Position size, leverage and stops are decided by the Risk Manager model (see <Link to="/ai-models/agents" className="text-sky-300 hover:underline">AI Models</Link>).
           </p>
         </div>

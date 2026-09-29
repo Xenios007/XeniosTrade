@@ -2,8 +2,8 @@
 // C:\Users\Rain\.claude\plans\robust-orbiting-swan.md and the saas-pivot-phase1 memory).
 //
 // Before this runs, server/mock-trading-server.js reads/writes settings.json and
-// trade-history.json (plus auto-trade-log.json, bot-settings-log.json,
-// workflow-review-log.json) from a per-user subtree under server/data/users/<userId>/,
+// trade-history.json (plus auto-trade-log.json, bot-settings-log.json) from a per-user
+// subtree under server/data/users/<userId>/,
 // which starts out empty for every account including the admin's. This copies the
 // operator's own pre-existing flat server/data/*.json files into the admin account's own
 // subtree, so the admin's real settings/wallets/trade-history keep showing up after this
@@ -31,17 +31,15 @@ const force = process.argv.includes('--force')
 
 // Exactly the files mock-trading-server.js now reads/writes per-user (see
 // userSettingsFilePath / userHistoryFilePath / userAutoTradeLogFilePath /
-// userWorkflowReviewLogFilePath / userBotSettingsLogFilePath). Deliberately excludes
-// settings-audit-log.json and settings-recovery.json, which stay admin-only flat files by
-// design (see the comment above getSettings() in mock-trading-server.js), and every other
-// subsystem (AI Trading, Learning Bot, Consolidated/Bot 10, backtest data) which is out of
-// scope for this pivot entirely.
+// userBotSettingsLogFilePath). Deliberately excludes settings-audit-log.json and
+// settings-recovery.json, which stay admin-only flat files by design (see the comment above
+// getSettings() in mock-trading-server.js), and every other subsystem (AI Trading, Learning
+// Bot, Consolidated/Bot 10, backtest data) which is out of scope for this pivot entirely.
 const FILES_TO_MIGRATE = [
   'settings.json',
   'trade-history.json',
   'auto-trade-log.json',
   'bot-settings-log.json',
-  'workflow-review-log.json',
 ]
 
 async function exists(filePath) {

@@ -29,7 +29,25 @@ export const ROLE_ADMIN = 'admin'
 export const ROLE_USER = 'user'
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase()
-const defaultPlan = () => ({ botSlots: 0, signals: [] })
+
+// SaaS Phase 8 (self-service marketplace): botSlots/signals are unchanged (whole-bot
+// entitlements, still what drives wallet unlock). signalItems is new and separate - individual
+// purchased checklist rows (`${modelId}:${key}`), the unit Bot Creation composes from; owning
+// every item of a model does not by itself grant the whole-bot wallet unlock `signals` does.
+// symbolSlots starts at 10 per the confirmed product decision. subscriptionTier is a bare flag
+// with no consumer yet, deliberately not over-built. customBots lives in the user's own
+// settings.json (alongside wallets/strategy), not here - this module only owns identity/plan.
+export const defaultPlan = () => ({
+  botSlots: 0,
+  // Per bought slot: '' (empty), a premade model id, or a custom-bot id. Index i = slot-(i+1).
+  botSlotAssignments: [],
+  signals: [],
+  signalItems: [],
+  symbolSlots: 10,
+  tradingSymbols: [],
+  freeBotClaimed: false,
+  subscriptionTier: null,
+})
 
 export function findUserByEmail(users, email) {
   const normalized = normalizeEmail(email)
@@ -85,6 +103,11 @@ export function createUsersStore({ dataDir = DEFAULT_DATA_DIR } = {}) {
    * it - self-healing on every login, the same instinct as this codebase's settings self-heal);
    * every other email is role: 'user'. An existing user's role is never silently changed by a
    * later login - only the one seeded admin address is force-corrected.
+   *
+   * Plan shape is self-healed the same way: a user created before a new plan field existed
+   * (e.g. symbolSlots, added in SaaS Phase 8) gets that field filled in from defaultPlan() on
+   * their next login, not just the next time updateUserPlan happens to touch their plan. Only
+   * writes to disk when a key was actually missing - never on a pure key-order difference.
    */
   async function findOrCreateUserByEmail(email) {
     const normalized = normalizeEmail(email)
@@ -94,8 +117,21 @@ export function createUsersStore({ dataDir = DEFAULT_DATA_DIR } = {}) {
     const existing = findUserByEmail(users, normalized)
 
     if (existing) {
+      let dirty = false
+
       if (isAdminEmail && existing.role !== ROLE_ADMIN) {
         existing.role = ROLE_ADMIN
+        dirty = true
+      }
+
+      const plan = existing.plan || {}
+      const missingPlanKeys = Object.keys(defaultPlan()).filter((key) => !(key in plan))
+      if (missingPlanKeys.length > 0) {
+        existing.plan = { ...defaultPlan(), ...plan }
+        dirty = true
+      }
+
+      if (dirty) {
         existing.updatedAt = Date.now()
         await writeUsersAtomic(users)
       }

@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { LoaderCircle, LockKeyhole } from 'lucide-react'
+import { Bot, LoaderCircle, LockKeyhole, Plus } from 'lucide-react'
 import { AppShell } from './components/shell/AppShell'
 import { BrandMark } from './components/BrandMark'
 import { GoogleSignInButton } from './components/GoogleSignInButton'
@@ -44,8 +44,8 @@ import { TradeHistoryStatsPanel } from './components/TradeHistoryStatsPanel'
 import { TradeHistoryTable } from './components/TradeHistoryTable'
 import { WalletsPage } from './components/WalletsPage'
 import { AdminUsersPage } from './components/AdminUsersPage'
-import { SignalsMarketplacePage } from './components/SignalsMarketplacePage'
-import { SelfReviewLogPanel, WorkflowNotificationsPanel } from './components/WorkflowReadinessPanel'
+import { MarketplacePage } from './components/marketplace/MarketplacePage'
+import { BotCreationPage } from './components/BotCreationPage'
 import { getKlines, getSignalModelAnalysis, getVolatileMarkets } from './lib/api'
 import { getStrategyDerivedMaxLossPerTrade, isTradeClosed, summarizeAccount } from './lib/accountMetrics'
 import { formatPrice } from './lib/formatters'
@@ -55,6 +55,7 @@ import { DEFAULT_MARGIN_MODE } from './lib/marginModes'
 import {
   buildDefaultSignalModelStrategies,
   DEFAULT_BOT3_RISK_PRESET_ID,
+  DEFAULT_BOT3_CUSTOM_RISK,
   DEFAULT_SIGNAL_MODEL_ID,
   getEffectiveSignalModelStrategy,
   getSignalModel,
@@ -69,7 +70,9 @@ import {
   buildDefaultWallets,
   getRealMoneyWallet,
   getTotalWalletStartingBalance,
+  getUnlockedBotWalletIds,
   getWalletEffectiveStartingBalance,
+  normalizeWallets,
 } from './lib/wallets'
 import { analyzeTradeSignal } from './lib/tradeSignal'
 
@@ -87,6 +90,7 @@ const DEFAULT_STRATEGY_SETTINGS_BASE = {
   activeSignalModelId: DEFAULT_SIGNAL_MODEL_ID,
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   bot3RiskPresetId: DEFAULT_BOT3_RISK_PRESET_ID,
+  bot3CustomRisk: { ...DEFAULT_BOT3_CUSTOM_RISK },
   sessionScheduleEnabled: false,
   scheduledSessions: DEFAULT_AUTO_TRADE_SESSIONS,
   marginMode: DEFAULT_MARGIN_MODE,
@@ -171,15 +175,6 @@ const DEFAULT_JOURNAL_SUMMARY = {
   wallets: [],
   availableMonths: [],
 }
-const DEFAULT_WORKFLOW = {
-  currentPhase: 'phase-1',
-  summary: '',
-  trackedSymbols: [],
-  validatedSymbols: [],
-  notifications: [],
-  phases: [],
-  reviewLog: [],
-}
 const CURRENT_PAGE_STORAGE_KEY = 'xeniostrade:current-page'
 const JOURNAL_TABS = [
   { to: '/journal', label: 'Summary', end: true },
@@ -193,9 +188,6 @@ const TRADE_HISTORY_TABS = [
 const DASHBOARD_TABS = [
   { to: '/dashboard', label: 'Overview', end: true },
   { to: '/dashboard/market', label: 'Market' },
-  { to: '/dashboard/real-money-trading', label: 'Real Money Trading' },
-  { to: '/dashboard/workflow', label: 'Workflow Notifications' },
-  { to: '/dashboard/self-review-log', label: 'Self-Review Log' },
   { to: '/dashboard/codex', label: 'Codex Console' },
 ]
 const DEFAULT_AI_TRAINING_STATUS = {
@@ -410,7 +402,6 @@ export default function App() {
   const [journalSummary, setJournalSummary] = useState(DEFAULT_JOURNAL_SUMMARY)
   const [autoTradeLog, setAutoTradeLog] = useState([])
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
-  const [workflow, setWorkflow] = useState(DEFAULT_WORKFLOW)
   const [aiTrainingStatus, setAiTrainingStatus] = useState(DEFAULT_AI_TRAINING_STATUS)
   const [signalModelAnalyses, setSignalModelAnalyses] = useState({})
   const [autoTradeStatus, setAutoTradeStatus] = useState({
@@ -425,6 +416,9 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [savingSettings, setSavingSettings] = useState(false)
   const [syncingWalletId, setSyncingWalletId] = useState('')
+  const [claimingFreeBot, setClaimingFreeBot] = useState(false)
+  const [buyingEntitlement, setBuyingEntitlement] = useState(false)
+  const [savingTradingSymbols, setSavingTradingSymbols] = useState(false)
   const [switchingSignalModel, setSwitchingSignalModel] = useState(false)
   const [autoTradePhase, setAutoTradePhase] = useState('idle')
   const [autoTradeFeedback, setAutoTradeFeedback] = useState(null)
@@ -485,7 +479,6 @@ export default function App() {
       fetchJsonResource('/api/trade-history'),
       fetchJsonResource('/api/auto-trade-status'),
       fetchJsonResource('/api/auto-trade-log'),
-      fetchJsonResource('/api/workflow-readiness'),
       fetchJsonResource('/api/learning-bot/train-status'),
     ])
 
@@ -496,7 +489,6 @@ export default function App() {
       historyResult,
       autoResult,
       logResult,
-      workflowResult,
       aiTrainingResult,
     ] = results
 
@@ -564,12 +556,6 @@ export default function App() {
       setAutoTradeLog(logResult.value.items || [])
     } else {
       console.error('Failed to refresh auto-trade log:', logResult.reason)
-    }
-
-    if (workflowResult.status === 'fulfilled') {
-      setWorkflow(workflowResult.value)
-    } else {
-      console.error('Failed to refresh workflow readiness:', workflowResult.reason)
     }
 
     if (aiTrainingResult.status === 'fulfilled') {
@@ -1035,6 +1021,17 @@ export default function App() {
     [tradeHistory, liveTradePrices, settings.wallets],
   )
 
+  // SaaS Phase 8B: which signal-model bots this account actually owns (unlocked wallets'
+  // assignedSignalModelId), driving Dashboard's empty/claim state and BotStatusGrid's filter.
+  // Same botSlots+ownedSignalIds inputs WalletsPage.jsx uses for its own lock computation.
+  const ownedBotModelIds = useMemo(() => {
+    const botSlots = Number.isFinite(settings.botSlots) ? settings.botSlots : Infinity
+    const ownedSignalIds = Array.isArray(settings.ownedSignalIds) ? settings.ownedSignalIds : []
+    const wallets = normalizeWallets(settings.wallets)
+    const unlockedIds = new Set(getUnlockedBotWalletIds(wallets, botSlots, ownedSignalIds))
+    return wallets.filter((wallet) => unlockedIds.has(wallet.id)).map((wallet) => wallet.assignedSignalModelId)
+  }, [settings.wallets, settings.botSlots, settings.ownedSignalIds])
+
   const trackedTradeSymbols = useMemo(() => (
     Array.from(new Set([
       ...(settings.strategy.preferredSymbols || []),
@@ -1354,6 +1351,116 @@ export default function App() {
     }
   }
 
+  // SaaS Phase 8B: claims the one free starter bot (Bot 2). Idempotent server-side (409 if
+  // already claimed) - refreshes full platform state afterward since the grant changes
+  // settings.ownedSignalIds/wallets[].locked in several places at once, not just one field.
+  async function handleClaimFreeBot() {
+    if (claimingFreeBot) {
+      return
+    }
+
+    setClaimingFreeBot(true)
+    try {
+      const response = await fetch('/api/bots/claim-free', { method: 'POST' })
+      const payload = await readJsonResponse(response)
+
+      if (!response.ok) {
+        throw new Error(payload.error || 'Unable to claim your free bot')
+      }
+
+      setError('')
+      await refreshPlatformState()
+    } catch (claimError) {
+      const message = (
+        isConnectionError(claimError)
+          ? 'Unable to claim your free bot because the backend server is not reachable on 127.0.0.1:3001. Start `npm.cmd run dev:server` or `npm.cmd run dev:all`.'
+          : claimError instanceof Error
+            ? claimError.message
+            : 'Unable to claim your free bot'
+      )
+      setError(message)
+    } finally {
+      setClaimingFreeBot(false)
+    }
+  }
+
+  // SaaS Phase 8F: one generic handler for every instant-buy Marketplace route (bot slot,
+  // symbol slot, subscription) - they're all "POST, no body, refresh platform state on
+  // success" with only the endpoint and error copy differing. Bot-signal purchases have their
+  // own handlers on SignalsMarketplacePage since those need a body (modelId/key) and refresh
+  // just the marketplace catalog, not the whole platform.
+  async function handleBuyEntitlement(endpoint, errorFallback) {
+    if (buyingEntitlement) {
+      return { ok: false, error: 'Already buying something else.' }
+    }
+
+    setBuyingEntitlement(true)
+    try {
+      const response = await fetch(endpoint, { method: 'POST' })
+      const payload = await readJsonResponse(response)
+
+      if (!response.ok) {
+        throw new Error(payload.error || errorFallback)
+      }
+
+      setError('')
+      await refreshPlatformState()
+      return { ok: true }
+    } catch (buyError) {
+      const message = (
+        isConnectionError(buyError)
+          ? `Unable to buy this because the backend server is not reachable on 127.0.0.1:3001. Start \`npm.cmd run dev:server\` or \`npm.cmd run dev:all\`.`
+          : buyError instanceof Error
+            ? buyError.message
+            : errorFallback
+      )
+      setError(message)
+      return { ok: false, error: message }
+    } finally {
+      setBuyingEntitlement(false)
+    }
+  }
+
+  // SaaS Phase 8C: saves a regular user's own manually-picked trading-symbol list (capped at
+  // plan.symbolSlots server-side). A dedicated endpoint, not the general settings PUT, since it
+  // also flips settings.strategy.preferredSymbols to match in one atomic write - see
+  // PUT /api/settings/trading-symbols.
+  async function handleSaveTradingSymbols(symbols) {
+    if (savingTradingSymbols) {
+      return { ok: false, error: 'Already saving.' }
+    }
+
+    setSavingTradingSymbols(true)
+    try {
+      const response = await fetch('/api/settings/trading-symbols', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols }),
+      })
+      const payload = await readJsonResponse(response)
+
+      if (!response.ok) {
+        throw new Error(payload.error || 'Unable to save your trading symbols')
+      }
+
+      setError('')
+      await refreshPlatformState()
+      return { ok: true }
+    } catch (saveError) {
+      const message = (
+        isConnectionError(saveError)
+          ? 'Unable to save trading symbols because the backend server is not reachable on 127.0.0.1:3001. Start `npm.cmd run dev:server` or `npm.cmd run dev:all`.'
+          : saveError instanceof Error
+            ? saveError.message
+            : 'Unable to save your trading symbols'
+      )
+      setError(message)
+      return { ok: false, error: message }
+    } finally {
+      setSavingTradingSymbols(false)
+    }
+  }
+
   async function handleSyncWallet(walletId) {
     if (!walletId || syncingWalletId) {
       return
@@ -1487,6 +1594,38 @@ export default function App() {
   }
 
   function renderDashboardOverview() {
+    // SaaS Phase 8B: admin is exempt from the empty/claim state entirely (Infinity botSlots -
+    // ownedBotModelIds is never empty for an account with any signal models assigned at all,
+    // but the admin's own account may still start bare depending on migration state, so this
+    // checks role directly rather than relying on that).
+    const botSlotList = settings.botSlotList || []
+    const slottedCustomBotIds = new Set(botSlotList.map((slot) => slot.assignment))
+    if (!isAdmin && ownedBotModelIds.length === 0 && botSlotList.length === 0) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-4 rounded-[28px] border border-dashed border-white/15 bg-white/[0.02] px-6 py-16 text-center">
+          <span className="flex h-14 w-14 items-center justify-center rounded-full border border-sky-300/25 bg-sky-400/10 text-sky-200">
+            <Bot className="h-7 w-7" />
+          </span>
+          <div>
+            <h2 className="text-lg font-semibold text-white">You don't have a bot yet</h2>
+            <p className="mt-2 max-w-md text-sm text-slate-400">
+              Every new account gets one bot free. Claim it to see your dashboard come to life -
+              you can buy more bot slots any time from the Marketplace.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleClaimFreeBot}
+            disabled={claimingFreeBot}
+            className="mt-2 inline-flex items-center gap-2 rounded-2xl bg-sky-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >
+            <Plus className="h-4 w-4" />
+            {claimingFreeBot ? 'Claiming…' : 'Add your free bot'}
+          </button>
+        </div>
+      )
+    }
+
     return (
       <>
         <DashboardKpis account={accountSummary} autoTradeStatus={autoTradeStatus} />
@@ -1496,6 +1635,12 @@ export default function App() {
           signalModelPerformance={signalModelPerformance}
           activeSignalModelId={settings.strategy.activeSignalModelId}
           activeModelAnalysis={sidebarModelAnalysis}
+          ownedModelIds={isAdmin ? null : ownedBotModelIds}
+          buySlotTo={isAdmin ? null : '/marketplace/bot-slot'}
+          customBots={(settings.customBots || []).filter((bot) => bot.enabled && (isAdmin || slottedCustomBotIds.has(bot.id)))}
+          emptySlots={isAdmin ? [] : botSlotList.filter((slot) => !slot.assignment)}
+          undeployedModelIds={normalizeWallets(settings.wallets).filter((wallet) => !wallet.enabled).map((wallet) => wallet.assignedSignalModelId)}
+          symbol={selectedSymbol}
         />
 
         <div className="grid gap-6 xl:grid-cols-2">
@@ -1503,13 +1648,15 @@ export default function App() {
           <DashboardActivityFeed autoTradeLog={autoTradeLog} />
         </div>
 
-        <Link
-          to="/mock-trading/auto-trade-controller"
-          className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 text-sm text-slate-200 transition hover:border-sky-400/30 hover:bg-white/[0.05]"
-        >
-          <span>Full runtime detail, controls, and the scheduler's live decision trail live on <span className="font-semibold text-white">Auto Trade Controller</span>.</span>
-          <span className="shrink-0 font-semibold text-sky-300">Open →</span>
-        </Link>
+        {isAdmin ? (
+          <Link
+            to="/mock-trading"
+            className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 text-sm text-slate-200 transition hover:border-sky-400/30 hover:bg-white/[0.05]"
+          >
+            <span>Full runtime detail and the scheduler's live decision trail live on <span className="font-semibold text-white">Mock Trading</span>.</span>
+            <span className="shrink-0 font-semibold text-sky-300">Open →</span>
+          </Link>
+        ) : null}
       </>
     )
   }
@@ -1581,26 +1728,27 @@ export default function App() {
         <Routes>
           <Route index element={renderDashboardOverview()} />
           <Route path="market" element={renderDashboardMarket()} />
-          <Route
-            path="real-money-trading"
-            element={(
-              <RealMoneyTradingPage
-                settings={settings}
-                trades={tradeHistory}
-                livePrices={liveTradePrices}
-                aiTrainingStatus={aiTrainingStatus}
-                onSave={handleSaveSettings}
-                saving={savingSettings}
-                ready={hasLoadedSettingsRef.current}
-              />
-            )}
-          />
-          <Route path="workflow" element={<WorkflowNotificationsPanel workflow={workflow} />} />
-          <Route path="self-review-log" element={<SelfReviewLogPanel workflow={workflow} />} />
           <Route path="codex" element={<AdminOnlyGate isAdmin={isAdmin} label="Codex Console"><CodexConsole /></AdminOnlyGate>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </div>
+    )
+  }
+
+  // SaaS Phase 8E: promoted out of Dashboard's sub-tabs into its own top-level page, below Mock
+  // Trading in nav, matching Mock Trading's structure (its own page, its own Activity log).
+  function renderRealMoneyTrading() {
+    return (
+      <RealMoneyTradingPage
+        settings={settings}
+        trades={tradeHistory}
+        autoTradeLog={autoTradeLog}
+        livePrices={liveTradePrices}
+        onSave={handleSaveSettings}
+        saving={savingSettings}
+        ready={hasLoadedSettingsRef.current}
+        ownedBotModelIds={isAdmin ? null : ownedBotModelIds}
+      />
     )
   }
 
@@ -1614,8 +1762,6 @@ export default function App() {
         autoTradeFeedback={autoTradeFeedback}
         activeSignalModelId={settings.strategy.activeSignalModelId}
         signalModelPerformance={signalModelPerformance}
-        onSelectSignalModel={handleSelectSignalModel}
-        switchingSignalModel={switchingSignalModel}
         tradingMode={tradingMode}
         autoTradePhase={autoTradePhase}
       />
@@ -1709,6 +1855,10 @@ export default function App() {
       livePrices: liveTradePrices,
       wallets: settings.wallets,
     }
+    // SaaS Phase 8H: Head to Head is admin-only - a regular user's own wallets are already
+    // just their own bots, so a "compare your bots to each other" view isn't as meaningful,
+    // and it was explicitly scoped to "only the bots the admin has actually set up" for admin.
+    const journalTabs = isAdmin ? JOURNAL_TABS : JOURNAL_TABS.filter((tab) => tab.to !== '/journal/head-to-head')
 
     return (
       <div className="grid gap-6">
@@ -1716,10 +1866,10 @@ export default function App() {
           title="Journal"
           description="Combined performance across wallets 1-4, the head-to-head comparison, and the per-wallet trade calendar."
         />
-        <SubNavTabs tabs={JOURNAL_TABS} />
+        <SubNavTabs tabs={journalTabs} />
         <Routes>
           <Route index element={<JournalOverviewPage {...journalProps} />} />
-          <Route path="head-to-head" element={<JournalHeadToHeadPage {...journalProps} />} />
+          <Route path="head-to-head" element={<AdminOnlyGate isAdmin={isAdmin} label="Head to Head"><JournalHeadToHeadPage {...journalProps} /></AdminOnlyGate>} />
           <Route path="wallet" element={<JournalWalletPage {...journalProps} />} />
           <Route path="*" element={<Navigate to="/journal" replace />} />
         </Routes>
@@ -1738,8 +1888,27 @@ export default function App() {
         syncingWalletId={syncingWalletId}
         saving={savingSettings}
         ready={hasLoadedSettingsRef.current}
+        isAdmin={isAdmin}
+        onRefresh={refreshPlatformState}
       />
     )
+  }
+
+  function renderMarketplace() {
+    return (
+      <MarketplacePage
+        settings={settings}
+        isAdmin={isAdmin}
+        onBuyBotSlot={() => handleBuyEntitlement('/api/marketplace/bot-slot/buy', 'Unable to buy a bot slot')}
+        onBuySymbolSlot={() => handleBuyEntitlement('/api/marketplace/symbol-slot/buy', 'Unable to buy symbol slots')}
+        onBuySubscription={() => handleBuyEntitlement('/api/marketplace/subscription/buy', 'Unable to buy the subscription')}
+        buying={buyingEntitlement}
+      />
+    )
+  }
+
+  function renderBotCreation() {
+    return <BotCreationPage settings={settings} isAdmin={isAdmin} onSaveSettings={handleSaveSettings} ownedBotModelIds={isAdmin ? null : ownedBotModelIds} onRefresh={refreshPlatformState} />
   }
 
   function renderAiModels() {
@@ -1764,6 +1933,11 @@ export default function App() {
         onSave={handleSaveSettings}
         saving={savingSettings}
         ready={hasLoadedSettingsRef.current}
+        isAdmin={isAdmin}
+        availableSymbols={marketSymbols}
+        onSaveTradingSymbols={handleSaveTradingSymbols}
+        savingTradingSymbols={savingTradingSymbols}
+        ownedBotModelIds={isAdmin ? null : ownedBotModelIds}
       />
     )
   }
@@ -1920,12 +2094,14 @@ export default function App() {
           <>
             <Route path="/dashboard/*" element={renderDashboard()} />
             <Route path="/mock-trading/*" element={renderMockTrading()} />
+            <Route path="/real-money-trading/*" element={renderRealMoneyTrading()} />
             <Route path="/ai-training/*" element={<AdminOnlyGate isAdmin={isAdmin} label="AI Training">{renderLearningBot()}</AdminOnlyGate>} />
             <Route path="/consolidated-knowledge" element={<AdminOnlyGate isAdmin={isAdmin} label="Consolidated Knowledge"><ConsolidatedBotPage /></AdminOnlyGate>} />
             <Route path="/bot-10" element={<Navigate to="/consolidated-knowledge" replace />} />
             <Route path="/consolidated-bot" element={<Navigate to="/consolidated-knowledge" replace />} />
             <Route path="/wallets" element={renderWallets()} />
-            <Route path="/signals-marketplace" element={<SignalsMarketplacePage />} />
+            <Route path="/marketplace/*" element={renderMarketplace()} />
+            <Route path="/bot-creation" element={renderBotCreation()} />
             <Route path="/admin" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/journal/*" element={renderJournal()} />
             <Route path="/trade-history/*" element={renderTradeHistory()} />

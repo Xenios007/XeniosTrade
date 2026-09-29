@@ -114,6 +114,14 @@ function SidebarBody({ collapsed, onToggleCollapsed, onNavigate, onClose, showCl
       {SIBLING?.url ? (
         <a
           href={SIBLING.url}
+          // See GoogleSignInButton.jsx: a plain <a href> click has been observed
+          // to silently no-op on some local ai.localhost/bot.localhost setups.
+          // Force navigation via JS as a fallback that does not depend on
+          // native click-to-navigate behavior.
+          onClick={(event) => {
+            event.preventDefault()
+            window.location.assign(SIBLING.url)
+          }}
           title={collapsed ? `Switch to ${SIBLING.label}` : undefined}
           className={`mx-3 flex items-center gap-3 rounded-2xl border border-white/10 px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:border-sky-300/30 hover:bg-white/5 hover:text-white ${
             collapsed ? 'justify-center' : ''

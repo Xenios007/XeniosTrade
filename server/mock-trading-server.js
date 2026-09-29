@@ -10,7 +10,7 @@ import dotenv from 'dotenv'
 import { createGoogleAuthHandlers } from './google-auth.js'
 import {
   findOrCreateUserByEmail, ADMIN_EMAIL, ROLE_ADMIN, userDataPath, getAdminUserId,
-  listUsers, getUserById, updateUserPlan,
+  listUsers, getUserById, updateUserPlan, defaultPlan,
 } from './lib/users-store.js'
 import {
   getStrategyDerivedMaxLossPerTrade,
@@ -29,6 +29,8 @@ import {
   buildDefaultSignalModelStrategies,
   calculateSignalModelPositionSizing,
   DEFAULT_BOT3_RISK_PRESET_ID,
+  DEFAULT_BOT3_CUSTOM_RISK,
+  normalizeBot3CustomRisk,
   DEFAULT_SIGNAL_MODEL_ID,
   ensureSignalModelId,
   getEffectiveSignalModelStrategy,
@@ -169,12 +171,7 @@ const settingsFilePath = path.join(dataDir, 'settings.json')
 const userSettingsFilePath = (userId) => userDataPath(userId, 'settings.json')
 const userHistoryFilePath = (userId) => userDataPath(userId, 'trade-history.json')
 const userAutoTradeLogFilePath = (userId) => userDataPath(userId, 'auto-trade-log.json')
-const userWorkflowReviewLogFilePath = (userId) => userDataPath(userId, 'workflow-review-log.json')
 const userBotSettingsLogFilePath = (userId) => userDataPath(userId, 'bot-settings-log.json')
-// SaaS Phase 5 (Signals Marketplace): a small shared queue of "request access" clicks - not
-// per-user, since the admin needs to see every pending request across every account in one
-// place to action them.
-const signalAccessRequestsFilePath = path.join(dataDir, 'signal-access-requests.json')
 const settingsAuditLogFilePath = path.join(dataDir, 'settings-audit-log.json')
 const settingsRecoveryFilePath = path.join(dataDir, 'settings-recovery.json')
 const autoTradeLogFilePath = path.join(dataDir, 'auto-trade-log.json')
@@ -396,6 +393,7 @@ const defaultStrategySettingsBase = {
   realMoneyExecutionArmed: false,
   tradeStylePresetId: MANUAL_TRADE_STYLE_PRESET_ID,
   bot3RiskPresetId: DEFAULT_BOT3_RISK_PRESET_ID,
+  bot3CustomRisk: { ...DEFAULT_BOT3_CUSTOM_RISK },
   sessionScheduleEnabled: false,
   scheduledSessions: DEFAULT_AUTO_TRADE_SESSIONS,
   marginMode: DEFAULT_MARGIN_MODE,
@@ -503,6 +501,10 @@ const defaultSettings = {
   },
   learningBot: defaultLearningBotSettings,
   wallets: buildDefaultWallets(),
+  // SaaS Phase 8G (Bot Creation): user-composed bots, each combining 2+ owned signal
+  // checklist items from different native bots into one new strategy. See
+  // normalizeCustomBots/analyzeCustomBot below.
+  customBots: [],
 }
 
 const strategySettingKeys = Object.keys(defaultSettings.strategy)
@@ -1011,6 +1013,7 @@ function normalizeSettings(rawSettings = {}) {
   strategy.realMoneySignalModelId = ensureSignalModelId(strategy.realMoneySignalModelId)
   strategy.realMoneyExecutionArmed = Boolean(strategy.realMoneyExecutionArmed)
   strategy.bot3RiskPresetId = resolveBot3RiskPresetId(strategy.bot3RiskPresetId)
+  strategy.bot3CustomRisk = normalizeBot3CustomRisk(strategy.bot3CustomRisk)
   strategy.sessionScheduleEnabled = Boolean(strategy.sessionScheduleEnabled)
   strategy.scheduledSessions = normalizeAutoTradeSessions(strategy.scheduledSessions)
   strategy.marginMode = normalizeMarginMode(strategy.marginMode)
@@ -1030,7 +1033,38 @@ function normalizeSettings(rawSettings = {}) {
     strategy,
     learningBot: normalizeLearningBotSettings(rawSettings.learningBot),
     wallets: normalizeWallets(rawSettings.wallets),
+    customBots: normalizeCustomBots(rawSettings.customBots),
   }
+}
+
+// SaaS Phase 8G: a custom bot's shape, validated defensively (drop anything malformed rather
+// than throw - normalizeSettings must never fail on a stored settings.json). Real validation
+// (>=2 distinct component models, owned signalItems, valid walletId) happens at write time in
+// the /api/custom-bots routes; this is just "don't crash reading back what was already saved."
+function normalizeCustomBots(rawCustomBots) {
+  if (!Array.isArray(rawCustomBots)) {
+    return []
+  }
+
+  return rawCustomBots
+    .filter((bot) => bot && typeof bot === 'object' && typeof bot.id === 'string' && bot.id.startsWith('custom-'))
+    .map((bot) => ({
+      id: bot.id,
+      name: typeof bot.name === 'string' && bot.name.trim() ? bot.name.trim().slice(0, 80) : 'Custom Bot',
+      createdAt: typeof bot.createdAt === 'string' ? bot.createdAt : new Date().toISOString(),
+      componentSignalItems: Array.isArray(bot.componentSignalItems)
+        ? bot.componentSignalItems
+          .filter((item) => item && typeof item.modelId === 'string' && typeof item.key === 'string')
+          .map((item) => ({ modelId: item.modelId, key: item.key }))
+        : [],
+      combinationMode: bot.combinationMode === 'THRESHOLD' ? 'THRESHOLD' : 'ALL',
+      minimumAligned: Number.isInteger(bot.minimumAligned) && bot.minimumAligned > 0 ? bot.minimumAligned : 1,
+      riskSourceModelId: typeof bot.riskSourceModelId === 'string' ? bot.riskSourceModelId : '',
+      walletId: typeof bot.walletId === 'string' ? bot.walletId : '',
+      // USDT the user has set aside for this bot on Wallets > Bot allocation (0 = none).
+      allocationBalance: Number.isFinite(Number(bot.allocationBalance)) && Number(bot.allocationBalance) > 0 ? Math.round(Number(bot.allocationBalance) * 100) / 100 : 0,
+      enabled: Boolean(bot.enabled),
+    }))
 }
 
 function hasDirectBinanceCredentials(settings = {}) {
@@ -2052,7 +2086,7 @@ function summarizeSettingsCredential(value = '') {
   }
 }
 
-function sanitizeSettingsForClient(settings = defaultSettings, botSlots = Infinity, ownedSignalIds = []) {
+function sanitizeSettingsForClient(settings = defaultSettings, botSlots = Infinity, ownedSignalIds = [], symbolSlots = Infinity, tradingSymbols = [], botSlotList = []) {
   const normalizedSettings = normalizeSettings(settings)
 
   return {
@@ -2083,8 +2117,15 @@ function sanitizeSettingsForClient(settings = defaultSettings, botSlots = Infini
     // applyBotSlotLocks. botSlots/ownedSignalIds are echoed so the UI can render "N of M
     // unlocked" and per-signal ownership without a second round trip.
     wallets: applyBotSlotLocks(normalizedSettings.wallets, botSlots, ownedSignalIds),
+    // botSlots here is the position-unlock cap (0 for a regular user, null = unlimited admin) -
+    // the number of slots actually bought is botSlotList.length.
     botSlots: Number.isFinite(botSlots) ? botSlots : null,
+    botSlotList,
     ownedSignalIds,
+    // SaaS Phase 8C: symbolSlots/tradingSymbols echoed the same way, for Settings' symbol
+    // picker. null symbolSlots means unlimited/auto-managed (the admin account).
+    symbolSlots: Number.isFinite(symbolSlots) ? symbolSlots : null,
+    tradingSymbols,
   }
 }
 
@@ -2145,16 +2186,24 @@ async function readSettingsFileAuditState() {
   }
 }
 
-// SaaS Phase 2 bot-slot entitlements (see plan.botSlots, server/lib/users-store.js). The
-// admin account is always exempt (Infinity = unlimited) - it's the operator's own
-// research/testing account, not a slot-limited SaaS seat. A regular user with no plan row
-// (or a plan that predates this field) defaults to 0 slots, matching defaultPlan().
-async function getEffectiveBotSlots(userId) {
+// SaaS Phase 8C (symbol slots): admin stays on the existing auto-managed volatility sync
+// (see syncPreferredSymbolsWithVolatility) - Infinity here just keeps this helper consistent
+// with the admin exemption everywhere else for any caller that wants a display value.
+async function getEffectiveSymbolSlots(userId) {
   if (userId === await getAdminUserId()) {
     return Infinity
   }
   const user = await getUserById(userId)
-  return Number(user?.plan?.botSlots || 0)
+  return Number.isFinite(user?.plan?.symbolSlots) ? user.plan.symbolSlots : 10
+}
+
+// A regular user's own manually-chosen symbol list (empty until they save one - see
+// /api/settings/trading-symbols). Never called for the admin, whose universe stays
+// server-managed via syncPreferredSymbolsWithVolatility.
+async function getEffectiveTradingSymbols(userId) {
+  const user = await getUserById(userId)
+  const symbols = Array.isArray(user?.plan?.tradingSymbols) ? user.plan.tradingSymbols : []
+  return symbols.filter((symbol) => typeof symbol === 'string' && symbol.trim())
 }
 
 // SaaS Phase 5 (Signals Marketplace): the sellable signal ids, in the same fixed order as
@@ -2164,7 +2213,7 @@ const SELLABLE_SIGNAL_MODEL_IDS = visibleTradingWallets(buildDefaultWallets()).m
 
 // plan.signals grants a SPECIFIC bot regardless of botSlots position - see
 // getUnlockedBotWalletIds' ownedSignalIds param. Admin owns everything (exempt from locking
-// entirely anyway, via getEffectiveBotSlots returning Infinity, but this keeps the
+// entirely anyway, via getBotUnlockCap returning Infinity, but this keeps the
 // marketplace catalog's "owned" flag consistent for the admin's own view of it).
 async function getEffectiveOwnedSignals(userId) {
   if (userId === await getAdminUserId()) {
@@ -2175,46 +2224,72 @@ async function getEffectiveOwnedSignals(userId) {
   return signals.filter((id) => SELLABLE_SIGNAL_MODEL_IDS.includes(id))
 }
 
-async function getSignalAccessRequests() {
-  const items = await readJson(signalAccessRequestsFilePath, [])
-  return Array.isArray(items) ? items : []
-}
-
-async function writeSignalAccessRequests(requests) {
-  await writeJson(signalAccessRequestsFilePath, requests)
-}
-
-/** No-op if an identical pending request already exists - repeated clicks don't queue duplicates. */
-export async function addSignalAccessRequest(userId, email, signalId) {
-  const requests = await getSignalAccessRequests()
-  const alreadyPending = requests.some((entry) => (
-    entry.userId === userId && entry.signalId === signalId && entry.status === 'pending'
-  ))
-  if (alreadyPending) {
-    return requests
+// SaaS Phase 8J (empty bot slots): a bought bot slot starts EMPTY. The user then fills it from
+// Bot Creation with either a premade bot (a sellable model id) or one of their own custom bots
+// (a `custom-*` id). Assignments live in plan.botSlotAssignments, index i = slot `slot-${i+1}`,
+// '' = empty. The admin has no slots (unlimited, everything unlocked).
+async function getBotSlotList(userId) {
+  if (userId === await getAdminUserId()) {
+    return []
   }
-  requests.unshift({
-    id: `sig-req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    userId,
-    email,
-    signalId,
-    requestedAt: Date.now(),
-    status: 'pending',
-  })
-  await writeSignalAccessRequests(requests)
-  return requests
+  const user = await getUserById(userId)
+  const count = Math.max(0, Math.trunc(Number(user?.plan?.botSlots || 0)))
+  const assignments = Array.isArray(user?.plan?.botSlotAssignments) ? user.plan.botSlotAssignments : []
+  return Array.from({ length: count }, (_, index) => ({
+    id: `slot-${index + 1}`,
+    assignment: typeof assignments[index] === 'string' ? assignments[index] : '',
+  }))
 }
 
-/** Called after a grant (or an admin dismissal) so a fulfilled request stops showing as pending. */
-async function clearPendingSignalAccessRequests(userId, signalId) {
-  const requests = await getSignalAccessRequests()
-  const remaining = requests.filter((entry) => (
-    !(entry.userId === userId && entry.signalId === signalId && entry.status === 'pending')
-  ))
-  if (remaining.length !== requests.length) {
-    await writeSignalAccessRequests(remaining)
+// Slots no longer unlock bot wallets by fixed position - a wallet unlocks only when its bot is
+// owned outright (plan.signals, incl. the free starter) or chosen into a slot. So for a regular
+// user the position cap passed to getUnlockedBotWalletIds is always 0; the admin stays Infinity.
+async function getBotUnlockCap(userId) {
+  return userId === await getAdminUserId() ? Infinity : 0
+}
+
+async function getEffectiveUnlockedModelIds(userId) {
+  const owned = await getEffectiveOwnedSignals(userId)
+  const slotModels = (await getBotSlotList(userId))
+    .map((slot) => slot.assignment)
+    .filter((id) => SELLABLE_SIGNAL_MODEL_IDS.includes(id))
+  return [...new Set([...owned, ...slotModels])]
+}
+
+async function buildClientSettings(userId, settings) {
+  return sanitizeSettingsForClient(
+    settings,
+    await getBotUnlockCap(userId),
+    await getEffectiveUnlockedModelIds(userId),
+    await getEffectiveSymbolSlots(userId),
+    await getEffectiveTradingSymbols(userId),
+    await getBotSlotList(userId),
+  )
+}
+
+// SaaS Phase 8F (decomposed marketplace) / 8G (Bot Creation): every individually-purchasable
+// checklist item across the 9 sellable bots, `${modelId}:${key}`. Only `model.signals` is used
+// as the source - `additionalSignals` (model-2's "professional filter" tier) is confirmed a
+// strict subset of `signals` by key, not a separate pool, so iterating both would double-list
+// the same rows. Composite-id uniqueness confirmed (no collisions) before shipping this.
+const SELLABLE_SIGNAL_ITEM_IDS = SELLABLE_SIGNAL_MODEL_IDS.flatMap((modelId) => (
+  (getSignalModel(modelId)?.signals || []).map((signal) => `${modelId}:${signal.key}`)
+))
+
+// plan.signalItems grants individual checklist rows, deliberately separate from whole-bot
+// getEffectiveOwnedSignals - see defaultPlan's comment in users-store.js for why owning every
+// item of a model does not by itself unlock that model's wallet.
+async function getEffectiveOwnedSignalItems(userId) {
+  if (userId === await getAdminUserId()) {
+    return SELLABLE_SIGNAL_ITEM_IDS
   }
-  return remaining
+  const user = await getUserById(userId)
+  const items = Array.isArray(user?.plan?.signalItems) ? user.plan.signalItems : []
+  // Owning a whole bot outright (plan.signals - the free starter bot, an admin grant, a bundle
+  // buy) implies owning every one of its signals, even if nothing back-filled signalItems.
+  const wholeBotIds = Array.isArray(user?.plan?.signals) ? user.plan.signals : []
+  const wholeBotItems = SELLABLE_SIGNAL_ITEM_IDS.filter((id) => wholeBotIds.includes(id.split(':')[0]))
+  return [...new Set([...items, ...wholeBotItems])].filter((id) => SELLABLE_SIGNAL_ITEM_IDS.includes(id))
 }
 
 /** The most recent complete backtest run with a per-bot summary - the marketplace's one source of real numbers. */
@@ -2236,34 +2311,49 @@ function getLatestBacktestSummaryByBot(registry) {
  * Name/tag/description/stats are the always-visible teaser; executionRule/minimumScore (the
  * actual strategy detail/thresholds) stay hidden until owned.
  */
+// SaaS Phase 8F: decomposed per-signal catalog, grouped by parent bot so a buyer can see "these
+// came from Bot 2" while still buying just the checklist rows they want (see Bot Creation,
+// which composes custom bots from these purchases). The whole-bot bundle (owned = true once
+// every one of its signals is owned) stays too, matching the "keep both" decision - a buyer can
+// still get a known-good bot in one click without individually clicking every one of its rows.
 export async function buildSignalsMarketplaceCatalog(userId) {
-  const [ownedIds, registry] = await Promise.all([
+  const [ownedWholeBotIds, ownedSignalItemIds, registry] = await Promise.all([
     getEffectiveOwnedSignals(userId),
+    getEffectiveOwnedSignalItems(userId),
     getBacktestRunRegistry(),
   ])
-  const ownedSet = new Set(ownedIds)
+  const ownedWholeBotSet = new Set(ownedWholeBotIds)
+  const ownedItemSet = new Set(ownedSignalItemIds)
   const { runId, runDate, perBot } = getLatestBacktestSummaryByBot(registry)
 
-  const listings = SELLABLE_SIGNAL_MODEL_IDS.map((signalId) => {
-    const model = getSignalModel(signalId)
-    const owned = ownedSet.has(signalId)
-    const stats = perBot[signalId] || null
+  const listings = SELLABLE_SIGNAL_MODEL_IDS.map((modelId) => {
+    const model = getSignalModel(modelId)
+    const stats = perBot[modelId] || null
+    const signals = (model.signals || []).map((signal) => ({
+      id: `${modelId}:${signal.key}`,
+      key: signal.key,
+      label: signal.label,
+      detail: signal.detail,
+      owned: ownedItemSet.has(`${modelId}:${signal.key}`),
+    }))
+    const wholeBotOwned = ownedWholeBotSet.has(modelId)
 
     return {
-      id: signalId,
+      id: modelId,
       name: model.name,
       tag: model.tag,
       description: model.description,
       status: model.status,
-      owned,
-      executionRule: owned ? model.executionRule : null,
-      minimumScore: owned ? model.minimumScore : null,
+      owned: wholeBotOwned,
+      executionRule: wholeBotOwned ? model.executionRule : null,
+      minimumScore: wholeBotOwned ? model.minimumScore : null,
       stats: stats ? {
         winRate: stats.winRate,
         totalUsd: stats.totalUsd,
         avgPerTrade: stats.avgPerTrade,
         trades: stats.rows,
       } : null,
+      signals,
     }
   })
 
@@ -3880,10 +3970,6 @@ async function getAutoTradeLog(userId) {
   return hydrated
 }
 
-async function getWorkflowReviewLog(userId) {
-  return readJson(userWorkflowReviewLogFilePath(userId), [])
-}
-
 async function getBotSettingsLog(userId) {
   return readJson(userBotSettingsLogFilePath(userId), [])
 }
@@ -5211,7 +5297,16 @@ async function getVolatileMarketsSnapshot({ limit = VOLATILE_SYMBOL_LIMIT, excha
   }
 }
 
+// SaaS Phase 8C: only the admin's own account still gets its trading universe auto-managed by
+// this volatility scan - a regular user now picks their own symbols (settings.strategy.
+// preferredSymbols is set directly from plan.tradingSymbols instead, see
+// PATCH /api/settings/trading-symbols below). One early-return here covers every call site
+// (~7 of them) rather than needing an admin check at each one individually.
 async function syncPreferredSymbolsWithVolatility(userId, settings, exchangeInfo = null) {
+  if (userId !== await getAdminUserId()) {
+    return settings
+  }
+
   try {
     const volatileMarkets = await getVolatileMarketsSnapshot({ limit: VOLATILE_SYMBOL_LIMIT, exchangeInfo })
     const preferredSymbols = volatileMarkets.map((item) => item.symbol)
@@ -7418,6 +7513,87 @@ export function buildSignalAnalysisSnapshot(
   }), closedEntryTimeframe)
 }
 
+// SaaS Phase 8G (Bot Creation): evaluates a user-composed custom bot for one symbol. Reuses
+// buildSignalAnalysisSnapshot completely unmodified - runs each distinct *parent* model's
+// existing builder once, then pools only the user's chosen {modelId, key} checklist rows into
+// one combined checklist. Entry/stop/take-profit/sizing are inherited entirely from the
+// riskSourceModelId snapshot (a deliberate design choice - not averaged, not independently set;
+// see the plan's OQ-6/confirmed decision). Never throws - a component model erroring just drops
+// that model's checklist rows (matching getAllModelSnapshotsForSymbol's own try/catch instinct),
+// and a missing/unready risk source simply yields a not-ready result.
+export function analyzeCustomBot(customBot, symbol, symbolInputs, strategy) {
+  const componentModelIds = [...new Set((customBot.componentSignalItems || []).map((item) => item.modelId))]
+  const snapshotsByModel = {}
+
+  for (const modelId of componentModelIds) {
+    try {
+      const modelStrategy = getEffectiveSignalModelStrategy(strategy, modelId, {})
+      snapshotsByModel[modelId] = buildSignalAnalysisSnapshot(
+        symbol,
+        symbolInputs.bias,
+        symbolInputs.higher,
+        symbolInputs.entry,
+        modelStrategy,
+        modelId,
+        symbolInputs.marketContext,
+        symbolInputs.trigger,
+      )
+    } catch {
+      // This one component model failed to evaluate - its checklist rows just read as not
+      // passed below; never let one bad model take down the whole custom bot's analysis.
+    }
+  }
+
+  const pooledChecklist = (customBot.componentSignalItems || []).map(({ modelId, key }) => {
+    const snapshot = snapshotsByModel[modelId]
+    const entry = snapshot?.checklist?.find((item) => item.key === key) || null
+    return {
+      modelId,
+      key,
+      label: entry?.label || key,
+      detail: entry?.detail || '',
+      passed: Boolean(entry?.passed),
+    }
+  })
+
+  const score = pooledChecklist.filter((item) => item.passed).length
+  const maxScore = pooledChecklist.length
+  const threshold = customBot.combinationMode === 'THRESHOLD'
+    ? Math.max(1, Math.min(Number(customBot.minimumAligned) || 1, maxScore))
+    : maxScore
+  const riskSnapshot = snapshotsByModel[customBot.riskSourceModelId] || null
+  const riskSnapshotReady = Boolean(riskSnapshot && riskSnapshot.direction && riskSnapshot.direction !== 'WAIT' && riskSnapshot.entryPrice != null)
+  const ready = maxScore > 0 && score >= threshold && riskSnapshotReady
+
+  return {
+    customBotId: customBot.id,
+    name: customBot.name,
+    symbol,
+    checklist: pooledChecklist,
+    score,
+    maxScore,
+    threshold,
+    combinationMode: customBot.combinationMode,
+    ready,
+    direction: riskSnapshot?.direction || 'WAIT',
+    side: riskSnapshot?.side || null,
+    entryPrice: riskSnapshot?.entryPrice ?? null,
+    stopLoss: riskSnapshot?.stopLoss ?? null,
+    takeProfit: riskSnapshot?.takeProfit ?? null,
+    margin: riskSnapshot?.margin ?? null,
+    positionNotional: riskSnapshot?.positionNotional ?? null,
+    riskSourceModelId: customBot.riskSourceModelId,
+    riskSourceReady: riskSnapshotReady,
+    summary: !componentModelIds.length
+      ? 'No component signals configured.'
+      : !riskSnapshotReady
+        ? `Waiting on ${getSignalModel(customBot.riskSourceModelId)?.name || customBot.riskSourceModelId} (risk source) for a valid setup.`
+        : ready
+          ? `Ready: ${score}/${maxScore} signals aligned (needs ${threshold}).`
+          : `${score}/${maxScore} signals aligned, needs ${threshold}.`,
+  }
+}
+
 export function analyzeSymbolStrategy(
   symbol,
   biasTimeframe,
@@ -7775,389 +7951,6 @@ function isClosedTrade(trade) {
     || trade.status === 'CLOSED_MANUAL'
     || trade.pnl != null
     || trade.exitPrice != null
-}
-
-function isSuccessfulTrade(trade) {
-  return isClosedTrade(trade) && Number(trade.pnl || 0) > 0
-}
-
-function getTradeCloseTimestamp(trade) {
-  return trade.closedAt || trade.transactTime || Date.now()
-}
-
-function createPhase(key, title, subtitle, status, summary, checks, highlights) {
-  return {
-    key,
-    title,
-    subtitle,
-    status,
-    summary,
-    checks,
-    highlights,
-  }
-}
-
-function createNotification(id, level, title, message) {
-  return {
-    id,
-    level,
-    title,
-    message,
-  }
-}
-
-function getPhaseStatus(passed, unlocked = true, finalReady = false) {
-  if (passed && finalReady) {
-    return 'ready'
-  }
-
-  if (passed) {
-    return 'passed'
-  }
-
-  if (!unlocked) {
-    return 'locked'
-  }
-
-  return 'pending'
-}
-
-function summarizeMissingChecks(checks) {
-  return checks.filter((check) => !check.passed).map((check) => check.label)
-}
-
-function evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus = defaultLearningBotTrainStatus, backtestRuns = []) {
-  const { apiKey, secretKey } = getEffectiveCredentials(settings)
-  const trackedSymbols = Array.from(new Set((settings.strategy.preferredSymbols || []).filter(Boolean)))
-  const validatedTestnetTrades = history.filter((trade) => (
-    ['VALIDATED', 'EXECUTED'].includes(String(trade.validationStatus || '').toUpperCase())
-    && isBinanceExecutionMode(trade.mode)
-  ))
-  const automatedTestnetTrades = validatedTestnetTrades.filter((trade) => trade.source === 'AUTO')
-  const closedAutomatedTestnetTrades = automatedTestnetTrades.filter(isClosedTrade)
-  const successfulAutomatedTestnetTrades = closedAutomatedTestnetTrades.filter(isSuccessfulTrade)
-  const validatedSymbols = Array.from(new Set(closedAutomatedTestnetTrades.map((trade) => trade.symbol))).sort((a, b) => a.localeCompare(b))
-  const executedAutoRuns = autoTradeLog.filter((entry) => entry.result?.executed)
-  const hasExecutionEvidence = history.length > 0 || executedAutoRuns.length > 0
-  const missingCoverage = trackedSymbols.filter((symbol) => !validatedSymbols.includes(symbol))
-  const todayKey = manilaDateKey()
-  const trailingMonthStart = Date.now() - 30 * 24 * 60 * 60 * 1000
-  const realizedDailyPnl = closedAutomatedTestnetTrades
-    .filter((trade) => manilaDateKey(getTradeCloseTimestamp(trade)) === todayKey)
-    .reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
-  const realizedMonthlyPnl = closedAutomatedTestnetTrades
-    .filter((trade) => getTradeCloseTimestamp(trade) >= trailingMonthStart)
-    .reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
-  const successfulTradeCount = successfulAutomatedTestnetTrades.length
-  const closedTrades = history.filter(isClosedTrade)
-  const openLocalPaperTrades = history.filter((trade) => (
-    String(trade.status || '').toUpperCase() === 'OPEN'
-    && !isBinanceExecutionMode(trade.mode)
-  ))
-  const liveGateValidationStartedAt = Date.parse('2026-06-08T21:00:00.000Z')
-  const postHardeningClosedAutoTrades = closedTrades.filter((trade) => (
-    trade.source === 'AUTO'
-    && getTradeCloseTimestamp(trade) >= liveGateValidationStartedAt
-  ))
-  const trainMetrics = learningBotTrainStatus?.metrics || {}
-  const aiSettings = settings?.learningBot || {}
-  const aiTrainerSettings = aiSettings.aiTrainer || {}
-  const aiFilterSettings = aiSettings.aiEntryFilter || {}
-  const aiActionAlignment = Number(trainMetrics.actionAlignment || 0)
-  const aiRows = Number(trainMetrics.rows || 0)
-  const marketDataHealth = getMarketDataHealthSnapshot()
-  const wallets = Array.isArray(settings.wallets) ? settings.wallets : []
-  const botWallets = wallets.filter((wallet) => /^model-/i.test(String(wallet.id || '')))
-  const phase2BotWallets = botWallets.filter((wallet) => String(wallet.stage || '').toUpperCase() === PHASE_2_WALLET_STAGE)
-
-  const phase1Checks = [
-    { label: 'Settings storage is available', passed: true },
-    { label: 'Trade history storage is available', passed: true },
-    { label: 'Tracked symbols are configured', passed: trackedSymbols.length > 0 },
-    { label: 'Execution pipeline has been exercised', passed: hasExecutionEvidence },
-  ]
-  const phase1Passed = phase1Checks.every((check) => check.passed)
-
-  const phase2Checks = [
-    { label: 'Phase 1 self-validation passed', passed: phase1Passed },
-    { label: 'Binance Testnet credentials are configured', passed: Boolean(apiKey && secretKey) },
-    { label: 'Binance Testnet execution pipeline is active', passed: hasExecutionEvidence },
-    { label: 'Self-review logging is active', passed: true },
-  ]
-  const phase2Passed = phase2Checks.every((check) => check.passed)
-
-  const phase3Checks = [
-    { label: 'Phase 2 Binance Testnet validation passed', passed: phase2Passed },
-    { label: 'Tracked symbols have closed Testnet coverage', passed: trackedSymbols.length > 0 && missingCoverage.length === 0 },
-    { label: `Post-hardening paper/testnet AUTO closed trades >= 50 (current ${postHardeningClosedAutoTrades.length})`, passed: postHardeningClosedAutoTrades.length >= 50 },
-    { label: `Realized daily profit >= 50 USDT (current ${realizedDailyPnl.toFixed(2)})`, passed: realizedDailyPnl >= 50 },
-    { label: `Realized trailing 30-day profit >= 1500 USDT (current ${realizedMonthlyPnl.toFixed(2)})`, passed: realizedMonthlyPnl >= 1500 },
-    { label: `AI learning/trainer/filter enabled and persisted (rows ${aiRows})`, passed: Boolean(aiSettings.enabled && aiTrainerSettings.enabled && aiFilterSettings.enabled && aiRows >= 500) },
-    { label: `AI action alignment >= 55% before hard blocking trades (current ${aiActionAlignment.toFixed(2)}%)`, passed: aiActionAlignment >= 55 },
-    { label: 'Market-data health is green: no degraded state, timeouts, rate limits, or circuit openings since restart', passed: Boolean(!marketDataHealth.degraded && marketDataHealth.timeouts === 0 && marketDataHealth.rateLimited === 0 && marketDataHealth.circuitOpened === 0) },
-    { label: `Open local-paper trades cleared before live API (current ${openLocalPaperTrades.length})`, passed: openLocalPaperTrades.length === 0 },
-    { label: `At least one bot wallet intentionally promoted to Phase 2/Testnet before Phase 3 (current ${phase2BotWallets.length})`, passed: phase2BotWallets.length >= 1 },
-    { label: 'Self-review logging is active', passed: true },
-  ]
-  const phase3Ready = phase3Checks.every((check) => check.passed)
-
-  const phase1 = createPhase(
-    'phase-1',
-    'Phase 1',
-    'Paper trading (mock)',
-    getPhaseStatus(phase1Passed),
-    phase1Passed
-      ? 'Mock trading passed self-validation and is safe for fast iteration.'
-      : `Finish Phase 1 checks: ${summarizeMissingChecks(phase1Checks).join(', ')}.`,
-    phase1Checks,
-    ['Fast testing', 'No API risk'],
-  )
-
-  const phase2 = createPhase(
-    'phase-2',
-    'Phase 2',
-    'Binance Testnet orders',
-    getPhaseStatus(phase2Passed, phase1Passed),
-    phase2Passed
-      ? `Binance Testnet execution is active with ${successfulTradeCount} successful closed AUTO trades recorded so far.`
-      : phase1Passed
-        ? `Phase 2 needs Binance Testnet credentials and execution evidence before Phase 3 preparation can continue.`
-        : 'Phase 2 is locked until the mock workflow passes self-validation.',
-    phase2Checks,
-    ['Real exchange execution', 'Validate API logic'],
-  )
-
-  const phase3 = createPhase(
-    'phase-3',
-    'Phase 3',
-    'Production trading',
-    getPhaseStatus(phase3Ready, phase2Passed, true),
-    phase3Ready
-      ? 'Phase 3 can begin with controlled live Binance API only: one bot, tiny size, one open position max, strict daily loss cap, and manual supervision.'
-      : phase2Passed
-        ? `Phase 3 is blocked until the live-money gate passes: ${summarizeMissingChecks(phase3Checks).join(', ')}.`
-        : 'Phase 3 stays locked until Phase 2 passes on Binance Testnet.',
-    phase3Checks,
-    ['Live Binance API locked', 'Real-money gate'],
-  )
-
-  const notifications = []
-  if (!phase1Passed) {
-    notifications.push(createNotification(
-      'phase-1-progress',
-      'warning',
-      'Phase 1 still in progress',
-      `Mock workflow is missing: ${summarizeMissingChecks(phase1Checks).join(', ')}.`,
-    ))
-  }
-
-  if (phase3Ready) {
-    notifications.push(createNotification(
-      'phase-3-ready',
-      'success',
-      'Phase 3 ready',
-      'All live-money gates passed. Live API integration can begin only with production safeguards: one bot, tiny size, one open position max, strict daily loss cap, and manual supervision.',
-    ))
-  } else if (phase2Passed) {
-    notifications.push(createNotification(
-      'phase-3-pending',
-      'info',
-      'Phase 3 prep in progress',
-      `Live Binance/real-money trading remains locked. Missing: ${summarizeMissingChecks(phase3Checks).join(', ')}.`,
-    ))
-  } else if (phase1Passed) {
-    notifications.push(createNotification(
-      'phase-2-progress',
-      'warning',
-      'Phase 2 still in progress',
-      `Configure Binance Testnet credentials and keep execution evidence flowing. Successful closed AUTO Testnet trades so far: ${successfulTradeCount}.`,
-    ))
-  }
-
-  if (phase2Passed) {
-    notifications.push(createNotification(
-      'phase-2-ready',
-      'success',
-      'Phase 2 ready',
-      `Binance Testnet execution is active. Successful closed AUTO Testnet trades recorded so far: ${successfulTradeCount}.`,
-    ))
-  }
-
-  // ---- Operational self-check: is the box actually able to trade right now? ----
-  const opsChecks = []
-  const opsNote = (label, ok, detail) => opsChecks.push({ label, ok: Boolean(ok), detail })
-
-  // 1. Backend process / crash-loop
-  const uptimeSec = Math.round(process.uptime())
-  const uptimeH = Math.floor(uptimeSec / 3600)
-  const uptimeM = Math.floor((uptimeSec % 3600) / 60)
-  opsNote(
-    'Backend process',
-    uptimeSec >= 300,
-    uptimeSec >= 300
-      ? `UP — uptime ${uptimeH}h ${uptimeM}m`
-      : `restarted ${uptimeSec}s ago — if this keeps resetting the server is crash-looping (check memory below)`,
-  )
-  if (uptimeSec < 180) {
-    notifications.push(createNotification('ops-restart', 'warning', 'Backend restarted moments ago',
-      `Process uptime is only ${uptimeSec}s. If it does not stabilise the AI filter and auto-trader will not run reliably.`))
-  }
-
-  // 2. Machine specs — memory headroom (the OOM / "can't trade because of specs" check)
-  const totalMemMb = Math.round(os.totalmem() / 1048576)
-  const freeMemMb = Math.round(os.freemem() / 1048576)
-  const rssMb = Math.round(process.memoryUsage().rss / 1048576)
-  const memOk = freeMemMb >= 300 && rssMb < totalMemMb * 0.62
-  opsNote(
-    'Machine memory headroom',
-    memOk,
-    `process ${rssMb} MB • free ${freeMemMb} MB / ${totalMemMb} MB total` +
-      (memOk ? '' : ' — headroom low; a policy refresh or dataset load can OOM-kill the process and stop trading'),
-  )
-  if (!memOk) {
-    notifications.push(createNotification('ops-memory', 'warning', 'Server memory is constrained',
-      `${rssMb} MB in use, ${freeMemMb} MB free of ${totalMemMb} MB. Large in-memory work (training / flagged-dataset assembly) will OOM this box and interrupt trading.`))
-  }
-
-  // 3. Flagged training data vs this box's budget (why the checkbox must stay off here)
-  const flaggedRuns = (Array.isArray(backtestRuns) ? backtestRuns : [])
-    .filter((r) => r && r.includeInTraining === true && r.dataFile)
-  let flaggedBytes = 0
-  const flaggedPresent = []
-  for (const r of flaggedRuns) {
-    try {
-      const st = statSync(path.resolve(dataDir, String(r.dataFile)))
-      flaggedBytes += st.size
-      flaggedPresent.push(`${r.id} (${Math.round(st.size / 1048576)} MB)`)
-    } catch { /* file not on this box — contributes nothing */ }
-  }
-  const flaggedMb = Math.round(flaggedBytes / 1048576)
-  const trainBudgetMb = Math.max(30, Math.round((totalMemMb * 0.6 - rssMb) / 16)) // ~16 MB heap per 1k feature rows
-  const flaggedOk = flaggedMb <= 40
-  opsNote(
-    'Flagged training data within box budget',
-    flaggedOk,
-    flaggedPresent.length === 0
-      ? 'no flagged backtest datasets are present on this box (training happens on the workstation)'
-      : `${flaggedMb} MB present: ${flaggedPresent.join(', ')}` +
-        (flaggedOk ? '' : ` — exceeds this box's ~40 MB safe budget; loading it will OOM. Un-flag these runs here.`),
-  )
-  if (!flaggedOk) {
-    notifications.push(createNotification('ops-flagged-data', 'warning', 'Flagged backtest data too large for this server',
-      `${flaggedMb} MB of flagged training data is on this box. This deployment does not train — un-flag includeInTraining for these runs or it will OOM-loop.`))
-  }
-
-  // 4. Trading actually enabled + market data healthy
-  const autoOn = Boolean(settings?.strategy?.autoTradingEnabled)
-  opsNote('Auto-trading enabled', autoOn, autoOn ? 'ON' : 'OFF — no orders will be placed regardless of signals')
-  if (!autoOn) {
-    notifications.push(createNotification('ops-autotrade-off', 'warning', 'Auto-trading is OFF',
-      'The auto-trader is disabled in settings, so no trades will be placed even when bots find setups.'))
-  }
-  const mdOk = !marketDataHealth.degraded && marketDataHealth.timeouts === 0 && marketDataHealth.rateLimited === 0 && marketDataHealth.circuitOpened === 0
-  opsNote('Market data feed', mdOk,
-    mdOk ? 'healthy' : `degraded=${marketDataHealth.degraded} timeouts=${marketDataHealth.timeouts} rateLimited=${marketDataHealth.rateLimited} circuitOpened=${marketDataHealth.circuitOpened} — candidate scanning is impaired`)
-  if (!mdOk) {
-    notifications.push(createNotification('ops-marketdata', 'warning', 'Market-data feed degraded',
-      'Upstream market data is throttled or circuit-broken; the scanner cannot evaluate all symbols.'))
-  }
-
-  // 5. Recent order flow — is something blocking every trade?
-  const recentRuns = (Array.isArray(autoTradeLog) ? autoTradeLog : []).slice(0, 15)
-  const executedRuns = recentRuns.filter((e) => e?.result?.executed)
-  const blockReasonCounts = {}
-  for (const e of recentRuns) {
-    if (e?.result?.executed) continue
-    const reason = String(e?.result?.reason || 'unspecified').slice(0, 80)
-    blockReasonCounts[reason] = (blockReasonCounts[reason] || 0) + 1
-  }
-  const topBlock = Object.entries(blockReasonCounts).sort((a, b) => b[1] - a[1])[0]
-  const flowOk = recentRuns.length === 0 || executedRuns.length > 0
-  opsNote('Recent auto-trade flow', flowOk,
-    recentRuns.length === 0
-      ? 'no auto-trade runs recorded yet'
-      : `last ${recentRuns.length} runs: ${executedRuns.length} placed an order, ${recentRuns.length - executedRuns.length} blocked` +
-        (topBlock ? ` (top reason: "${topBlock[0]}")` : ''))
-  if (!flowOk && recentRuns.length >= 5) {
-    notifications.push(createNotification('ops-flow-blocked', 'info', 'No orders placed in recent runs',
-      `The last ${recentRuns.length} auto-trade runs placed 0 orders${topBlock ? ` — most common reason: "${topBlock[0]}"` : ''}.`))
-  }
-
-  // 6. AI policy in use (trained off-box)
-  const policyBots = Object.keys(learningBotTrainStatus?.metrics?.policy?.bySignalModel || {})
-  const aiOn = Boolean(settings?.learningBot?.aiEntryFilter?.enabled)
-  opsNote('AI entry filter', policyBots.length > 0 && aiOn,
-    `${aiOn ? 'ON' : 'OFF'} — policy covers ${policyBots.length} bot(s), ${aiRows} rows, ${trainMetrics.deviceUsed || 'n/a'} (trained off this server${settings?.learningBot?.aiTrainer?.enabled ? '' : '; on-box training disabled'})`)
-
-  const operations = {
-    checks: opsChecks,
-    allOk: opsChecks.every((c) => c.ok),
-    canTrade: autoOn && memOk && uptimeSec >= 60,
-    memory: { totalMemMb, freeMemMb, rssMb },
-    uptimeSec,
-    generatedAt: Date.now(),
-  }
-
-  const currentPhase = !phase1Passed
-    ? 'phase-1'
-    : !phase2Passed
-      ? 'phase-2'
-      : 'phase-3'
-
-  const signatureSource = JSON.stringify({
-    currentPhase,
-    phase1: phase1.status,
-    phase2: phase2.status,
-    phase3: phase3.status,
-    trackedSymbols,
-    validatedSymbols,
-    validatedTestnetTrades: validatedTestnetTrades.length,
-    closedAutomatedTestnetTrades: closedAutomatedTestnetTrades.length,
-    successfulTradeCount,
-    realizedDailyPnl,
-    realizedMonthlyPnl,
-    notifications: notifications.map((item) => item.id),
-    ops: operations.checks.map((c) => `${c.label}:${c.ok ? 1 : 0}`).join('|'),
-  })
-
-  return {
-    currentPhase,
-    phases: [phase1, phase2, phase3],
-    notifications,
-    operations,
-    trackedSymbols,
-    validatedSymbols,
-    summary: notifications[0]?.message || phase3.summary,
-    signature: crypto.createHash('sha1').update(signatureSource).digest('hex').slice(0, 12),
-  }
-}
-
-async function persistWorkflowReview(userId, snapshot) {
-  const items = await getWorkflowReviewLog(userId)
-  if (items[0]?.signature === snapshot.signature) {
-    return items
-  }
-
-  const entry = {
-    id: `review-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    timestamp: Date.now(),
-    signature: snapshot.signature,
-    currentPhase: snapshot.currentPhase,
-    headline: snapshot.notifications[0]?.title || 'Workflow status updated',
-    summary: snapshot.summary,
-    notifications: snapshot.notifications,
-    operations: snapshot.operations || null,
-    phases: snapshot.phases.map((phase) => ({
-      key: phase.key,
-      title: phase.title,
-      status: phase.status,
-      summary: phase.summary,
-    })),
-  }
-
-  items.unshift(entry)
-  await writeJson(userWorkflowReviewLogFilePath(userId), items.slice(0, 80))
-  return items.slice(0, 80)
 }
 
 function formatExchangeNumber(value, maxDecimals = 12) {
@@ -8831,9 +8624,9 @@ async function recordTrade(userId, {
   // point every trade (manual or auto) actually goes through, so it's the real enforcement,
   // not the runAutoTrader-side filtering (which is just there to avoid a doomed attempt).
   if (wallet && visibleTradingWallets(wallets).some((v) => v.id === wallet.id)) {
-    const unlockedIds = new Set(getUnlockedBotWalletIds(wallets, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
+    const unlockedIds = new Set(getUnlockedBotWalletIds(wallets, await getBotUnlockCap(userId), await getEffectiveUnlockedModelIds(userId)))
     if (!unlockedIds.has(wallet.id)) {
-      throw new Error(`${wallet.name} is a locked bot slot on your account. Contact the admin to unlock it.`)
+      throw new Error(`${wallet.name} is a locked bot on your account - claim or buy it (or put it in a bot slot) first.`)
     }
   }
 
@@ -9560,11 +9353,11 @@ async function runAutoTrader(userId, trigger = 'MANUAL') {
 
     const universeSymbols = settings.strategy.preferredSymbols || []
     // Bot-slot entitlements (SaaS Phase 2): a locked bot wallet never joins an auto-trade
-    // run, even if its own `enabled` flag is on - see getEffectiveBotSlots/getUnlockedBotWalletIds.
+    // run, even if its own `enabled` flag is on - see getBotUnlockCap/getUnlockedBotWalletIds.
     // Only the sellable wallets (visibleTradingWallets) are subject to this at all - Bot 10
     // and the hidden LLM bots 11-15 are separate mechanisms, unaffected by slot count.
     const sellableWalletIds = new Set(visibleTradingWallets(settings.wallets).map((wallet) => wallet.id))
-    const unlockedBotWalletIds = new Set(getUnlockedBotWalletIds(settings.wallets, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
+    const unlockedBotWalletIds = new Set(getUnlockedBotWalletIds(settings.wallets, await getBotUnlockCap(userId), await getEffectiveUnlockedModelIds(userId)))
     const enabledWallets = getTradingWallets(settings.wallets)
       .filter((wallet) => wallet.enabled && (!sellableWalletIds.has(wallet.id) || unlockedBotWalletIds.has(wallet.id)))
 
@@ -10451,7 +10244,7 @@ app.get('/api/market-data-health', async (_request, response) => {
 
 app.get('/api/settings', async (request, response) => {
   const settings = await syncPreferredSymbolsWithVolatility(request.user.id, await getSettings(request.user.id))
-  response.json(sanitizeSettingsForClient(settings, await getEffectiveBotSlots(request.user.id), await getEffectiveOwnedSignals(request.user.id)))
+  response.json(await buildClientSettings(request.user.id, settings))
 })
 
 app.put('/api/settings', async (request, response) => {
@@ -10539,7 +10332,7 @@ app.put('/api/settings', async (request, response) => {
     console.error('Failed to auto-refresh AI policy after settings save:', error)
   })
 
-  response.json(sanitizeSettingsForClient(hydratedSettings, await getEffectiveBotSlots(userId), await getEffectiveOwnedSignals(userId)))
+  response.json(await buildClientSettings(userId, hydratedSettings))
 })
 
 app.post('/api/wallets/:walletId/sync', async (request, response) => {
@@ -10577,7 +10370,7 @@ app.post('/api/wallets/:walletId/sync', async (request, response) => {
     response.json({
       ok: true,
       wallet: getWalletById(walletId, hydratedSettings.wallets),
-      settings: sanitizeSettingsForClient(hydratedSettings, await getEffectiveBotSlots(request.user.id), await getEffectiveOwnedSignals(request.user.id)),
+      settings: await buildClientSettings(request.user.id, hydratedSettings),
       syncedAt: Date.now(),
     })
   } catch (error) {
@@ -12330,7 +12123,18 @@ app.get('/api/journal-summary', async (request, response) => {
   const wallets = normalizeWallets(settings.wallets)
   const history = (await getTradeHistory(request.user.id)).filter((trade) => isAutoTradeSource(trade.source))
   const items = buildJournalItems(history)
-  const walletItems = getTradingWallets(wallets).map((wallet) => {
+  // SaaS Phase 8B: only the account's own unlocked bot wallets show up in Journal Summary - a
+  // new user sees exactly the 1 wallet they've claimed, growing as they unlock more, matching
+  // Wallets/Dashboard's own entitlement filtering (same botSlots+ownedSignalIds inputs). Only
+  // the 9 sellable bot wallets are ever locked - the real-money wallet and anything else
+  // getTradingWallets returns are unaffected and always shown, same as before.
+  const botSlots = await getBotUnlockCap(request.user.id)
+  const ownedSignalIds = await getEffectiveUnlockedModelIds(request.user.id)
+  const sellableWalletIds = new Set(visibleTradingWallets(wallets).map((wallet) => wallet.id))
+  const unlockedWalletIds = new Set(getUnlockedBotWalletIds(wallets, botSlots, ownedSignalIds))
+  const walletItems = getTradingWallets(wallets).filter((wallet) => (
+    !sellableWalletIds.has(wallet.id) || unlockedWalletIds.has(wallet.id)
+  )).map((wallet) => {
     const walletTrades = history.filter((trade) => trade.walletId === wallet.id)
     const walletJournalItems = buildJournalItems(walletTrades)
 
@@ -12420,7 +12224,7 @@ app.get('/api/admin/users', async (_request, response) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        plan: { botSlots: 0, signals: [], ...user.plan },
+        plan: { ...defaultPlan(), ...user.plan },
         createdAt: user.createdAt,
       }))
       .sort((left, right) => left.createdAt - right.createdAt),
@@ -12470,10 +12274,6 @@ app.post('/api/admin/users/:userId/plan', async (request, response) => {
 
   const updated = await updateUserPlan(targetUserId, patch)
 
-  if (Array.isArray(patch.signals)) {
-    await Promise.all(patch.signals.map((signalId) => clearPendingSignalAccessRequests(targetUserId, signalId)))
-  }
-
   logTerminalLine(
     'ADMIN',
     `${request.user.email} set ${updated.email}'s plan: ${JSON.stringify(patch)}`,
@@ -12485,70 +12285,502 @@ app.post('/api/admin/users/:userId/plan', async (request, response) => {
   })
 })
 
-// SaaS Phase 5 (Signals Marketplace): the catalog itself is NOT admin-gated - any
-// authenticated account should be able to browse what's available and request access. Only
-// the admin's grant/revoke and the pending-requests inbox are admin-only.
+// SaaS Phase 5/8F (Signals Marketplace): the catalog itself is NOT admin-gated - any
+// authenticated account should be able to browse what's available and buy. Buying is now
+// instant self-service (see /api/marketplace/signal-item/buy and /bot-signal/buy below) - the
+// admin's grant/revoke screen stays as a secondary override/audit path only.
 app.get('/api/signals-marketplace', async (request, response) => {
   const catalog = await buildSignalsMarketplaceCatalog(request.user.id)
   response.json({ ok: true, ...catalog })
 })
 
-app.post('/api/signals-marketplace/:signalId/request', async (request, response) => {
-  const signalId = String(request.params.signalId || '').trim()
-  if (!SELLABLE_SIGNAL_MODEL_IDS.includes(signalId)) {
-    response.status(404).json({ error: `Unknown signal id "${signalId}".` })
+// SaaS Phase 8A: self-service "buy" - instant grant, no admin approval, no real charge (no
+// payment gateway exists yet, per the same decision Phase 0 made for admin-granted
+// entitlements). The admin's own account never calls these - the admin already has every
+// entitlement exempt-by-construction (getBotUnlockCap/getEffectiveOwnedSignals etc.), so
+// a purchase route for the admin would just be inflating numbers nothing reads.
+const SYMBOL_SLOT_PURCHASE_INCREMENT = 5
+
+app.post('/api/marketplace/bot-slot/buy', async (request, response) => {
+  const user = await getUserById(request.user.id)
+  const currentSlots = Number(user?.plan?.botSlots || 0)
+  const updated = await updateUserPlan(request.user.id, { botSlots: currentSlots + 1 })
+  logTerminalLine('MARKETPLACE', `${request.user.email} bought a bot slot (now ${updated.plan.botSlots}).`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+app.post('/api/marketplace/symbol-slot/buy', async (request, response) => {
+  const user = await getUserById(request.user.id)
+  const currentSlots = Number.isFinite(user?.plan?.symbolSlots) ? user.plan.symbolSlots : 10
+  const updated = await updateUserPlan(request.user.id, { symbolSlots: currentSlots + SYMBOL_SLOT_PURCHASE_INCREMENT })
+  logTerminalLine('MARKETPLACE', `${request.user.email} bought symbol slots (now ${updated.plan.symbolSlots}).`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+app.post('/api/marketplace/subscription/buy', async (request, response) => {
+  const updated = await updateUserPlan(request.user.id, { subscriptionTier: 'baseline' })
+  logTerminalLine('MARKETPLACE', `${request.user.email} bought the baseline subscription.`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+app.post('/api/marketplace/signal-item/buy', async (request, response) => {
+  const modelId = String(request.body?.modelId || '').trim()
+  const key = String(request.body?.key || '').trim()
+  const compositeId = `${modelId}:${key}`
+  if (!SELLABLE_SIGNAL_ITEM_IDS.includes(compositeId)) {
+    response.status(404).json({ error: `Unknown signal item "${compositeId}".` })
     return
   }
 
-  const ownedIds = await getEffectiveOwnedSignals(request.user.id)
-  if (ownedIds.includes(signalId)) {
+  const owned = await getEffectiveOwnedSignalItems(request.user.id)
+  if (owned.includes(compositeId)) {
     response.status(409).json({ error: 'You already own this signal.' })
     return
   }
 
-  await addSignalAccessRequest(request.user.id, request.user.email, signalId)
-  logTerminalLine(
-    'SIGNALS',
-    `${request.user.email} requested access to ${getSignalModel(signalId)?.name || signalId}.`,
-    'info',
-  )
+  const user = await getUserById(request.user.id)
+  const currentItems = Array.isArray(user?.plan?.signalItems) ? user.plan.signalItems : []
+  const updated = await updateUserPlan(request.user.id, { signalItems: [...new Set([...currentItems, compositeId])] })
+  logTerminalLine('MARKETPLACE', `${request.user.email} bought signal "${compositeId}".`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+// SaaS Phase 8F: the "buy every signal of this bot at once" bundle button on a marketplace
+// listing - grants plan.signals (the whole-bot wallet unlock) AND back-fills every one of the
+// model's checklist items into plan.signalItems, so the sub-signal ledger stays consistent
+// with what buying individually would have produced (Bot Creation can then draw on these too).
+app.post('/api/marketplace/bot-signal/buy', async (request, response) => {
+  const modelId = String(request.body?.modelId || '').trim()
+  if (!SELLABLE_SIGNAL_MODEL_IDS.includes(modelId)) {
+    response.status(404).json({ error: `Unknown signal id "${modelId}".` })
+    return
+  }
+
+  const ownedWholeBotIds = await getEffectiveOwnedSignals(request.user.id)
+  if (ownedWholeBotIds.includes(modelId)) {
+    response.status(409).json({ error: 'You already own this bot.' })
+    return
+  }
+
+  const user = await getUserById(request.user.id)
+  const currentSignals = Array.isArray(user?.plan?.signals) ? user.plan.signals : []
+  const currentItems = Array.isArray(user?.plan?.signalItems) ? user.plan.signalItems : []
+  const modelItemIds = (getSignalModel(modelId)?.signals || []).map((signal) => `${modelId}:${signal.key}`)
+  const updated = await updateUserPlan(request.user.id, {
+    signals: [...new Set([...currentSignals, modelId])],
+    signalItems: [...new Set([...currentItems, ...modelItemIds])],
+  })
+  logTerminalLine('MARKETPLACE', `${request.user.email} bought all of ${getSignalModel(modelId)?.name || modelId}'s signals.`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+// The one free starter bot (SaaS Phase 8B): Bot 2, granted via the same additive
+// ownedSignalIds path the Signals Marketplace already uses - NOT botSlots, since botSlots
+// unlocks by fixed position in visibleTradingWallets order (Bot 1 would win, not Bot 2).
+// One-shot: 409s if the user already claimed it, so a repeated click never double-grants.
+app.post('/api/bots/claim-free', async (request, response) => {
+  const user = await getUserById(request.user.id)
+  if (user?.plan?.freeBotClaimed) {
+    response.status(409).json({ error: 'You already claimed your free bot.' })
+    return
+  }
+
+  const currentSignals = Array.isArray(user?.plan?.signals) ? user.plan.signals : []
+  const updated = await updateUserPlan(request.user.id, {
+    signals: [...new Set([...currentSignals, 'model-2'])],
+    freeBotClaimed: true,
+  })
+  logTerminalLine('MARKETPLACE', `${request.user.email} claimed their free bot (Bot 2).`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+async function assignBotSlot(userId, slotId, assignment) {
+  const user = await getUserById(userId)
+  const slotList = await getBotSlotList(userId)
+  const next = slotList.map((slot) => (slot.id === slotId ? assignment : slot.assignment))
+  // Preserve anything beyond the current slot count (e.g. an admin lowered botSlots) untouched.
+  const existing = Array.isArray(user?.plan?.botSlotAssignments) ? user.plan.botSlotAssignments : []
+  return updateUserPlan(userId, { botSlotAssignments: [...next, ...existing.slice(next.length)] })
+}
+
+// SaaS Phase 8J: a bot the user owns outright (the free starter, or a whole-bot purchase - plan.signals)
+// isn't in a slot, so it has nothing to "empty". Emptying it converts that ownership into one empty
+// bot slot: the bot is released and the user can refill the slot with any premade bot or a custom
+// one. Net capacity is unchanged (one bot in, one slot out), so this can't be used to gain bots.
+app.post('/api/bots/:modelId/empty', async (request, response) => {
+  const userId = request.user.id
+  if (userId === await getAdminUserId()) {
+    response.status(400).json({ error: 'The admin account has no bot slots.' })
+    return
+  }
+  const modelId = String(request.params.modelId || '')
+  const user = await getUserById(userId)
+  const signals = Array.isArray(user?.plan?.signals) ? user.plan.signals : []
+  if (!signals.includes(modelId)) {
+    response.status(404).json({ error: 'You do not own that bot outright - if it sits in a bot slot, empty the slot instead.' })
+    return
+  }
+
+  const slotList = await getBotSlotList(userId)
+  // Releasing the bot from outright ownership must not cost the user the bot itself: keep every one
+  // of its signals owned, which is what lets them put it (or any other bot they own) back into a slot.
+  const currentItems = Array.isArray(user?.plan?.signalItems) ? user.plan.signalItems : []
+  const releasedItemIds = (getSignalModel(modelId)?.signals || []).map((signal) => `${modelId}:${signal.key}`)
+  const updated = await updateUserPlan(userId, {
+    signals: signals.filter((id) => id !== modelId),
+    signalItems: [...new Set([...currentItems, ...releasedItemIds])],
+    botSlots: slotList.length + 1,
+    botSlotAssignments: [...slotList.map((slot) => slot.assignment), ''],
+  })
+  logTerminalLine('BOT CREATION', `${request.user.email} emptied ${getSignalModel(modelId)?.name || modelId} into a bot slot.`, 'info')
+  response.json({ ok: true, plan: updated.plan })
+})
+
+// SaaS Phase 8J: fill (or empty) one bought bot slot. Body is exactly one of
+//   { modelId }      - a premade bot, any sellable model the user doesn't already have
+//   { customBotId }  - one of the user's own custom bots that isn't in a slot yet
+//   { clear: true }  - back to an empty slot (a premade bot only; a custom bot frees its slot by being deleted)
+app.put('/api/bot-slots/:slotId', async (request, response) => {
+  const userId = request.user.id
+  const slotList = await getBotSlotList(userId)
+  const slot = slotList.find((item) => item.id === String(request.params.slotId || ''))
+  if (!slot) {
+    response.status(404).json({ error: 'Bot slot not found.' })
+    return
+  }
+
+  if (request.body?.clear === true) {
+    if (slot.assignment.startsWith('custom-')) {
+      response.status(400).json({ error: 'Delete the custom bot to free this slot.' })
+      return
+    }
+    const updated = await assignBotSlot(userId, slot.id, '')
+    response.json({ ok: true, plan: updated.plan })
+    return
+  }
+
+  const modelId = String(request.body?.modelId || '').trim()
+  const customBotId = String(request.body?.customBotId || '').trim()
+
+  if (modelId) {
+    if (!SELLABLE_SIGNAL_MODEL_IDS.includes(modelId)) {
+      response.status(404).json({ error: `Unknown bot "${modelId}".` })
+      return
+    }
+    if (slot.assignment.startsWith('custom-')) {
+      response.status(409).json({ error: 'This slot holds a custom bot - delete it first.' })
+      return
+    }
+    // Only a bot the user owns (the whole bot, or every one of its signals) can go in a slot.
+    const ownedItems = new Set(await getEffectiveOwnedSignalItems(userId))
+    const modelItemIds = (getSignalModel(modelId)?.signals || []).map((signal) => `${modelId}:${signal.key}`)
+    if (modelItemIds.length === 0 || !modelItemIds.every((id) => ownedItems.has(id))) {
+      response.status(403).json({ error: 'You do not own that bot yet - buy it on the Marketplace first.' })
+      return
+    }
+    const unlocked = await getEffectiveUnlockedModelIds(userId)
+    if (unlocked.includes(modelId) && slot.assignment !== modelId) {
+      response.status(409).json({ error: 'You already have that bot.' })
+      return
+    }
+    const updated = await assignBotSlot(userId, slot.id, modelId)
+    logTerminalLine('BOT CREATION', `${request.user.email} put ${getSignalModel(modelId)?.name || modelId} in ${slot.id}.`, 'info')
+    response.json({ ok: true, plan: updated.plan })
+    return
+  }
+
+  if (customBotId) {
+    const settings = await getSettings(userId)
+    if (!(settings.customBots || []).some((bot) => bot.id === customBotId)) {
+      response.status(404).json({ error: 'Custom bot not found.' })
+      return
+    }
+    if (slotList.some((item) => item.assignment === customBotId)) {
+      response.status(409).json({ error: 'That custom bot is already in a slot.' })
+      return
+    }
+    if (slot.assignment) {
+      response.status(409).json({ error: 'That bot slot is already in use.' })
+      return
+    }
+    const updated = await assignBotSlot(userId, slot.id, customBotId)
+    response.json({ ok: true, plan: updated.plan })
+    return
+  }
+
+  response.status(400).json({ error: 'Pass modelId, customBotId, or clear: true.' })
+})
+
+// SaaS Phase 8G (Bot Creation): validates a custom bot definition against the requesting
+// user's own entitlements - every referenced signal item must be one they've bought, the risk
+// source must be one of the referenced models, and the wallet must be one they've unlocked.
+// Returns an error string, or null if valid.
+async function validateCustomBotDefinition(userId, input, { walletsOverride } = {}) {
+  const componentSignalItems = Array.isArray(input.componentSignalItems) ? input.componentSignalItems : []
+  if (componentSignalItems.some((item) => typeof item?.modelId !== 'string' || typeof item?.key !== 'string')) {
+    return 'componentSignalItems must be an array of {modelId, key}.'
+  }
+
+  const componentModelIds = [...new Set(componentSignalItems.map((item) => item.modelId))]
+  if (componentModelIds.length < 2) {
+    return 'A custom bot needs signals from at least 2 different bots.'
+  }
+
+  const ownedItems = new Set(await getEffectiveOwnedSignalItems(userId))
+  const unowned = componentSignalItems.filter((item) => !ownedItems.has(`${item.modelId}:${item.key}`))
+  if (unowned.length > 0) {
+    return `You don't own ${unowned.length} of the selected signal(s) - buy them on the Marketplace first.`
+  }
+
+  if (!componentModelIds.includes(input.riskSourceModelId)) {
+    return 'riskSourceModelId must be one of the component signals\' bots.'
+  }
+
+  // The wallet is optional: a custom bot lives in a bot slot (see /api/bot-slots), and live
+  // execution isn't wired yet. If one is given it must still be one of the user's own unlocked wallets.
+  if (input.walletId) {
+    const settings = await getSettings(userId)
+    const wallets = walletsOverride || normalizeWallets(settings.wallets)
+    const botSlots = await getBotUnlockCap(userId)
+    const ownedSignalIds = await getEffectiveUnlockedModelIds(userId)
+    const unlockedWalletIds = new Set(getUnlockedBotWalletIds(wallets, botSlots, ownedSignalIds))
+    if (!unlockedWalletIds.has(input.walletId)) {
+      return 'walletId must be one of your own unlocked bot wallets.'
+    }
+  }
+
+  if (input.combinationMode === 'THRESHOLD' && !(Number.isInteger(input.minimumAligned) && input.minimumAligned >= 1 && input.minimumAligned <= componentSignalItems.length)) {
+    return `minimumAligned must be an integer between 1 and ${componentSignalItems.length}.`
+  }
+
+  return null
+}
+
+app.post('/api/custom-bots', async (request, response) => {
+  const input = {
+    componentSignalItems: request.body?.componentSignalItems,
+    combinationMode: request.body?.combinationMode === 'THRESHOLD' ? 'THRESHOLD' : 'ALL',
+    minimumAligned: Number(request.body?.minimumAligned) || 1,
+    riskSourceModelId: String(request.body?.riskSourceModelId || ''),
+    walletId: String(request.body?.walletId || ''),
+    name: String(request.body?.name || '').trim().slice(0, 80) || 'Custom Bot',
+  }
+
+  const validationError = await validateCustomBotDefinition(request.user.id, input)
+  if (validationError) {
+    response.status(400).json({ error: validationError })
+    return
+  }
+
+  // A regular user's custom bot occupies one of their (empty) bot slots; the admin has none.
+  const isAdminUser = request.user.id === await getAdminUserId()
+  const slotList = await getBotSlotList(request.user.id)
+  const targetSlot = isAdminUser ? null : slotList.find((slot) => slot.id === String(request.body?.slotId || ''))
+  if (!isAdminUser) {
+    if (!targetSlot) {
+      response.status(400).json({ error: 'Pick one of your bot slots for this bot - buy a slot on the Marketplace if you have none free.' })
+      return
+    }
+    if (targetSlot.assignment) {
+      response.status(409).json({ error: 'That bot slot is already in use.' })
+      return
+    }
+  }
+
+  const settings = await getSettings(request.user.id)
+  const customBot = {
+    id: `custom-${crypto.randomUUID()}`,
+    name: input.name,
+    createdAt: new Date().toISOString(),
+    componentSignalItems: input.componentSignalItems.map((item) => ({ modelId: item.modelId, key: item.key })),
+    combinationMode: input.combinationMode,
+    minimumAligned: input.minimumAligned,
+    riskSourceModelId: input.riskSourceModelId,
+    walletId: input.walletId,
+    // Starts as a draft; the Deploy button (PUT enabled: true) puts it on Dashboard > Overview.
+    enabled: request.body?.enabled === true,
+    allocationBalance: 0,
+  }
+  const nextSettings = { ...settings, customBots: [...(settings.customBots || []), customBot] }
+  await saveSettings(request.user.id, nextSettings, {
+    currentSettings: settings,
+    audit: { trigger: 'CUSTOM_BOT_CREATE', source: 'api.custom-bots', note: `Created custom bot "${customBot.name}".` },
+  })
+
+  if (targetSlot) {
+    await assignBotSlot(request.user.id, targetSlot.id, customBot.id)
+  }
+
+  logTerminalLine('BOT CREATION', `${request.user.email} created custom bot "${customBot.name}".`, 'info')
+  response.json({ ok: true, customBot })
+})
+
+app.put('/api/custom-bots/:id', async (request, response) => {
+  const customBotId = String(request.params.id || '')
+  const settings = await getSettings(request.user.id)
+  const existing = (settings.customBots || []).find((bot) => bot.id === customBotId)
+  if (!existing) {
+    response.status(404).json({ error: 'Custom bot not found.' })
+    return
+  }
+
+  const input = {
+    componentSignalItems: 'componentSignalItems' in (request.body || {}) ? request.body.componentSignalItems : existing.componentSignalItems,
+    combinationMode: 'combinationMode' in (request.body || {}) ? (request.body.combinationMode === 'THRESHOLD' ? 'THRESHOLD' : 'ALL') : existing.combinationMode,
+    minimumAligned: 'minimumAligned' in (request.body || {}) ? Number(request.body.minimumAligned) || 1 : existing.minimumAligned,
+    riskSourceModelId: 'riskSourceModelId' in (request.body || {}) ? String(request.body.riskSourceModelId || '') : existing.riskSourceModelId,
+    walletId: 'walletId' in (request.body || {}) ? String(request.body.walletId || '') : existing.walletId,
+    name: 'name' in (request.body || {}) ? (String(request.body.name || '').trim().slice(0, 80) || 'Custom Bot') : existing.name,
+  }
+
+  // Only re-check the wallet when the caller is actually changing it. A wallet left over from before
+  // bots were funded by allocation (or that has since been locked) must not block an unrelated edit
+  // such as saving an allocation or toggling Deploy.
+  const walletBeingChanged = 'walletId' in (request.body || {}) && input.walletId !== existing.walletId
+  const validationError = await validateCustomBotDefinition(request.user.id, walletBeingChanged ? input : { ...input, walletId: '' })
+  if (validationError) {
+    response.status(400).json({ error: validationError })
+    return
+  }
+
+  if ('allocationBalance' in (request.body || {}) && !(Number.isFinite(Number(request.body.allocationBalance)) && Number(request.body.allocationBalance) >= 0)) {
+    response.status(400).json({ error: 'allocationBalance must be a number of 0 or more.' })
+    return
+  }
+
+  const updated = {
+    ...existing,
+    name: input.name,
+    componentSignalItems: input.componentSignalItems.map((item) => ({ modelId: item.modelId, key: item.key })),
+    combinationMode: input.combinationMode,
+    minimumAligned: input.minimumAligned,
+    riskSourceModelId: input.riskSourceModelId,
+    walletId: input.walletId,
+    allocationBalance: 'allocationBalance' in (request.body || {})
+      ? Math.round(Number(request.body.allocationBalance) * 100) / 100
+      : existing.allocationBalance || 0,
+    enabled: 'enabled' in (request.body || {}) ? Boolean(request.body.enabled) : existing.enabled,
+  }
+  const nextSettings = {
+    ...settings,
+    customBots: settings.customBots.map((bot) => (bot.id === customBotId ? updated : bot)),
+  }
+  await saveSettings(request.user.id, nextSettings, {
+    currentSettings: settings,
+    audit: { trigger: 'CUSTOM_BOT_UPDATE', source: 'api.custom-bots', note: `Updated custom bot "${updated.name}".` },
+  })
+
+  response.json({ ok: true, customBot: updated })
+})
+
+app.delete('/api/custom-bots/:id', async (request, response) => {
+  const customBotId = String(request.params.id || '')
+  const settings = await getSettings(request.user.id)
+  if (!(settings.customBots || []).some((bot) => bot.id === customBotId)) {
+    response.status(404).json({ error: 'Custom bot not found.' })
+    return
+  }
+
+  const nextSettings = { ...settings, customBots: settings.customBots.filter((bot) => bot.id !== customBotId) }
+  await saveSettings(request.user.id, nextSettings, {
+    currentSettings: settings,
+    audit: { trigger: 'CUSTOM_BOT_DELETE', source: 'api.custom-bots', note: `Deleted custom bot "${customBotId}".` },
+  })
+
+  const slotHoldingBot = (await getBotSlotList(request.user.id)).find((slot) => slot.assignment === customBotId)
+  if (slotHoldingBot) {
+    await assignBotSlot(request.user.id, slotHoldingBot.id, '')
+  }
+
+  logTerminalLine('BOT CREATION', `${request.user.email} deleted custom bot "${customBotId}".`, 'info')
   response.json({ ok: true })
 })
 
-app.get('/api/admin/signal-requests', async (_request, response) => {
-  const requests = (await getSignalAccessRequests()).filter((entry) => entry.status === 'pending')
-  response.json({
-    ok: true,
-    requests: requests.map((entry) => ({
-      ...entry,
-      signalName: getSignalModel(entry.signalId)?.name || entry.signalId,
-    })),
-  })
+// Live analysis preview for one custom bot on one symbol - lets the Bot Creation UI show
+// "here's what this combination would signal right now" before/after saving, using the exact
+// same analyzeCustomBot the (not-yet-wired) scan loop would eventually use. Read-only: fetches
+// fresh klines but places no trade and touches no wallet/trade-history state.
+app.get('/api/custom-bots/:id/preview', async (request, response) => {
+  const customBotId = String(request.params.id || '')
+  const symbol = String(request.query.symbol || '').trim().toUpperCase()
+  if (!AI_TRADING_SYMBOL_PATTERN.test(symbol)) {
+    response.status(400).json({ error: `Invalid symbol "${symbol}".` })
+    return
+  }
+
+  const settings = await getSettings(request.user.id)
+  const customBot = (settings.customBots || []).find((bot) => bot.id === customBotId)
+  if (!customBot) {
+    response.status(404).json({ error: 'Custom bot not found.' })
+    return
+  }
+
+  try {
+    const [bias, higher, entry, trigger, marketContext] = await Promise.all([
+      fetchKlines(symbol, '1h', 120),
+      fetchKlines(symbol, '15m', 120),
+      fetchKlines(symbol, '5m', 120),
+      fetchKlines(symbol, '1m', 180),
+      fetchSignalMarketContext(symbol),
+    ])
+    const symbolInputs = {
+      bias: toCandleData(bias),
+      higher: toCandleData(higher),
+      entry: toCandleData(entry),
+      trigger: toCandleData(trigger),
+      marketContext,
+    }
+    const preview = analyzeCustomBot(customBot, symbol, symbolInputs, settings.strategy)
+    response.json({ ok: true, preview })
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : 'Unable to fetch live market data for this preview.' })
+  }
 })
 
-app.get('/api/workflow-readiness', async (request, response) => {
-  const userId = request.user.id
-  const [settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns] = await Promise.all([
-    syncPreferredSymbolsWithVolatility(userId, await getSettings(userId)),
-    getTradeHistory(userId),
-    getAutoTradeLog(userId),
-    getLearningBotTrainStatus(),
-    getBacktestRunRegistry().catch(() => []),
-  ])
-  const snapshot = evaluateWorkflowReadiness(settings, history, autoTradeLog, learningBotTrainStatus, backtestRuns)
-  const reviewLog = await persistWorkflowReview(userId, snapshot)
+// SaaS Phase 8C: a regular user's manual symbol list, capped at their plan.symbolSlots. Writes
+// both plan.tradingSymbols (the record of what they picked) and settings.strategy.
+// preferredSymbols (the one field the scan loop actually reads - see syncPreferredSymbolsWithVolatility's
+// admin-only early return above) in the same call, so the scheduler picks it up next cycle
+// without every scan-loop read site needing to know about tradingSymbols separately. The
+// admin keeps using the auto-managed universe and never calls this route in the UI.
+app.put('/api/settings/trading-symbols', async (request, response) => {
+  const requested = request.body?.symbols
+  if (!Array.isArray(requested) || requested.some((symbol) => typeof symbol !== 'string')) {
+    response.status(400).json({ error: 'symbols must be an array of symbol strings.' })
+    return
+  }
 
-  response.json({
-    ok: true,
-    currentPhase: snapshot.currentPhase,
-    summary: snapshot.summary,
-    trackedSymbols: snapshot.trackedSymbols,
-    validatedSymbols: snapshot.validatedSymbols,
-    notifications: snapshot.notifications,
-    operations: snapshot.operations,
-    phases: snapshot.phases,
-    reviewLog,
+  const symbols = [...new Set(requested.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean))]
+  const invalid = symbols.filter((symbol) => !AI_TRADING_SYMBOL_PATTERN.test(symbol))
+  if (invalid.length > 0) {
+    response.status(400).json({ error: `Invalid symbol(s): ${invalid.join(', ')}` })
+    return
+  }
+
+  const symbolSlots = await getEffectiveSymbolSlots(request.user.id)
+  if (Number.isFinite(symbolSlots) && symbols.length > symbolSlots) {
+    response.status(400).json({ error: `You have ${symbolSlots} symbol slot(s) - remove some symbols or buy more slots first.` })
+    return
+  }
+
+  const updatedPlan = await updateUserPlan(request.user.id, { tradingSymbols: symbols })
+
+  const currentSettings = await getSettings(request.user.id)
+  const nextSettings = {
+    ...currentSettings,
+    strategy: { ...currentSettings.strategy, preferredSymbols: symbols },
+  }
+  await saveSettings(request.user.id, nextSettings, {
+    currentSettings,
+    audit: {
+      trigger: 'TRADING_SYMBOLS_SAVE',
+      source: 'api.settings.trading-symbols',
+      note: `User picked ${symbols.length} trading symbol(s).`,
+    },
   })
+
+  logTerminalLine('SETTINGS', `${request.user.email} set their trading symbols (${symbols.length}).`, 'info')
+  response.json({ ok: true, symbols, symbolSlots: updatedPlan.plan.symbolSlots })
 })
 
 app.get('/api/codex-console/status', async (_request, response) => {

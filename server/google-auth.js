@@ -64,7 +64,14 @@ export function sanitizeReturnUrl(value, returnHosts, fallback = '/') {
   }
   try {
     const url = new URL(raw)
-    if (url.protocol === 'https:' && !url.username && !url.password && returnHosts.includes(url.hostname.toLowerCase())) {
+    const hostname = url.hostname.toLowerCase()
+    // Production only ever redirects over https. Localhost and its *.localhost
+    // subdomains (ai.localhost, bot.localhost) have no TLS locally, so a plain
+    // http return there is accepted too - still only ever to a host already in
+    // returnHosts, so this never becomes an open redirect.
+    const isLocalDevHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.localhost')
+    const protocolOk = url.protocol === 'https:' || (url.protocol === 'http:' && isLocalDevHost)
+    if (protocolOk && !url.username && !url.password && returnHosts.includes(hostname)) {
       return `${url.origin}${url.pathname}${url.search}`
     }
   } catch {

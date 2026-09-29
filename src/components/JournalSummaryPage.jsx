@@ -289,6 +289,7 @@ function useJournalViews({ data, trades, livePrices, wallets }) {
       return {
         ...walletItem,
         accountSnapshot,
+        enabled: Boolean(walletConfig.enabled),
       }
     })
   ), [livePrices, trades, walletItems, wallets])
@@ -457,7 +458,13 @@ export function JournalOverviewPage(props) {
  */
 export function JournalHeadToHeadPage(props) {
   const { walletViews, displayMonth } = useJournalViews(props)
-  const headToHeadViews = walletViews
+  // SaaS Phase 8H: this page is admin-only now - scoped further to the bots the admin has
+  // actually set up (enabled, with at least one trade recorded), not the full fixed wallet
+  // list, per the redesign spec's "only show the profitable bot(s) the admin sets up."
+  const headToHeadViews = useMemo(
+    () => walletViews.filter((wallet) => wallet.enabled && wallet.items.length > 0),
+    [walletViews],
+  )
   const headToHeadGridStyle = getHeadToHeadGridStyle(headToHeadViews.length)
   const headToHeadMinWidth = Math.max(760, 140 + headToHeadViews.length * 220)
   const comparisonRows = useMemo(() => {

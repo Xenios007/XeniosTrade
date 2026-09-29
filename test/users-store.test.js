@@ -25,7 +25,16 @@ test('first sign-in creates a user; a second sign-in with the same email returns
   const first = await store.findOrCreateUserByEmail('Someone@Example.com')
   assert.equal(first.email, 'someone@example.com', 'normalized to lowercase')
   assert.equal(first.role, ROLE_USER)
-  assert.deepEqual(first.plan, { botSlots: 0, signals: [] })
+  assert.deepEqual(first.plan, {
+    botSlots: 0,
+    botSlotAssignments: [],
+    signals: [],
+    signalItems: [],
+    symbolSlots: 10,
+    tradingSymbols: [],
+    freeBotClaimed: false,
+    subscriptionTier: null,
+  })
   assert.ok(first.id && first.createdAt)
 
   const second = await store.findOrCreateUserByEmail('someone@example.com')
@@ -66,10 +75,12 @@ test('updateUserPlan merges onto the existing plan and rejects an unknown user i
   const store = await fixture(t)
   const user = await store.findOrCreateUserByEmail('user@example.com')
   const updated = await store.updateUserPlan(user.id, { botSlots: 3 })
-  assert.deepEqual(updated.plan, { botSlots: 3, signals: [] })
+  assert.equal(updated.plan.botSlots, 3)
+  assert.deepEqual(updated.plan.signals, [])
 
   const again = await store.updateUserPlan(user.id, { signals: ['zone-reversal-breakout'] })
-  assert.deepEqual(again.plan, { botSlots: 3, signals: ['zone-reversal-breakout'] }, 'botSlots preserved across the second patch')
+  assert.equal(again.plan.botSlots, 3, 'botSlots preserved across the second patch')
+  assert.deepEqual(again.plan.signals, ['zone-reversal-breakout'])
 
   await assert.rejects(store.updateUserPlan('nope', { botSlots: 1 }), /no user with id/)
 })

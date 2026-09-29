@@ -28,21 +28,28 @@ function clampHour(value, fallback) {
   return Math.min(Math.max(Math.floor(number), 0), 24)
 }
 
+// SaaS Phase 8H: rewritten to be index-independent (each session validates/repairs itself from
+// generic fallbacks) rather than padding/repairing against DEFAULT_AUTO_TRADE_SESSIONS by
+// array position - the old version broke for a user-authored list of arbitrary length (e.g. a
+// 4th custom session inherited "Manila Night"'s hours as its repair fallback, since that was
+// DEFAULT_AUTO_TRADE_SESSIONS.at(-1)). Only falls back to the 3 named defaults when the whole
+// list is empty/missing, matching "continuous" being the real default (sessionScheduleEnabled
+// off) - these only apply once a user actually turns scheduling on.
 export function normalizeAutoTradeSessions(sessions = DEFAULT_AUTO_TRADE_SESSIONS) {
   if (!Array.isArray(sessions) || sessions.length === 0) {
     return DEFAULT_AUTO_TRADE_SESSIONS.map((session) => ({ ...session }))
   }
 
   return sessions.map((session, index) => {
-    const fallback = DEFAULT_AUTO_TRADE_SESSIONS[index] || DEFAULT_AUTO_TRADE_SESSIONS.at(-1)
-    const startHour = clampHour(session?.startHour, fallback.startHour)
-    const endHour = clampHour(session?.endHour, fallback.endHour)
+    const startHour = clampHour(session?.startHour, 0)
+    const rawEndHour = clampHour(session?.endHour, startHour + 1)
+    const endHour = rawEndHour > startHour ? rawEndHour : Math.min(startHour + 1, 24)
 
     return {
-      id: String(session?.id || fallback.id),
-      label: String(session?.label || fallback.label),
+      id: String(session?.id || `session-${index + 1}`),
+      label: String(session?.label || `Session ${index + 1}`),
       startHour,
-      endHour: endHour > startHour ? endHour : fallback.endHour,
+      endHour,
     }
   })
 }

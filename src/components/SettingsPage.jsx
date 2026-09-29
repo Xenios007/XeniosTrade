@@ -1,6 +1,6 @@
-import { Activity, BarChart3, Bot, CandlestickChart, ChevronDown, CircleHelp, Clock3, ShieldAlert, Sparkles, Target, WalletCards } from 'lucide-react'
+import { Activity, BarChart3, Bot, CandlestickChart, ChevronDown, CircleHelp, Clock3, ShieldAlert, ShieldCheck, Sparkles, Target, WalletCards } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
+import { Link, Navigate, NavLink, Route, Routes, useSearchParams } from 'react-router-dom'
 import {
   getStrategyDerivedMaxLossPerTrade,
   getStrategyDerivedTakeProfitPerTrade,
@@ -18,16 +18,19 @@ import {
   TRADE_STYLE_PRESETS,
 } from '../lib/strategyPresets'
 import {
+  BOT3_CUSTOM_RISK_LIMITS,
+  BOT3_CUSTOM_RISK_PRESET_ID,
   BOT3_RISK_PRESETS,
+  DEFAULT_BOT3_CUSTOM_RISK,
   getEffectiveSignalModelStrategy,
   getBot3RiskPreset,
   getSignalModel,
   normalizeSignalModelStrategies,
+  normalizeBot3CustomRisk,
   resolveBot3RiskPresetId,
   visibleSignalModels,
 } from '../lib/signalModels'
 import { VOLATILE_MARKET_SYMBOL_LIMIT } from '../lib/tradingConfig'
-import { formatAutoTradeSessionRange } from '../lib/tradingSessions'
 import { usePersistentBoolean } from '../lib/usePersistentBoolean'
 import { getWalletEffectiveStartingBalance, normalizeWallets } from '../lib/wallets'
 import { CoinAvatar } from './CoinAvatar'
@@ -546,19 +549,20 @@ function StrategyCard({
   onUpdateStrategy,
   onApplyPreset,
   onApplyBot3Preset,
+  onUpdateBot3CustomRisk,
   aiProviderCredentials = {},
 }) {
   const tone = getBotStrategyTone(model.id)
   const isBot3 = model.id === 'model-3'
   const isBot4 = model.id === 'model-4'
-  const isEditable = !isBot3 && !isBot4
+  // Bot 3's risk sizing is edited through its own preset/custom-risk controls below; every other
+  // bot (Bot 4 included) edits the shared per-bot strategy fields.
+  const isEditable = !isBot3
   const strategyForDisplay = isEditable ? editableStrategy : effectiveStrategy
   const activeTradePreset = getResolvedTradeStylePreset(strategyForDisplay)
-  const activeBot3Preset = isBot3 ? getBot3RiskPreset(effectiveStrategy.bot3RiskPresetId) : null
+  const activeBot3Preset = isBot3 ? getBot3RiskPreset(effectiveStrategy.bot3RiskPresetId, effectiveStrategy.bot3CustomRisk) : null
   const activePresetLabel = isBot3
     ? `${activeBot3Preset.name} Preset`
-    : isBot4
-      ? 'Live Rules'
     : `${activeTradePreset.name} Preset`
   const derivedMaxLossPerTrade = Number(
     effectiveStrategy.maxLossPerTrade ?? getStrategyDerivedMaxLossPerTrade(effectiveStrategy),
@@ -617,30 +621,26 @@ function StrategyCard({
             <div className="text-sm leading-relaxed text-slate-200">
               This preset applies to {model.name} only. Editing the preset-managed risk fields below will switch this card back to Manual unless the values still match a saved preset.
             </div>
-          </div>
-        ) : isBot3 ? (
-          <div>
-            <div className="text-sm leading-relaxed text-slate-200">
-              {effectiveStrategy.riskProfile?.summary || 'This bot is automatic and read-only.'}
-            </div>
-            <div className="mt-2 text-xs leading-relaxed text-slate-400">
-              The preset below changes Bot 3&apos;s balance-based risk sizing only. Entries and exits still come from the live trend pullback and retest engine.
-            </div>
+            {isBot4 ? (
+              <div className="mt-2 text-xs leading-relaxed text-slate-400">
+                Bot 4 keeps its 15M EMA20/EMA50 + 5M RSI14 bias and AI entry gate. The hard 1 USDT loss cut per trade is built in and not editable; margin, leverage, take-profit and trade limits are yours to change.
+              </div>
+            ) : null}
           </div>
         ) : (
           <div>
             <div className="text-sm leading-relaxed text-slate-200">
-              This bot is automatic and read-only.
+              {effectiveStrategy.riskProfile?.summary || 'Bot 3 sizes each trade from your running balance.'}
             </div>
             <div className="mt-2 text-xs leading-relaxed text-slate-400">
-              Bot 4 runs a simple 15M EMA20/EMA50 + 5M RSI14 directional bias across the full preferred-symbols universe, then the AI entry score alone decides each entry (hard block). Until it has a self-trained policy it runs in bootstrap mode and takes every biased setup so the AI can learn from the results. Fixed 10 USDT margin at 50x, a hard -1 USDT loss cut per trade with the take-profit left to run, capped at 40 trades per day.
+              Pick a preset below, or choose Custom to set your own risk numbers. This changes Bot 3&apos;s balance-based risk sizing only; entries and exits still come from the live trend pullback and retest engine.
             </div>
           </div>
         )}
         </div>
       </div>
 
-      {isEditable ? (
+      {isEditable && !isBot4 ? (
         <AiSignalAssignment
           modelId={model.id}
           strategy={editableStrategy}
@@ -674,7 +674,7 @@ function StrategyCard({
             }}
             className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
           >
-            {(isBot3 ? BOT3_RISK_PRESETS : TRADE_STYLE_PRESETS).map((preset) => (
+            {(isBot3 ? [...BOT3_RISK_PRESETS, getBot3RiskPreset(BOT3_CUSTOM_RISK_PRESET_ID, effectiveStrategy.bot3CustomRisk)] : TRADE_STYLE_PRESETS).map((preset) => (
               <option key={`${model.id}-${preset.id}`} value={preset.id}>
                 {preset.name} - {preset.tag}
               </option>
@@ -683,6 +683,25 @@ function StrategyCard({
           <div className="mt-2 text-xs leading-relaxed text-slate-400">
             {isBot3 ? activeBot3Preset.description : activeTradePreset.description}
           </div>
+          {isBot3 && activeBot3Preset.id === BOT3_CUSTOM_RISK_PRESET_ID ? (
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {Object.entries(BOT3_CUSTOM_RISK_LIMITS).map(([key, limits]) => (
+                <label key={key} className="grid gap-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">
+                  {limits.label}
+                  <input
+                    type="number"
+                    min={limits.min}
+                    max={limits.max}
+                    step={limits.step}
+                    value={effectiveStrategy.bot3CustomRisk?.[key] ?? DEFAULT_BOT3_CUSTOM_RISK[key]}
+                    onChange={(event) => onUpdateBot3CustomRisk?.(key, event.target.value)}
+                    className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none"
+                  />
+                  <span className="normal-case tracking-normal text-slate-600">{limits.min} to {limits.max}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -775,6 +794,219 @@ function ToggleCard({
   )
 }
 
+// SaaS Phase 8H: replaces the old read-only session-window display - users edit their own
+// timeline now instead of only toggling the 3 fixed Manila windows on/off. Local draft state,
+// explicit Save (matching TradingSymbolsPicker's pattern) rather than saving on every keystroke.
+function SessionEditor({ sessions, onSave, disabled }) {
+  const [rows, setRows] = useState(sessions)
+  const [dirty, setDirty] = useState(false)
+
+  useEffect(() => {
+    setRows(sessions)
+    setDirty(false)
+  }, [sessions])
+
+  function updateRow(index, patch) {
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+    setDirty(true)
+  }
+
+  function removeRow(index) {
+    setRows((current) => current.filter((_, i) => i !== index))
+    setDirty(true)
+  }
+
+  function addRow() {
+    setRows((current) => [...current, { id: `session-${Date.now()}`, label: `Session ${current.length + 1}`, startHour: 9, endHour: 10 }])
+    setDirty(true)
+  }
+
+  async function handleSave() {
+    await onSave(rows)
+    setDirty(false)
+  }
+
+  return (
+    <div className="grid gap-3">
+      {rows.length === 0 ? (
+        <p className="text-xs text-slate-500">No session windows yet - add one, or leave this empty and stay Continuous above.</p>
+      ) : (
+        <div className="grid gap-2">
+          {rows.map((row, index) => (
+            <div key={row.id} className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2">
+              <input
+                value={row.label}
+                onChange={(event) => updateRow(index, { label: event.target.value })}
+                disabled={disabled}
+                className="min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950/70 px-2.5 py-1.5 text-xs font-medium text-white outline-none disabled:opacity-50"
+              />
+              <input
+                type="number"
+                min={0}
+                max={24}
+                value={row.startHour}
+                onChange={(event) => updateRow(index, { startHour: Number(event.target.value) })}
+                disabled={disabled}
+                className="w-16 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 text-xs text-white outline-none disabled:opacity-50"
+              />
+              <span className="text-xs text-slate-500">to</span>
+              <input
+                type="number"
+                min={0}
+                max={24}
+                value={row.endHour}
+                onChange={(event) => updateRow(index, { endHour: Number(event.target.value) })}
+                disabled={disabled}
+                className="w-16 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 text-xs text-white outline-none disabled:opacity-50"
+              />
+              <button
+                type="button"
+                onClick={() => removeRow(index)}
+                disabled={disabled}
+                className="rounded-lg border border-rose-400/20 bg-rose-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={addRow}
+          disabled={disabled}
+          className="rounded-xl border border-sky-300/20 bg-slate-950/35 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-slate-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          + Add session
+        </button>
+        {dirty ? (
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={disabled}
+            className="rounded-xl bg-sky-400 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >
+            Save sessions
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// SaaS Phase 8C: a regular user's own symbol picker, replacing the admin-only auto-managed
+// universe. Capped at plan.symbolSlots (echoed as settings.symbolSlots) - selecting beyond the
+// cap is simply blocked client-side (the server enforces the same cap on save regardless).
+function TradingSymbolsPicker({
+  availableSymbols = [],
+  selected = [],
+  onChangeSelected,
+  symbolSlots,
+  filter,
+  onChangeFilter,
+  onSave,
+  saving,
+  feedback,
+  onFeedback,
+  disabled = false,
+}) {
+  const slots = Number.isFinite(symbolSlots) ? symbolSlots : 10
+  const atCap = selected.length >= slots
+  const normalizedFilter = filter.trim().toUpperCase()
+  const visibleSymbols = normalizedFilter
+    ? availableSymbols.filter((symbol) => symbol.includes(normalizedFilter))
+    : availableSymbols
+
+  function toggleSymbol(symbol) {
+    if (disabled) return
+    if (selected.includes(symbol)) {
+      onChangeSelected(selected.filter((item) => item !== symbol))
+    } else if (!atCap) {
+      onChangeSelected([...selected, symbol])
+    }
+  }
+
+  async function handleSave() {
+    if (!onSave || saving || disabled) return
+    onFeedback?.(null)
+    const result = await onSave(selected)
+    onFeedback?.(result?.ok ? { tone: 'success', message: 'Trading symbols saved.' } : { tone: 'error', message: result?.error || 'Unable to save.' })
+  }
+
+  return (
+    <div className="rounded-[28px] border border-white/10 bg-slate-950/65 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Trading Symbols</div>
+          <div className="mt-2 text-sm leading-relaxed text-slate-300">
+            Pick which symbols your bots scan. You have {slots} symbol slot{slots === 1 ? '' : 's'} -
+            buy more from the Marketplace if you need a bigger universe.
+          </div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-2 text-right">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Selected</div>
+          <div className={`text-sm font-semibold ${atCap ? 'text-amber-300' : 'text-white'}`}>{selected.length} of {slots}</div>
+        </div>
+      </div>
+
+      {atCap ? (
+        <p className="mt-3 text-xs text-amber-200/80">
+          You're using all your symbol slots.{' '}
+          <Link to="/marketplace/symbol-slot" className="font-semibold text-sky-300 hover:underline">Buy more symbol slots</Link>{' '}
+          to track additional pairs.
+        </p>
+      ) : null}
+
+      <input
+        type="text"
+        value={filter}
+        onChange={(event) => onChangeFilter(event.target.value)}
+        placeholder="Search symbols…"
+        className="mt-4 w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-500"
+      />
+
+      <div className="mt-4 flex max-h-72 flex-wrap gap-2 overflow-y-auto pr-1">
+        {visibleSymbols.length === 0 ? (
+          <p className="text-sm text-slate-500">No symbols match "{filter}".</p>
+        ) : visibleSymbols.map((symbol) => {
+          const isSelected = selected.includes(symbol)
+          return (
+            <button
+              key={symbol}
+              type="button"
+              onClick={() => toggleSymbol(symbol)}
+              disabled={disabled || (!isSelected && atCap)}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.18em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                isSelected
+                  ? 'border-sky-400/30 bg-sky-400/15 text-sky-100'
+                  : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]'
+              }`}
+            >
+              <CoinAvatar symbol={symbol} size="xs" />
+              {symbol}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={disabled || saving}
+          className="rounded-2xl bg-sky-400 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+        >
+          {saving ? 'Saving…' : 'Save Trading Symbols'}
+        </button>
+        {feedback ? (
+          <span className={`text-sm ${feedback.tone === 'success' ? 'text-emerald-300' : 'text-rose-300'}`}>{feedback.message}</span>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 export function SettingsPage({
   settings,
   tradeHistory = [],
@@ -783,11 +1015,23 @@ export function SettingsPage({
   saving,
   aiTrainingStatus = { running: false },
   ready = true,
+  isAdmin = false,
+  availableSymbols = [],
+  onSaveTradingSymbols,
+  savingTradingSymbols = false,
+  ownedBotModelIds = null,
 }) {
   const [form, setForm] = useState(() => buildSettingsFormState(settings))
   const [showPreferredSymbols, setShowPreferredSymbols] = usePersistentBoolean('settings:preferred-symbols:expanded', false)
+  const [symbolFilter, setSymbolFilter] = useState('')
+  const [selectedTradingSymbols, setSelectedTradingSymbols] = useState(() => settings?.tradingSymbols || [])
+  const [tradingSymbolsFeedback, setTradingSymbolsFeedback] = useState(null)
+  // ?bot=<id> comes from Dashboard > Bot Status / Bot Creation cards so the clicked bot is
+  // pre-selected here; without it, fall back to the active model.
+  const [searchParams] = useSearchParams()
+  const requestedBotId = searchParams.get('bot')
   const [comparisonModelId, setComparisonModelId] = useState(
-    () => getSignalModel(settings?.strategy?.activeSignalModelId).id,
+    () => (requestedBotId ? getSignalModel(requestedBotId).id : getSignalModel(settings?.strategy?.activeSignalModelId).id),
   )
   const [profileSymbol, setProfileSymbol] = useState('')
   const controlsDisabled = saving || !ready || Boolean(aiTrainingStatus?.running)
@@ -795,6 +1039,10 @@ export function SettingsPage({
   useEffect(() => {
     setForm(buildSettingsFormState(settings))
   }, [settings])
+
+  useEffect(() => {
+    setSelectedTradingSymbols(settings?.tradingSymbols || [])
+  }, [settings?.tradingSymbols])
 
   const wallets = useMemo(
     () => normalizeWallets(form.wallets),
@@ -805,8 +1053,15 @@ export function SettingsPage({
     [form.strategy],
   )
 
+  // SaaS Phase 8H: a regular user only edits the bots they actually own - the admin (or a
+  // caller that doesn't pass ownedBotModelIds) still sees the full fixed list, matching every
+  // other entitlement filter in the app (null means "no filtering").
+  const filteredSignalModels = useMemo(() => (
+    ownedBotModelIds ? visibleSignalModels().filter((model) => ownedBotModelIds.includes(model.id)) : visibleSignalModels()
+  ), [ownedBotModelIds])
+
   const comparisonModels = useMemo(() => (
-    visibleSignalModels().map((signalModel) => {
+    filteredSignalModels.map((signalModel) => {
       const modelId = signalModel.id
       const model = getSignalModel(modelId)
       const wallet = wallets.find((item) => item.assignedSignalModelId === modelId) || null
@@ -833,12 +1088,12 @@ export function SettingsPage({
       return {
         model,
         wallet,
-        editableStrategy: modelId === 'model-3' || modelId === 'model-4' ? null : signalModelStrategies[modelId],
+        editableStrategy: modelId === 'model-3' ? null : signalModelStrategies[modelId],
         effectiveStrategy,
         accountSnapshot,
       }
     })
-  ), [form.strategy, livePrices, signalModelStrategies, tradeHistory, wallets])
+  ), [filteredSignalModels, form.strategy, livePrices, signalModelStrategies, tradeHistory, wallets])
 
   const selectedComparison = comparisonModels.find((item) => item.model.id === comparisonModelId)
     || comparisonModels[0]
@@ -872,6 +1127,34 @@ export function SettingsPage({
       strategy: {
         ...form.strategy,
         [key]: !form.strategy[key],
+      },
+    }
+    const preparedSettings = getPreparedSettings(nextForm)
+
+    setForm(preparedSettings)
+    const patch = buildSettingsPatch(settings, preparedSettings)
+    const result = Object.keys(patch).length > 0
+      ? await onSave(patch)
+      : { ok: true }
+
+    if (!result?.ok) {
+      setForm(settings)
+    }
+  }
+
+  // SaaS Phase 8H: saves the user's own edited session-window list. Mirrors
+  // persistStrategyToggle's save/revert-on-failure pattern for a whole-array field instead of
+  // a single toggle.
+  async function persistScheduledSessions(nextSessions) {
+    if (controlsDisabled) {
+      return
+    }
+
+    const nextForm = {
+      ...form,
+      strategy: {
+        ...form.strategy,
+        scheduledSessions: nextSessions,
       },
     }
     const preparedSettings = getPreparedSettings(nextForm)
@@ -939,6 +1222,17 @@ export function SettingsPage({
       strategy: {
         ...current.strategy,
         bot3RiskPresetId: resolveBot3RiskPresetId(presetId),
+      },
+    }))
+  }
+
+  function updateBot3CustomRisk(key, value) {
+    setForm((current) => ({
+      ...current,
+      strategy: {
+        ...current.strategy,
+        bot3RiskPresetId: BOT3_CUSTOM_RISK_PRESET_ID,
+        bot3CustomRisk: normalizeBot3CustomRisk({ ...(current.strategy.bot3CustomRisk || {}), [key]: value }),
       },
     }))
   }
@@ -1049,62 +1343,72 @@ export function SettingsPage({
             onToggle={() => persistStrategyToggle('sessionScheduleEnabled')}
             disabled={controlsDisabled}
           >
-            <div className="flex flex-wrap gap-2">
-              {(form.strategy.scheduledSessions || []).map((session) => (
-                <span
-                  key={session.id}
-                  className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-sky-200"
-                >
-                  <span>{session.label}</span>
-                  <span className="text-sky-100/70">{formatAutoTradeSessionRange(session)}</span>
-                </span>
-              ))}
-            </div>
+            <SessionEditor
+              sessions={form.strategy.scheduledSessions || []}
+              onSave={persistScheduledSessions}
+              disabled={controlsDisabled}
+            />
           </ToggleCard>
 
-          <div className="rounded-[28px] border border-white/10 bg-slate-950/65 p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{STRATEGY_FIELD_META.preferredSymbols.label}</div>
-                <div className="mt-2 text-sm leading-relaxed text-slate-300">
-                  Auto-managed universe from the live top {VOLATILE_MARKET_SYMBOL_LIMIT} symbols by volume x volatility.
+          {isAdmin ? (
+            <div className="rounded-[28px] border border-white/10 bg-slate-950/65 p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{STRATEGY_FIELD_META.preferredSymbols.label}</div>
+                  <div className="mt-2 text-sm leading-relaxed text-slate-300">
+                    Auto-managed universe from the live top {VOLATILE_MARKET_SYMBOL_LIMIT} symbols by volume x volatility.
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPreferredSymbols((current) => !current)}
+                  className="rounded-2xl border border-sky-300/20 bg-slate-950/35 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-slate-950/50"
+                >
+                  {showPreferredSymbols ? 'Hide Coins' : `View ${form.strategy.preferredSymbols?.length || 0}`}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowPreferredSymbols((current) => !current)}
-                className="rounded-2xl border border-sky-300/20 bg-slate-950/35 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-slate-950/50"
-              >
-                {showPreferredSymbols ? 'Hide Coins' : `View ${form.strategy.preferredSymbols?.length || 0}`}
-              </button>
-            </div>
 
-            <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Tracked Universe</div>
-              <div className="mt-1 text-sm font-semibold text-white">{(form.strategy.preferredSymbols || []).length} pairs</div>
-            </div>
-
-            {showPreferredSymbols ? (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {(form.strategy.preferredSymbols || []).map((symbol) => (
-                  <span
-                    key={symbol}
-                    className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-sky-200"
-                  >
-                    <CoinAvatar symbol={symbol} size="xs" />
-                    {symbol}
-                  </span>
-                ))}
+              <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Tracked Universe</div>
+                <div className="mt-1 text-sm font-semibold text-white">{(form.strategy.preferredSymbols || []).length} pairs</div>
               </div>
-            ) : null}
-          </div>
+
+              {showPreferredSymbols ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {(form.strategy.preferredSymbols || []).map((symbol) => (
+                    <span
+                      key={symbol}
+                      className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-sky-200"
+                    >
+                      <CoinAvatar symbol={symbol} size="xs" />
+                      {symbol}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <TradingSymbolsPicker
+              availableSymbols={availableSymbols}
+              selected={selectedTradingSymbols}
+              onChangeSelected={setSelectedTradingSymbols}
+              symbolSlots={settings?.symbolSlots}
+              filter={symbolFilter}
+              onChangeFilter={setSymbolFilter}
+              onSave={onSaveTradingSymbols}
+              saving={savingTradingSymbols}
+              feedback={tradingSymbolsFeedback}
+              onFeedback={setTradingSymbolsFeedback}
+              disabled={controlsDisabled}
+            />
+          )}
         </div>
       </Panel>
       )} />
       <Route path="strategy" element={(
       <Panel title="Bot Strategy Comparison">
         <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
-          Pick a bot from the dropdown below to view or edit its strategy. Every bot can choose Profile First or Bot Only. Bot 1 and Bot 2 also expose their own editable risk values; Bot 3 and Bot 4 retain their dedicated strategy rules when Bot Only is selected.
+          Pick a bot from the dropdown below to view or edit its strategy. Every bot can choose Profile First or Bot Only. Every bot has its own editable risk values. Bot 3 edits its balance-based risk sizing (entries and exits stay automatic).
         </div>
 
         <div className="mt-5 max-w-md">
@@ -1132,6 +1436,12 @@ export function SettingsPage({
           </div>
         </div>
 
+        {comparisonModels.length === 0 ? (
+          <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.02] px-4 py-6 text-center text-sm text-slate-400">
+            You don't own any bots yet - claim your free bot from the Dashboard, or buy a bot slot on the Marketplace.
+          </div>
+        ) : null}
+
         {selectedComparison ? (
           <div className="mt-5 w-full">
             <StrategyCard
@@ -1144,6 +1454,7 @@ export function SettingsPage({
               onUpdateStrategy={updateSignalModelStrategy}
               onApplyPreset={applySignalModelTradeStylePreset}
               onApplyBot3Preset={applyBot3RiskPreset}
+              onUpdateBot3CustomRisk={updateBot3CustomRisk}
               aiProviderCredentials={settings.aiProviderCredentials}
             />
           </div>
@@ -1178,17 +1489,21 @@ export function SettingsPage({
       )} />
       <Route path="credentials" element={(
       <>
-      <Panel title="API Credentials">
+      <Panel title="API Credentials" action={<ShieldCheck className="h-4 w-4 text-emerald-300" />}>
         <div className="grid gap-4">
+          <div className="flex items-start gap-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-100">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>Encrypted at rest, scoped to your account only, and never sent back to your browser once saved - not even to this page. Leave a field blank to keep what's already stored, or paste a new value to rotate it.</span>
+          </div>
           <div className="grid gap-4 md:grid-cols-2">
             {[
               {
                 key: 'apiKey',
-                label: 'API Key',
+                label: 'Testnet API Key',
               },
               {
                 key: 'secretKey',
-                label: 'Secret Key',
+                label: 'Testnet Secret Key',
               },
             ].map((item) => {
               const credential = getCredentialState(settings, item.key)
@@ -1202,24 +1517,24 @@ export function SettingsPage({
                       : 'border-amber-400/20 bg-amber-400/10 text-amber-100'
                   }`}
                 >
-                  <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">{item.label} Status</div>
+                  <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] opacity-75">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    {item.label}
+                  </div>
                   <div className="mt-2 text-sm font-semibold">
-                    {credential.present ? 'Stored on server' : 'Missing'}
+                    {credential.present ? 'Saved' : 'Not set'}
                   </div>
                   <div className="mt-2 text-xs leading-relaxed opacity-80">
                     {credential.present
-                      ? `Protected server-side only. Fingerprint ${credential.fingerprint || 'n/a'} • ${credential.length} characters.`
-                      : 'This credential is not configured yet.'}
+                      ? `Fingerprint ${credential.fingerprint || 'n/a'} • ${credential.length} characters - this is enough to confirm it's the right key without ever showing the key itself.`
+                      : 'Not configured yet - paste it below.'}
                   </div>
                 </div>
               )
             })}
           </div>
-          <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
-            Credentials are now hidden from the browser. Leave both fields blank to keep the current server-side keys, or paste a new pair to rotate them.
-          </div>
           <label className="block">
-            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Replace Binance Futures Testnet API Key</span>
+            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Rotate Testnet API Key (Binance Futures Testnet)</span>
             <input
               value={form.apiKey}
               onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))}
@@ -1230,7 +1545,7 @@ export function SettingsPage({
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Replace Binance Futures Testnet Secret Key</span>
+            <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Rotate Testnet Secret Key (Binance Futures Testnet)</span>
             <input
               value={form.secretKey}
               onChange={(event) => setForm((current) => ({ ...current, secretKey: event.target.value }))}
@@ -1272,14 +1587,17 @@ export function SettingsPage({
                       : 'border-amber-400/20 bg-amber-400/10 text-amber-100'
                   }`}
                 >
-                  <div className="text-[11px] uppercase tracking-[0.18em] opacity-75">{item.label} Status</div>
+                  <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] opacity-75">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    {item.label}
+                  </div>
                   <div className="mt-2 text-sm font-semibold">
-                    {credential.present ? 'Stored on server' : 'Missing'}
+                    {credential.present ? 'Saved' : 'Not set'}
                   </div>
                   <div className="mt-2 text-xs leading-relaxed opacity-80">
                     {credential.present
-                      ? `Protected server-side only. Fingerprint ${credential.fingerprint || 'n/a'} • ${credential.length} characters.`
-                      : 'This credential is not configured yet.'}
+                      ? `Encrypted, account-scoped. Fingerprint ${credential.fingerprint || 'n/a'} • ${credential.length} characters.`
+                      : 'Not configured yet - paste it below.'}
                   </div>
                 </div>
               )

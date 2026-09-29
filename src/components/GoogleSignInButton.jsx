@@ -14,6 +14,17 @@ export function GoogleSignInButton({ href, label = 'Continue with Google', class
   return (
     <a
       href={href}
+      // A plain <a href> click has been observed to silently no-op on some local
+      // ai.localhost/bot.localhost setups (server, bundle and DOM all verified
+      // correct - the href itself works when pasted directly), so navigation is
+      // also forced via JS as a fallback that does not depend on native
+      // click-to-navigate behavior.
+      onClick={(event) => {
+        if (href) {
+          event.preventDefault()
+          window.location.assign(href)
+        }
+      }}
       className={`inline-flex items-center justify-center gap-3 rounded-full bg-white px-6 py-3 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 ${className}`}
     >
       <GoogleGlyph />

@@ -439,17 +439,67 @@ export const BOT3_RISK_PRESETS = [
   },
 ]
 
-export function getBot3RiskPreset(presetId = DEFAULT_BOT3_RISK_PRESET_ID) {
+// User-editable Bot 3 risk sizing. Only the balance-risk numbers are editable - entries and exits
+// still come from the trend pullback / retest engine. Every value is clamped to a sane range so a
+// typo can't turn Bot 3 into an unbounded-risk bot.
+export const BOT3_CUSTOM_RISK_PRESET_ID = 'bot3-custom'
+export const DEFAULT_BOT3_CUSTOM_RISK = {
+  riskPerTradePercent: 0.75,
+  maxLossesPerDay: 3,
+  dailyMaxLossPercent: 2,
+  estimatedStopLossPercent: 1,
+}
+export const BOT3_CUSTOM_RISK_LIMITS = {
+  riskPerTradePercent: { min: 0.1, max: 2, step: 0.05, label: 'Risk per trade (% of balance)' },
+  maxLossesPerDay: { min: 1, max: 10, step: 1, label: 'Max losing trades per day' },
+  dailyMaxLossPercent: { min: 0.5, max: 10, step: 0.1, label: 'Daily max loss (% of balance)' },
+  estimatedStopLossPercent: { min: 0.2, max: 5, step: 0.1, label: 'Estimated stop loss (%)' },
+}
+
+export function normalizeBot3CustomRisk(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const next = {}
+  for (const [key, limits] of Object.entries(BOT3_CUSTOM_RISK_LIMITS)) {
+    const raw = Number(source[key])
+    const value = Number.isFinite(raw) ? raw : DEFAULT_BOT3_CUSTOM_RISK[key]
+    const clamped = Math.min(Math.max(value, limits.min), limits.max)
+    next[key] = key === 'maxLossesPerDay' ? Math.round(clamped) : Number(clamped.toFixed(4))
+  }
+  return next
+}
+
+function buildBot3CustomRiskPreset(customRisk) {
+  const risk = normalizeBot3CustomRisk(customRisk)
+  return {
+    id: BOT3_CUSTOM_RISK_PRESET_ID,
+    name: 'Custom',
+    tag: 'Your numbers',
+    description: 'Your own Bot 3 risk sizing. Entries and exits still come from the automatic trend pullback and retest engine.',
+    mode: 'balance-risk',
+    riskPerTradePercent: risk.riskPerTradePercent,
+    suggestedRiskFloorPercent: risk.riskPerTradePercent,
+    suggestedRiskCeilingPercent: risk.riskPerTradePercent,
+    maxLossesPerDay: risk.maxLossesPerDay,
+    dailyMaxLossPercent: risk.dailyMaxLossPercent,
+    estimatedStopLossPercent: risk.estimatedStopLossPercent,
+    summary: `Bot 3 risks ${risk.riskPerTradePercent}% of running balance per trade, stops after ${risk.maxLossesPerDay} losing trades, and caps the day at ${risk.dailyMaxLossPercent}% loss.`,
+  }
+}
+
+export function getBot3RiskPreset(presetId = DEFAULT_BOT3_RISK_PRESET_ID, customRisk = null) {
+  if (presetId === BOT3_CUSTOM_RISK_PRESET_ID) {
+    return buildBot3CustomRiskPreset(customRisk)
+  }
   return BOT3_RISK_PRESETS.find((preset) => preset.id === presetId) || BOT3_RISK_PRESETS[0]
 }
 
 export function resolveBot3RiskPresetId(presetId = DEFAULT_BOT3_RISK_PRESET_ID) {
-  return getBot3RiskPreset(presetId).id
+  return presetId === BOT3_CUSTOM_RISK_PRESET_ID ? BOT3_CUSTOM_RISK_PRESET_ID : getBot3RiskPreset(presetId).id
 }
 
 function getResolvedSignalModelRiskProfile(signalModel, strategy = {}) {
   if (signalModel?.id === 'model-3') {
-    return getBot3RiskPreset(strategy?.bot3RiskPresetId)
+    return getBot3RiskPreset(strategy?.bot3RiskPresetId, strategy?.bot3CustomRisk)
   }
 
   return signalModel?.riskProfile || null
@@ -480,7 +530,14 @@ function normalizeSignalModelStrategyOverride(modelId, override, strategy = {}) 
 
   normalized.marginMode = normalizeMarginMode(normalized.marginMode || DEFAULT_MARGIN_MODE)
   normalized.useSymbolRiskProfile = normalized.useSymbolRiskProfile !== false
-  normalized.tradeStylePresetId = resolveTradeStylePresetId(normalized, source.tradeStylePresetId)
+  // SaaS Phase 8H: a bot with no explicitly-stored preset choice (a brand new user's never-
+  // touched bot) defaults straight to Manual - it no longer auto-matches a named preset just
+  // because the default risk numbers happen to coincide with one. Once the user (or the app)
+  // has actually stored a choice, resolveTradeStylePresetId's normal re-match-on-edit behavior
+  // still applies unchanged (see its other call site, SettingsPage.jsx's field-edit handler).
+  normalized.tradeStylePresetId = source.tradeStylePresetId
+    ? resolveTradeStylePresetId(normalized, source.tradeStylePresetId)
+    : MANUAL_TRADE_STYLE_PRESET_ID
   normalized.maxLossPerTrade = getStrategyDerivedMaxLossPerTrade(normalized)
   normalized.aiSignalProviderId = String(normalized.aiSignalProviderId || '').trim()
   normalized.aiSignalModel = String(normalized.aiSignalModel || '').trim()

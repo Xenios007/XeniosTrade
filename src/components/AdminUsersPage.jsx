@@ -116,55 +116,18 @@ function UserRow({ user, onGrant, saving }) {
   )
 }
 
-function PendingSignalRequests({ requests, onGrant, granting }) {
-  if (requests.length === 0) {
-    return null
-  }
-
-  return (
-    <Panel title="Pending Signal Requests">
-      <div className="grid gap-2">
-        {requests.map((request) => (
-          <div
-            key={request.id}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3"
-          >
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-white">{request.email}</div>
-              <div className="text-xs text-amber-200/80">
-                wants {request.signalName} - requested {new Date(request.requestedAt).toLocaleString()}
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={granting === request.id}
-              onClick={() => onGrant(request)}
-              className="rounded-xl bg-emerald-400/15 px-3 py-2 text-sm font-semibold text-emerald-100 ring-1 ring-emerald-400/30 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {granting === request.id ? 'Granting…' : 'Grant'}
-            </button>
-          </div>
-        ))}
-      </div>
-    </Panel>
-  )
-}
-
+// SaaS Phase 8F: buying is instant self-service now (see the Marketplace's Bot Signal page) -
+// this screen stays as the admin's manual override/audit path only, no pending-requests inbox
+// left to action (nothing creates a pending request anymore).
 export function AdminUsersPage({ isAdmin }) {
   const [users, setUsers] = useState([])
-  const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [savingUserId, setSavingUserId] = useState('')
-  const [grantingRequestId, setGrantingRequestId] = useState('')
 
   async function refresh() {
-    const [usersPayload, requestsPayload] = await Promise.all([
-      fetchJson('/api/admin/users'),
-      fetchJson('/api/admin/signal-requests'),
-    ])
+    const usersPayload = await fetchJson('/api/admin/users')
     setUsers(usersPayload.users || [])
-    setRequests(requestsPayload.requests || [])
   }
 
   useEffect(() => {
@@ -202,32 +165,10 @@ export function AdminUsersPage({ isAdmin }) {
         body: JSON.stringify({ botSlots, signals }),
       })
       setUsers((current) => current.map((user) => (user.id === userId ? payload.user : user)))
-      setRequests((current) => current.filter((request) => !(request.userId === userId && signals.includes(request.signalId))))
     } catch (grantError) {
       setError(grantError instanceof Error ? grantError.message : 'Unable to update the plan.')
     } finally {
       setSavingUserId('')
-    }
-  }
-
-  async function handleGrantRequest(request) {
-    setGrantingRequestId(request.id)
-    setError('')
-
-    try {
-      const target = users.find((user) => user.id === request.userId)
-      const nextSignals = [...new Set([...(target?.plan?.signals || []), request.signalId])]
-      const payload = await fetchJson(`/api/admin/users/${request.userId}/plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signals: nextSignals }),
-      })
-      setUsers((current) => current.map((user) => (user.id === request.userId ? payload.user : user)))
-      setRequests((current) => current.filter((item) => item.id !== request.id))
-    } catch (grantError) {
-      setError(grantError instanceof Error ? grantError.message : 'Unable to grant this request.')
-    } finally {
-      setGrantingRequestId('')
     }
   }
 
@@ -249,17 +190,13 @@ export function AdminUsersPage({ isAdmin }) {
     <div className="grid gap-6">
       <PageHeader
         title="Admin"
-        description="Grant or revoke bot slots and specific signals per account - the whole entitlement surface for the test phase (no payment gateway yet). Bot slots unlock the first N bots in order; a granted signal unlocks that one bot regardless of position."
+        description="Grant or revoke bot slots and specific signals per account - the whole entitlement surface for the test phase (no payment gateway yet). Each bot slot is an empty bot the user fills themselves (premade bot or custom); a granted signal gives that specific bot outright."
       />
 
       {error ? (
         <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
           {error}
         </div>
-      ) : null}
-
-      {!loading ? (
-        <PendingSignalRequests requests={requests} onGrant={handleGrantRequest} granting={grantingRequestId} />
       ) : null}
 
       <Panel title="Accounts">

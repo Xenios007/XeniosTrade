@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { BrandMark } from '../BrandMark'
 import { GoogleSignInButton } from '../GoogleSignInButton'
+import { ExternalHostLink } from '../ExternalHostLink'
 import { getGoogleLoginUrl, getModeUrl, APP_MODE_AI, APP_MODE_BOT, PASSWORD_LOGIN_ENABLED } from '../../lib/appMode'
 
 const NAV = [
@@ -170,13 +171,13 @@ function WorkspaceCard({ Icon, name, host, blurb, points, href, cta, authenticat
           </li>
         ))}
       </ul>
-      <a
+      <ExternalHostLink
         href={href}
         className="mt-8 inline-flex items-center justify-center gap-2 self-start rounded-full border border-sky-300/25 bg-sky-400/15 px-5 py-2.5 text-sm font-semibold text-sky-100 transition hover:border-sky-300/50 hover:bg-sky-400/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
       >
         {authenticated ? cta : 'Sign in to open'}
         <ArrowRight className="h-4 w-4" />
-      </a>
+      </ExternalHostLink>
     </div>
   )
 }
@@ -217,12 +218,12 @@ function SignInCard({ authChecked, authenticated, googleEnabled, loginError, onP
         <h3 className="mt-5 text-2xl font-semibold text-white">You’re signed in</h3>
         <p className="mt-2 text-sm text-slate-400">One sign-in covers both workspaces.</p>
         <div className="mt-7 grid gap-3 sm:grid-cols-2">
-          <a href={aiUrl} className="inline-flex items-center justify-center gap-2 rounded-full bg-sky-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-300">
+          <ExternalHostLink href={aiUrl} className="inline-flex items-center justify-center gap-2 rounded-full bg-sky-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-300">
             <Network className="h-4 w-4" /> Open AI Trading
-          </a>
-          <a href={botUrl} className="inline-flex items-center justify-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10">
+          </ExternalHostLink>
+          <ExternalHostLink href={botUrl} className="inline-flex items-center justify-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10">
             <Bot className="h-4 w-4" /> Open Bot Trading
-          </a>
+          </ExternalHostLink>
         </div>
       </div>
     )
@@ -313,8 +314,8 @@ export function HomePage({ authChecked, authenticated, googleEnabled, loginError
           <div className="ml-auto flex items-center gap-2">
             {authenticated ? (
               <>
-                <a href={aiUrl} className="hidden rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:inline-flex">AI Trading</a>
-                <a href={botUrl} className="hidden rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:inline-flex">Bot Trading</a>
+                <ExternalHostLink href={aiUrl} className="hidden rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:inline-flex">AI Trading</ExternalHostLink>
+                <ExternalHostLink href={botUrl} className="hidden rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:inline-flex">Bot Trading</ExternalHostLink>
                 <button type="button" onClick={onLogout} className="rounded-full bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/15">Sign out</button>
               </>
             ) : (
