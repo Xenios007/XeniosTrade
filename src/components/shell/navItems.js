@@ -8,6 +8,7 @@ import {
   Network,
   Settings,
   Wallet,
+  Layers,
 } from 'lucide-react'
 import { APP_META, APP_MODE, APP_MODE_AI, APP_MODE_ALL, SECTIONS_BY_MODE, isAiModelsTabVisible } from '../../lib/appMode.js'
 
@@ -58,6 +59,15 @@ export const NAV_GROUPS = [
           { to: '/trade-history/real-money', label: 'Real Money Trades' },
         ],
       },
+    ],
+  },
+  {
+    // Its own top-level group, deliberately not nested under "Trading" alongside Mock Trading / AI Trading: this
+    // shares no wallet, no trade-history ledger, and no symbol-collision protection with any of them - a fully
+    // separate environment with its own testnet account-side ledger (see ConsolidatedBotPage / consolidated-bot.js).
+    label: 'Consolidated Knowledge',
+    items: [
+      { to: '/consolidated-knowledge', label: 'Consolidated Knowledge', Icon: Layers },
     ],
   },
   {

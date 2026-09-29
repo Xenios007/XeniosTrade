@@ -3,13 +3,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { roundMoney, summarizeAccount } from '../lib/accountMetrics'
 import { evaluateAutoTradeReadiness } from '../lib/autoTradeReadiness'
 import { formatPercent } from '../lib/formatters'
-import { getEffectiveSignalModelStrategy, getSignalModel, SIGNAL_MODELS } from '../lib/signalModels'
+import { getEffectiveSignalModelStrategy, getSignalModel, visibleSignalModels } from '../lib/signalModels'
 import {
   getMainWallet,
   buildPhase3ChampionAllocation,
   getMainWalletAllocatedBalance,
   getRealMoneyWallet,
-  getTradingWallets,
+  visibleTradingWallets,
   getWalletAllocationFundingBalance,
   getWalletAllocationBalance,
   getWalletEffectiveStartingBalance,
@@ -616,7 +616,7 @@ function BotWalletCard({ wallet, view, onUpdateWallet }) {
               onChange={(event) => onUpdateWallet(wallet.id, { assignedSignalModelId: event.target.value })}
               className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
             >
-              {SIGNAL_MODELS.map((item) => (
+              {visibleSignalModels().map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name} - {item.tag}
                 </option>
@@ -685,7 +685,7 @@ export function WalletsPage({
   )
 
   const walletViews = useMemo(() => (
-    getTradingWallets(normalizedWalletForm).map((wallet) => {
+    visibleTradingWallets(normalizedWalletForm).map((wallet) => {
       const walletTrades = trades.filter((trade) => trade.walletId === wallet.id)
       const baseAccountSnapshot = summarizeAccount({
         trades: walletTrades,
@@ -821,7 +821,7 @@ export function WalletsPage({
       <>
       <Panel title="Wallet Lab">
         <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-4 text-sm text-sky-100">
-          The workspace now uses one Binance Futures Testnet main wallet as the funding source, and {SIGNAL_MODELS.length} bot wallets that each receive an allocation from it for auto trading.
+          The workspace now uses one Binance Futures Testnet main wallet as the funding source, and {walletViews.length} bot wallets that each receive an allocation from it for auto trading.
         </div>
 
         <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-100">

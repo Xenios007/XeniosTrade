@@ -1,6 +1,6 @@
 import { Lock, Radar, TrendingDown, TrendingUp } from 'lucide-react'
 import { formatPrice } from '../lib/formatters'
-import { SIGNAL_MODELS } from '../lib/signalModels'
+import { visibleSignalModels } from '../lib/signalModels'
 import { Panel } from './Panel'
 
 const EMPTY_MODEL_STATS = {
@@ -202,7 +202,7 @@ export function BotStatusGrid({
   return (
     <Panel title="Bot Status">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {SIGNAL_MODELS.map((model) => {
+        {visibleSignalModels().map((model) => {
           const analysis = modelAnalyses[model.id] || null
           const isActive = model.id === activeSignalModelId
           const tone = getModelTone(model, analysis, isActive)

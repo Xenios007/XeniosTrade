@@ -47,12 +47,14 @@ export const APP_META = {
 // shared (provider keys), but each side only shows its own tabs.
 export const SECTIONS_BY_MODE = {
   [APP_MODE_AI]: ['ai-trading', 'ai-models', 'ai-history', 'ai-journal', 'ai-wallet', 'ai-settings'],
-  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'trade-history', 'journal', 'ai-training', 'wallets', 'ai-models', 'settings'],
+  [APP_MODE_BOT]: ['dashboard', 'mock-trading', 'trade-history', 'journal', 'ai-training', 'consolidated-knowledge', 'wallets', 'ai-models', 'settings'],
 }
 
 export const AI_MODELS_TAB_PATHS = {
   [APP_MODE_AI]: ['/ai-models', '/ai-models/browse', '/ai-models/agents'],
-  [APP_MODE_BOT]: ['/ai-models', '/ai-models/bots'],
+  // '/ai-models/bots' (LLM Trading Bots 11-15) is hidden for now - none are enabled and their environment is being
+  // reworked; see signalModels.js's HIDDEN_MODEL_IDS.
+  [APP_MODE_BOT]: ['/ai-models'],
 }
 
 export function isAiModelsTabVisible(mode, path) {

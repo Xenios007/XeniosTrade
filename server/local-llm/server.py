@@ -23,11 +23,12 @@ import os
 import re
 import threading
 import time
+import traceback
 import uuid
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StoppingCriteria, StoppingCriteriaList
@@ -360,6 +361,21 @@ async def require_key_through_tunnel(request: Request, call_next):
     return await call_next(request)
 
 
+@app.exception_handler(Exception)
+async def report_failure(request: Request, exc: Exception):
+    """Without this an exception reaches the client as a bare "Internal Server Error" and /health keeps saying ready,
+    so the caller cannot tell what broke. A `CUDA error:` (illegal memory access, device-side assert, launch failure)
+    leaves the CUDA context unusable for the rest of the process, so it also flips /health to error: only a restart of
+    this server recovers. CUDA out-of-memory is not fatal; the cache is released and the next call may succeed."""
+    message = f"{type(exc).__name__}: {exc}".strip()[:400]
+    traceback.print_exception(exc)
+    if "CUDA error" in message:
+        state["status"], state["error"] = "error", f"GPU failed, restart FinGPT: {message}"
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return JSONResponse({"error": {"message": f"FinGPT failed: {message}"}}, status_code=500)
+
+
 @app.on_event("startup")
 def start_loading():
     threading.Thread(target=load_model, daemon=True).start()
@@ -394,9 +410,9 @@ def completion(text, finish_reason, prompt_ids, generated_ids):
 @app.post("/v1/chat/completions")
 def chat(request: ChatRequest):
     if state["status"] == "loading":
-        raise HTTPException(status_code=503, detail="FinGPT is still loading.")
+        return JSONResponse({"error": {"message": "FinGPT is still loading."}}, status_code=503)
     if state["status"] == "error":
-        raise HTTPException(status_code=500, detail=state["error"])
+        return JSONResponse({"error": {"message": state["error"]}}, status_code=500)
 
     model, tokenizer = state["model"], state["tokenizer"]
     prompt = build_prompt(request.messages)

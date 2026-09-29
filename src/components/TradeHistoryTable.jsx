@@ -2,7 +2,7 @@ import { ArrowUpDown, Bot, ListFilter } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { formatDateTime, formatPercent, formatPrice } from '../lib/formatters'
 import { getMarginModeLabel } from '../lib/marginModes'
-import { SIGNAL_MODELS } from '../lib/signalModels'
+import { visibleSignalModels } from '../lib/signalModels'
 import {
   formatTradeSource,
   getTradePnlAmount,
@@ -40,7 +40,7 @@ const TRADE_STATUS_SORT_ORDER = {
 
 const TRADE_BOT_FILTER_OPTIONS = [
   { id: 'all', label: 'All Bots' },
-  ...SIGNAL_MODELS.map((model) => ({ id: model.id, label: model.name })),
+  ...visibleSignalModels().map((model) => ({ id: model.id, label: model.name })),
 ]
 
 const TRADE_STATUS_FILTER_OPTIONS = [
@@ -519,23 +519,26 @@ export function TradeHistoryTable({
                     ) : null}
                   </div>
 
-                  <div className="flex flex-col items-start gap-2 sm:items-end">
+                  {/* w-full on its own line at narrow widths (never sits beside the flex-1 text block, which otherwise loses width
+                      to this column for its whole height even where this column has nothing next to it) - compact corner layout
+                      returns at sm: and up. */}
+                  <div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:flex-col sm:items-end sm:justify-start sm:gap-2">
                     <div className={`rounded-full px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] ${statusMeta.tone}`}>
                       {statusMeta.label}
                     </div>
                     {isOpen && onManualClose ? (
-                      <button
-                        type="button"
-                        onClick={() => onManualClose(trade.id)}
-                        disabled={isClosing}
-                        className="rounded-full border border-sky-300/25 bg-sky-400/10 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-sky-400/15 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.04] disabled:text-slate-400"
-                      >
-                        {isClosing ? 'Closing...' : 'Manual Close'}
-                      </button>
-                    ) : null}
-                    {isOpen && onManualClose ? (
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                        Exit at latest market price
+                      <div className="flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onManualClose(trade.id)}
+                          disabled={isClosing}
+                          className="rounded-full border border-sky-300/25 bg-sky-400/10 px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] text-sky-100 transition hover:border-sky-300/40 hover:bg-sky-400/15 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.04] disabled:text-slate-400"
+                        >
+                          {isClosing ? 'Closing...' : 'Manual Close'}
+                        </button>
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                          Exit at latest market price
+                        </div>
                       </div>
                     ) : null}
                   </div>
@@ -567,7 +570,7 @@ export function TradeHistoryTable({
                   </div>
                 ) : null}
 
-                <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+                <div className="mt-4 grid grid-cols-2 gap-3 2xl:grid-cols-4">
                   <div className="min-w-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
                     <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Entry</div>
                     <div className="mt-1 break-words text-sm font-semibold text-white">{formatPrice(trade.entryPrice, 5)}</div>
@@ -591,7 +594,7 @@ export function TradeHistoryTable({
                   </div>
                 </div>
 
-                <div className="mt-3 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+                <div className="mt-3 grid grid-cols-2 gap-3 2xl:grid-cols-4">
                   <div className="min-w-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
                     <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">To TP</div>
                     <div className={`mt-1 break-words text-sm font-semibold ${

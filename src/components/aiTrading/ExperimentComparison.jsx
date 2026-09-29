@@ -44,7 +44,7 @@ export function ExperimentComparison({ trades, experiments, selected, onSelect, 
           Every pipeline setting is scored separately. PnL on a trade is the price move only, so fees are estimated at a 0.1% round trip on the
           position size (a maker entry pays less). Small samples prove nothing: judge an experiment on 200 decided trades or more (see Shadow outcomes).
         </p>
-        <div className="overflow-x-auto">
+        <div className="min-w-0 overflow-x-auto">
           <table className="w-full min-w-[640px] text-left text-xs">
             <thead>
               <tr className="border-b border-white/10 text-slate-500">

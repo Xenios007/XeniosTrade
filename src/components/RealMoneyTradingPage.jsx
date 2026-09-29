@@ -2,7 +2,7 @@ import { Activity, AlertTriangle, Bot, CheckCircle2, LockKeyhole, RefreshCcw, Sh
 import { useEffect, useMemo, useState } from 'react'
 import { getStrategyDerivedTakeProfitPerTrade, roundMoney, summarizeAccount } from '../lib/accountMetrics'
 import { formatPercent } from '../lib/formatters'
-import { getEffectiveSignalModelStrategy, getSignalModel, SIGNAL_MODELS } from '../lib/signalModels'
+import { getEffectiveSignalModelStrategy, getSignalModel, SIGNAL_MODELS, visibleSignalModels } from '../lib/signalModels'
 import {
   getRealMoneyWallet,
   getTradingWallets,
@@ -339,7 +339,7 @@ export function RealMoneyTradingPage({
               disabled={!ready || saving}
               className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white outline-none disabled:cursor-not-allowed disabled:text-slate-500"
             >
-              {SIGNAL_MODELS.map((model) => (
+              {visibleSignalModels().map((model) => (
                 <option key={model.id} value={model.id} className="bg-slate-900 text-white">
                   {model.name} - {model.tag}
                 </option>

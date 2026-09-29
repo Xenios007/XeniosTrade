@@ -10,7 +10,20 @@ every session. Times are UTC. Server logs are UTC+8 (Asia/Manila).
 
 ---
 
-## WHERE WE LEFT OFF  — as of 2026-09-20 (latest)
+## WHERE WE LEFT OFF  — as of 2026-09-25 (latest)
+
+### Scan "Internal Server Error" = remote FinGPT broken — 2026-09-25 22:40 (UTC+8)
+
+Every AI scan since **21:54:07** (last good run 21:53:59) failed for all 10 symbols with a bare "Internal Server Error". Cause: the **Analyst (and Risk, Manager) provider is `fingpt`**, reached at `https://llm.projxenios.trade/v1` (Cloudflare tunnel to the owner's Windows PC, `Start-FinGPT-Online.ps1`). Its `/health` says `ready` and `/v1/models` answers 200 with the key, but **every** `/v1/chat/completions` returns 500 in ~0.2 s (tested with the old and new Analyst templates and a plain non-JSON prompt), i.e. the process dies before generating: most likely a poisoned CUDA context. Not fixable from the VPS. **Owner: restart FinGPT on the PC** (close it, rerun `Start-FinGPT-Online.ps1`), or switch the Analyst/Risk/Manager to Codex/Claude in AI Models.
+
+The earlier uncommitted fix (`runAiScanCycle`: don't advance `aiScanLastRunAt` on an `error` outcome, so a failed symbol retries next tick) WAS loaded (pm2 restarted 14:16 UTC after the 14:15 edit) — it only stops the lockout, not the 500.
+
+Added this session: `server/local-llm/server.py` now has an app-wide exception handler returning `{"error":{"message":"FinGPT failed: <Type>: <msg>"}}`, logs the traceback, and flips `/health` to `error` on a `CUDA error:` (so the UI stops showing it ready); loading/error responses use the OpenAI error shape. **Only syntax-checked** (no fastapi/torch on the VPS) and it needs copying to the PC + restart to take effect. `llm.js`: provider errors now read `<host>: HTTP 500 Internal Server Error` (and FastAPI `detail`). `npm test` 294/294, pm2 restarted.
+Terminal disconnects: no server-side idle timeout exists (TMOUT unset, sshd default ClientAlive, xrdp IdleTimeLimit=0) — drops are network/client side; run Claude inside `tmux` and set `ServerAliveInterval 30` on the SSH client.
+
+**Follow-up — "still no trade, check pipeline" — 2026-09-25 ~23:01 (UTC+8):** Confirmed fixed and not a bug. All 5 agents (`config.json`) were switched to `providerId: "claude"` (FinGPT tunnel is still down, `llm.projxenios.trade` -> Cloudflare 1033, but nothing routes there now). Since ~22:42 local the scan log shows clean real Claude analyses, all genuine reasoned HOLD (no errors). BTC/ETH/SOL/BNB then correctly went into the `swing` strategy's per-symbol cooldown (`minRunGapMs: 55 * 60_000`, `src/lib/aiTrading.js:197` — one real run per symbol per closed 1H candle even though the scan loop still ticks every 5 min), which is why scan-status/the history page freezes at ~10:46 PM ("Analysed less than 55 min ago") — that's the skip message, not a stall. Server stable (pm2 error log clean). Next real per-symbol analysis lands on the next closed 1H candle (~23:42-23:46 local).
+
+## Earlier WHERE WE LEFT OFF  — as of 2026-09-20
 
 ### Position Manager replaces the Decision Agent — 2026-09-20 (deployed, server restarted, first live review seen)
 

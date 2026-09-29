@@ -44,6 +44,9 @@ function AITrainingTabs() {
   )
 }
 
+// Bots 1-9 only: model-10 (Consolidated Knowledge) has its own separate environment/page and no shared AI-filter
+// config here; model-11..15 (the LLM-per-bot family) are hidden UI-wide for now (none enabled) - see
+// signalModels.js's SEPARATE_ENVIRONMENT_MODEL_IDS / HIDDEN_MODEL_IDS for the full reasoning.
 const BOT_LABELS = {
   'model-1': 'Bot 1',
   'model-2': 'Bot 2',
@@ -54,12 +57,6 @@ const BOT_LABELS = {
   'model-7': 'Bot 7',
   'model-8': 'Bot 8',
   'model-9': 'Bot 9 — Experimental',
-  'model-10': 'Bot 10 — Consolidated Knowledge',
-  'model-11': 'Bot Claude — Claude AI Trader',
-  'model-12': 'Bot GPT — GPT AI Trader',
-  'model-13': 'Bot Gemini — Gemini AI Trader',
-  'model-14': 'Bot Grok — Grok AI Trader',
-  'model-15': 'Bot OpenRouter — OpenRouter AI Trader',
 }
 
 const DEFAULT_FORM = {

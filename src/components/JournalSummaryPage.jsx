@@ -222,7 +222,7 @@ export function WalletJournalCalendar({ walletView, activeMonth, onMonthChange, 
 
             return (
               <div key={`${walletView.walletId}-${dateKey}`} className={`min-h-[110px] rounded-2xl border p-3 ${getCalendarTone(item)}`}>
-                <div className="flex items-start justify-between gap-2">
+                <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
                   <div className="text-sm font-semibold text-white">{day}</div>
                   {item ? (
                     <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400">

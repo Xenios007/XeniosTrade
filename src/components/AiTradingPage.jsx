@@ -247,7 +247,10 @@ function HistoryTab({ runs, scanLog, loading, error, scanStatus, scanEnabled, ex
               : 'Nothing matches this filter.'}
         </div>
       ) : (
-        <div className="grid gap-2">
+        // grid-cols-1 (not bare `grid`): without an explicit track, a row wider than the list (badges + reason text on one
+        // line) grows the implicit column past the container instead of wrapping - the row visibly overflows the card.
+        // minmax(0, 1fr) gives the column a real width ceiling, so flex-wrap inside each row can actually engage.
+        <div className="grid grid-cols-1 gap-2">
           {paginationControls}
           {pageItems.map((item) => {
             if (item.kind === 'scan') {
