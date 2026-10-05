@@ -456,10 +456,12 @@ function Verdict({ run, execution, onExecuted, liveTrade, livePrices = {} }) {
 
 export function AiTradingRunReport({ run, running = false, execution = null, config = null, onExecuted = null, trades = [], livePrices = {} }) {
   const liveTrade = run?.execution?.tradeId ? trades.find((item) => item.id === run.execution.tradeId) || null : null
-  // A completed run records its own strategy tag (aiStrategyTag at the time it ran), which is
-  // the correct source for a historical run even if today's live config has since changed; a
-  // still-running or not-yet-started call falls back to the live config.
-  const lean = run ? Boolean(run.strategy?.includes('lean')) : Boolean(config?.strategy?.lean)
+  // The Pipeline tab's latest-run view passes `config`, and should track today's setting the same
+  // way "Run the pipeline" above it does - a lean toggle takes effect immediately, it doesn't wait
+  // for the next run. Run History's call site deliberately omits `config`, so a past run falls
+  // back to its own recorded strategy tag (aiStrategyTag at the time it ran) instead, which is the
+  // correct source there even if today's live config has since changed.
+  const lean = config ? Boolean(config.strategy?.lean) : Boolean(run?.strategy?.includes('lean'))
   return (
     <div className="grid gap-6">
       {run && !running ? <Verdict run={run} execution={execution} onExecuted={onExecuted} liveTrade={liveTrade} livePrices={livePrices} /> : null}
