@@ -1,4 +1,5 @@
-import { Check, Loader2, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Check, ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react'
 import { AI_TRADING_AGENTS, activeAiTradingAgentIds } from '../lib/aiTrading'
 import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
 import { getTradePnlAmount, getTradeRoiPercent, isTradeOpen } from '../lib/trades'
@@ -217,14 +218,14 @@ function StageCard({ agent, stage, running }) {
   )
 }
 
-// The slider thumb/track colour at the current stage, and whether it should pulse (still
-// in progress at that stage, vs. settled/done there).
+// The live indicator's colour at the current stage, its caption, and whether it should pulse
+// (still in progress there, vs. settled/done).
 const STAGE_TONE = {
-  running: { track: 'bg-sky-400', thumb: 'bg-sky-400', pulse: true },
-  rejected: { track: 'bg-rose-400', thumb: 'bg-rose-400', pulse: false },
-  approved: { track: 'bg-emerald-400', thumb: 'bg-emerald-400', pulse: false },
-  watching: { track: 'bg-sky-400', thumb: 'bg-sky-400', pulse: true },
-  closed: { track: 'bg-slate-500', thumb: 'bg-slate-500', pulse: false },
+  running: { dot: 'bg-sky-400', ring: 'ring-sky-400/60', caption: 'Running', pulse: true },
+  rejected: { dot: 'bg-rose-400', ring: 'ring-rose-400/60', caption: 'Stopped here', pulse: false },
+  approved: { dot: 'bg-emerald-400', ring: 'ring-emerald-400/60', caption: 'Approved', pulse: false },
+  watching: { dot: 'bg-sky-400', ring: 'ring-sky-400/60', caption: 'Watching', pulse: true },
+  closed: { dot: 'bg-slate-400', ring: 'ring-slate-400/60', caption: 'Done', pulse: false },
 }
 
 /**
@@ -251,32 +252,84 @@ function currentStageIndex(agents, { run, running, trade }) {
   return { index: 0, tone: 'rejected' }
 }
 
-function SliderFlow({ agents, run, running, trade }) {
-  const { index, tone } = currentStageIndex(agents, { run, running, trade })
+/**
+ * A carousel, one agent's full stage detail in view at a time, like Bootstrap's: a sliding track,
+ * dot indicators, and prev/next arrows. It opens on wherever the pipeline currently is (see
+ * currentStageIndex) and re-snaps there whenever that live position moves - a run getting
+ * approved, a trade opening - but a click on another dot or arrow is free to look around in the
+ * meantime without fighting the live position on every render.
+ */
+function AgentCarousel({ agents, stageFor, isRunning, liveIndex, liveTone }) {
+  const [selected, setSelected] = useState(liveIndex)
+
+  useEffect(() => { setSelected(liveIndex) }, [liveIndex])
+
   const total = agents.length
-  const percent = total > 1 ? (index / (total - 1)) * 100 : 0
-  const { track, thumb, pulse } = STAGE_TONE[tone]
+  const goTo = (index) => setSelected(Math.max(0, Math.min(total - 1, index)))
 
   return (
-    <div className="px-1">
-      <div className="relative h-1.5 w-full rounded-full bg-white/10">
-        <div className={`absolute left-0 top-0 h-full rounded-full transition-all duration-500 ${track}`} style={{ width: `${percent}%` }} />
-        <div
-          className={`absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-950 shadow transition-all duration-500 ${thumb} ${pulse ? 'animate-pulse' : ''}`}
-          style={{ left: `${percent}%` }}
-        />
+    <div className="grid gap-4">
+      <div className="flex items-center justify-center gap-2">
+        {agents.map((agent, index) => {
+          const isLive = index === liveIndex
+          return (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => goTo(index)}
+              title={agent.name}
+              aria-label={`Show ${agent.name}`}
+              aria-current={index === selected}
+              className={`h-2 rounded-full transition-all duration-300 ${index === selected ? 'w-6 bg-sky-400' : 'w-2 bg-white/20 hover:bg-white/35'} ${
+                isLive ? `ring-2 ring-offset-2 ring-offset-slate-950 ${STAGE_TONE[liveTone].ring} ${STAGE_TONE[liveTone].pulse ? 'animate-pulse' : ''}` : ''
+              }`}
+            />
+          )
+        })}
       </div>
-      <div className="mt-3 flex items-start">
-        {agents.map((agent, agentIndex) => (
-          <div key={agent.id} className="flex flex-col items-center gap-0.5 text-center" style={{ width: `${100 / total}%` }}>
-            <span className={`text-[11px] font-semibold leading-tight ${agentIndex <= index ? 'text-white' : 'text-slate-500'}`}>{agent.name}</span>
-            {agentIndex === index ? (
-              <span className="text-[10px] uppercase tracking-[0.12em] text-slate-500">
-                {running ? 'Running' : tone === 'watching' ? 'Watching' : tone === 'closed' ? 'Done' : tone === 'rejected' ? 'Stopped here' : 'Approved'}
-              </span>
-            ) : null}
+
+      <div className="relative">
+        <div className="overflow-hidden rounded-2xl">
+          <div className="flex transition-transform duration-500 ease-out" style={{ transform: `translateX(-${selected * 100}%)` }}>
+            {agents.map((agent) => (
+              <div key={agent.id} className="w-full shrink-0 px-0.5">
+                <StageCard agent={agent} stage={stageFor(agent)} running={isRunning(agent)} />
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+        {total > 1 ? (
+          <>
+            <button
+              type="button"
+              onClick={() => goTo(selected - 1)}
+              disabled={selected === 0}
+              aria-label="Previous agent"
+              className="absolute left-0 top-1/2 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-slate-950/90 text-slate-300 shadow transition hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => goTo(selected + 1)}
+              disabled={selected === total - 1}
+              aria-label="Next agent"
+              className="absolute right-0 top-1/2 flex h-8 w-8 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full border border-white/10 bg-slate-950/90 text-slate-300 shadow transition hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </>
+        ) : null}
+      </div>
+
+      <div className="flex items-center justify-center gap-2 text-xs">
+        <span className="font-semibold text-white">{agents[selected]?.name}</span>
+        {selected === liveIndex ? (
+          <span className={`inline-flex items-center gap-1.5 rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-300`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${STAGE_TONE[liveTone].dot} ${STAGE_TONE[liveTone].pulse ? 'animate-pulse' : ''}`} />
+            {STAGE_TONE[liveTone].caption} - pipeline is here
+          </span>
+        ) : null}
       </div>
     </div>
   )
@@ -305,16 +358,10 @@ export function PipelineFlow({ run, running, trade = null, lean = false }) {
   const stageFor = (agent) => (agent.id === 'manager' ? managerStageFor(run, trade) : run?.stages.find((item) => item.id === agent.id))
   // While a run is in progress the entry-stage agents show as running; the Position Manager only starts after entry.
   const isRunning = (agent) => running && agent.id !== 'manager'
+  const { index: liveIndex, tone: liveTone } = currentStageIndex(agents, { run, running, trade })
 
   return (
-    <div className="grid gap-5">
-      <SliderFlow agents={agents} run={run} running={running} trade={trade} />
-      <div className="grid gap-4 lg:grid-cols-2">
-        {agents.map((agent) => (
-          <StageCard key={agent.id} agent={agent} stage={stageFor(agent)} running={isRunning(agent)} />
-        ))}
-      </div>
-    </div>
+    <AgentCarousel agents={agents} stageFor={stageFor} isRunning={isRunning} liveIndex={liveIndex} liveTone={liveTone} />
   )
 }
 
