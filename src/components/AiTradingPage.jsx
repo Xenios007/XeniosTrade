@@ -39,14 +39,20 @@ async function requestJson(url, options) {
   return payload
 }
 
-export function AgentAssignmentStrip({ config, settings, localLogins }) {
+// `hideUnused`: on the Settings page (default, false) every agent shows, dimmed with a "Not
+// used (3-agent)" badge when the lean pipeline skips it - useful there since you may still want
+// to configure Flow/Critic ahead of switching lean off. On the Pipeline run page (hideUnused),
+// the strip instead shows only the agents this run would actually call: 3 under lean, 5 otherwise.
+export function AgentAssignmentStrip({ config, settings, localLogins, hideUnused = false }) {
   const status = settings?.aiProviderCredentialStatus || {}
   const credentials = settings?.aiProviderCredentials || {}
   const activeAgents = activeAiTradingAgentIds(config)
+  const agentIds = hideUnused ? AI_TRADING_LLM_AGENT_IDS.filter((id) => activeAgents.includes(id)) : AI_TRADING_LLM_AGENT_IDS
+  const columns = agentIds.length <= 3 ? 'xl:grid-cols-3' : 'xl:grid-cols-5'
 
   return (
-    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-      {AI_TRADING_LLM_AGENT_IDS.map((agentId) => {
+    <div className={`grid gap-2 sm:grid-cols-2 ${columns}`}>
+      {agentIds.map((agentId) => {
         const agent = AI_TRADING_AGENTS.find((item) => item.id === agentId)
         const assignment = config?.agents?.[agentId]
         const provider = getAiProvider(assignment?.providerId)
@@ -118,9 +124,12 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
               className="w-44 rounded-full border border-white/10 bg-slate-950/70 px-3.5 py-1.5 text-xs text-white outline-none placeholder:text-slate-600"
             />
           </div>
-          <AgentAssignmentStrip config={config} settings={settings} localLogins={localLogins} />
+          <AgentAssignmentStrip config={config} settings={settings} localLogins={localLogins} hideUnused />
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Up to four LLM calls per run (Analyst, Market Flow, Critic, Risk Manager) — fewer when an earlier stage already ends it. Once a trade is open, the Position Manager re-reviews it every 5 minutes (one call per open trade). Provider and model per agent are set on the{' '}
+            {config?.strategy?.lean
+              ? 'Up to two LLM calls per run (Analyst, Risk Manager) — fewer when the Analyst already ends it with HOLD.'
+              : 'Up to four LLM calls per run (Analyst, Market Flow, Critic, Risk Manager) — fewer when an earlier stage already ends it.'}
+            {' '}Once a trade is open, the Position Manager re-reviews it every 5 minutes (one call per open trade). Provider and model per agent are set on the{' '}
             <Link to="/ai-models/agents" className="text-sky-300 hover:underline">AI Models</Link> page. Nothing is ordered unless an approved run is opened on an AI wallet.
           </p>
           {error ? (
