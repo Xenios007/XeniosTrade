@@ -1509,6 +1509,43 @@ test('risk manager: is told the profit goal with concrete numbers, and that it m
   assert.doesNotMatch(riskNoCap.userPrompt, /Example at the/)
 })
 
+// ---- Desired leverage (advisory, never a ceiling) -----------------------------------------------------------------------
+
+test('config: leveragePreference defaults to 5, is bounded 1-20, and always has a value (no off state)', () => {
+  const read = (execution) => normalizeAiTradingConfig({ execution }).execution.leveragePreference
+  assert.equal(read({}), 5, 'default preference is 5x')
+  assert.equal(read({ leveragePreference: 12 }), 12)
+  assert.equal(read({ leveragePreference: 0 }), 1, 'clamped to the 1x floor, not turned off')
+  assert.equal(read({ leveragePreference: 50 }), 20, 'clamped to the 20x ceiling')
+  assert.equal(read({ leveragePreference: 'x' }), 5, 'garbage falls back to the default')
+})
+
+test('risk manager: is told the leverage preference, and that it is not a requirement', async () => {
+  const withPreference = normalizeAiTradingConfig({ execution: { leveragePreference: 8 } })
+  const fake = fakeAgents()
+  let risk = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: withPreference, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    getTradeConstraints: async () => ({ mode: 'real', minOrderUsdt: 5, marginCapUsdt: 40, availableUsdt: 40, openPositions: [] }),
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.match(risk.userPrompt, /The account owner's preferred leverage is around 8x - not a requirement/)
+  assert.match(risk.userPrompt, /Use it when the setup supports it/)
+})
+
+test('risk manager: at the 1x floor the leverage preference line still appears (only a config error turns it off)', async () => {
+  const atFloor = normalizeAiTradingConfig({ execution: { leveragePreference: 1 } })
+  const fake = fakeAgents()
+  let risk = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: atFloor, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.match(risk.userPrompt, /preferred leverage is around 1x/)
+})
+
 test('daily limits: 0 = off for all three lets automatic real trading continue without a daily stop', async () => {
   const { dailyStatus, manilaDay } = await import('../server/ai-trading/daily-limits.js')
   const now = Date.now()

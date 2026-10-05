@@ -586,6 +586,17 @@ function profitGoalLines({ target, constraints, limits }) {
   return lines
 }
 
+/**
+ * Advisory only, never enforced: the account owner's stated leverage preference (execution.leveragePreference).
+ * Same treatment as profitGoalLines - a concrete number for the Risk Manager to reason toward, not a ceiling it
+ * must hit or a floor it must clear; a weak or uncertain setup should still use low leverage even if that's well
+ * under this number.
+ */
+function leveragePreferenceLines({ preference }) {
+  if (!(preference > 0)) return []
+  return [`- The account owner's preferred leverage is around ${preference}x - not a requirement. Use it when the setup supports it; a weak or uncertain setup should still use lower leverage even if that means not reaching this.`]
+}
+
 function portfolioLines({ constraints }) {
   if (!constraints) return []
   const lines = []
@@ -625,7 +636,7 @@ function constraintLines({ constraints, baseline, limits, symbol }) {
   return lines
 }
 
-function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0, lean = false }) {
+function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMode = false, activeMode = false, constraints = null, flowMetrics = null, targetProfitUsdt = 0, leveragePreference = 0, lean = false }) {
   const atrFloorPct = limits.minStopAtrMultiple * snapshot.atrPct
   const baseline = mechanicalBaselinePlan({
     side: analyst.action,
@@ -665,6 +676,7 @@ function riskPrompts({ snapshot, analyst, flow, backtest, critic, limits, testMo
         ? `stop ${baseline.plan.stopLossPct}%, target ${baseline.plan.takeProfitPct}%, ${baseline.plan.leverage}x, risking ${baseline.plan.maxLossUsdt} USDT`
         : `a veto (${baseline.vetoReasons.join(' ')})`}. That is what a bot's fixed formula gives you; you are not a bot — use it as one data point, not a template.`,
       ...profitGoalLines({ target: targetProfitUsdt, constraints, limits }),
+      ...leveragePreferenceLines({ preference: leveragePreference }),
       ...portfolioLines({ constraints }),
       ...describeRiskEvidence({ evidence: constraints?.evidence, side: analyst.action, stopPct: analyst.stopLossPercent, targetPct: analyst.takeProfitPercent, flowMetrics, maxLeverage: limits.maxLeverage }),
       '',
@@ -942,7 +954,7 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     id: 'risk',
     agentConfig: config.agents.risk,
     callAgent,
-    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics, targetProfitUsdt: config.execution?.targetProfitPerTradeUsdt, lean }),
+    prompts: riskPrompts({ snapshot, analyst, flow, backtest, critic, limits: riskLimits, testMode: config.scan?.testMode === true, activeMode: config.scan?.activeMode === true, constraints, flowMetrics: flowData?.metrics, targetProfitUsdt: config.execution?.targetProfitPerTradeUsdt, leveragePreference: config.execution?.leveragePreference, lean }),
     parse: parseRiskProposal,
   })
   const riskProposal = riskStage.output

@@ -61,13 +61,14 @@ const draftFromExecution = (execution) => ({
   dailyMaxLossUsdt: String(execution.dailyMaxLossUsdt ?? 0),
   dailyMaxTrades: String(execution.dailyMaxTrades ?? 0),
   targetProfitPerTradeUsdt: String(execution.targetProfitPerTradeUsdt ?? 0),
+  leveragePreference: String(execution.leveragePreference ?? AI_TRADING_EXECUTION_LIMITS.leveragePreference.min),
 })
 
 export function AiSettingsPage({ settings }) {
   const [config, setConfig] = useState(null)
   const [scanStatus, setScanStatus] = useState(null)
   const [localLogins, setLocalLogins] = useState(null)
-  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '', dailyProfitTargetUsdt: '', dailyMaxLossUsdt: '', dailyMaxTrades: '', targetProfitPerTradeUsdt: '' })
+  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '', dailyProfitTargetUsdt: '', dailyMaxLossUsdt: '', dailyMaxTrades: '', targetProfitPerTradeUsdt: '', leveragePreference: '' })
   const [daily, setDaily] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -515,10 +516,25 @@ export function AiSettingsPage({ settings }) {
                 className="w-44 rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-white outline-none"
               />
             </label>
+            <label className="grid min-w-[220px] gap-1 text-xs text-slate-400">
+              <span className="flex items-center justify-between gap-2">
+                {limits.leveragePreference.label}
+                <span className="text-sm font-semibold text-white">{draft.leveragePreference || limits.leveragePreference.min}x</span>
+              </span>
+              <input
+                type="range"
+                min={limits.leveragePreference.min}
+                max={limits.leveragePreference.max}
+                step={limits.leveragePreference.step}
+                value={draft.leveragePreference || limits.leveragePreference.min}
+                onChange={(event) => setDraft((current) => ({ ...current, leveragePreference: event.target.value }))}
+                className="h-1.5 w-full cursor-pointer accent-sky-400"
+              />
+            </label>
             <button
               type="button"
               disabled={busy}
-              onClick={() => saveExecution({ realMaxMarginUsdt: Number(draft.realMaxMarginUsdt), targetProfitPerTradeUsdt: Number(draft.targetProfitPerTradeUsdt) }, 'Real money margin cap and target profit saved.')}
+              onClick={() => saveExecution({ realMaxMarginUsdt: Number(draft.realMaxMarginUsdt), targetProfitPerTradeUsdt: Number(draft.targetProfitPerTradeUsdt), leveragePreference: Number(draft.leveragePreference) }, 'Real money margin cap, target profit and leverage preference saved.')}
               className="rounded-full bg-sky-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
             >
               Save
@@ -530,6 +546,8 @@ export function AiSettingsPage({ settings }) {
           <div className="text-[11px] leading-relaxed text-slate-500">
             Target profit per trade is a goal stated to the Risk Manager, not a code rule: it sizes riskPercent, leverage and the take-profit percent toward roughly
             that USDT amount on a winning trade, but a weak or uncertain setup is still sized small (or vetoed) even if that misses the goal. 0 = no goal stated.
+            Desired leverage works the same way - it's guidance, not a ceiling the code enforces: the Risk Manager still picks the final leverage itself, and a weak
+            or uncertain setup is still sized down (lower leverage) even if that falls short of this number.
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

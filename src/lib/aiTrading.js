@@ -114,6 +114,10 @@ export const AI_TRADING_EXECUTION_LIMITS = {
   // Guidance for the Risk Manager, not enforced in code (see profitGoalLines in pipeline.js): a target USDT profit on a
   // winning trade. It reasons toward it with its own riskPercent/leverage/takeProfitPercent, inside the usual ceilings.
   targetProfitPerTradeUsdt: { min: 0, max: 10_000, step: 0.1, label: 'Target profit per trade (USDT, 0 = off)' },
+  // Same kind of guidance (see leveragePreferenceLines in pipeline.js): the account owner's own stated leverage
+  // preference. The Risk Manager still picks the final leverage itself - a weak or uncertain setup still gets sized
+  // low even if that's well under this number; nothing in code raises, caps or enforces it.
+  leveragePreference: { min: 1, max: 20, step: 1, label: 'Desired leverage (x)' },
 }
 
 export const DEFAULT_AI_TRADING_EXECUTION = {
@@ -136,6 +140,10 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   // The Risk Manager is told to aim for roughly this much USDT profit on a winning trade (0 = no goal stated). Purely
   // advisory - it never raises a ceiling, never overrides the model's own risk judgement, and is not enforced in code.
   targetProfitPerTradeUsdt: 1,
+  // The account owner's stated leverage preference, shown to the Risk Manager as guidance alongside the profit goal -
+  // same "advisory, never enforced" treatment. Matches config.risk.maxLeverage's own default so a fresh account's
+  // stated preference starts in line with the reference number already shown in the prompt.
+  leveragePreference: 5,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -313,6 +321,7 @@ export function normalizeAiTradingConfig(raw) {
     dailyMaxLossUsdt: Math.round(clampNumber(executionSource.dailyMaxLossUsdt, AI_TRADING_EXECUTION_LIMITS.dailyMaxLossUsdt, 0) * 100) / 100,
     dailyMaxTrades: Math.round(clampNumber(executionSource.dailyMaxTrades, AI_TRADING_EXECUTION_LIMITS.dailyMaxTrades, 0)),
     targetProfitPerTradeUsdt: Math.round(clampNumber(executionSource.targetProfitPerTradeUsdt, AI_TRADING_EXECUTION_LIMITS.targetProfitPerTradeUsdt, DEFAULT_AI_TRADING_EXECUTION.targetProfitPerTradeUsdt) * 100) / 100,
+    leveragePreference: Math.round(clampNumber(executionSource.leveragePreference, AI_TRADING_EXECUTION_LIMITS.leveragePreference, DEFAULT_AI_TRADING_EXECUTION.leveragePreference)),
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,
