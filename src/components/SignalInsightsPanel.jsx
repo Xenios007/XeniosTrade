@@ -12,13 +12,6 @@ const BOT_LABELS = {
   'model-6': 'Bot 6',
   'model-7': 'Bot 7',
   'model-8': 'Bot 8',
-  'model-9': 'Bot 9 — Experimental',
-  'model-10': 'Consolidated Knowledge',
-  'model-11': 'Bot Claude — Claude AI Trader',
-  'model-12': 'Bot GPT — GPT AI Trader',
-  'model-13': 'Bot Gemini — Gemini AI Trader',
-  'model-14': 'Bot Grok — Grok AI Trader',
-  'model-15': 'Bot OpenRouter — OpenRouter AI Trader',
 }
 
 const VERDICT_STYLES = {

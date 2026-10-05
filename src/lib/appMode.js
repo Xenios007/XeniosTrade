@@ -52,8 +52,6 @@ export const SECTIONS_BY_MODE = {
 
 export const AI_MODELS_TAB_PATHS = {
   [APP_MODE_AI]: ['/ai-models', '/ai-models/browse', '/ai-models/agents'],
-  // '/ai-models/bots' (LLM Trading Bots 11-15) is hidden for now - none are enabled and their environment is being
-  // reworked; see signalModels.js's HIDDEN_MODEL_IDS.
   [APP_MODE_BOT]: ['/ai-models'],
 }
 

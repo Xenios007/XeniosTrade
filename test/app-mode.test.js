@@ -63,8 +63,6 @@ test('Bot workspace nav has the bot pages and no AI Trading', () => {
   for (const p of ['/dashboard', '/mock-trading', '/trade-history', '/journal', '/ai-training', '/wallets', '/settings']) {
     assert.ok(all.includes(p), `${p} missing from bot nav`)
   }
-  // '/ai-models/bots' (LLM Trading Bots 11-15) is hidden for now, same as the wallets/pickers those bots would
-  // otherwise show up in - see signalModels.js's HIDDEN_MODEL_IDS.
   const models = flatten(groups).find((item) => item.to === '/ai-models')
   assert.deepEqual(models.children.map((c) => c.to), ['/ai-models'])
   assert.ok(all.includes('/consolidated-knowledge'), 'Consolidated Knowledge missing from bot nav')
@@ -74,7 +72,7 @@ test('the apex workspace still shows everything', () => {
   const all = paths(getNavGroups('all'))
   assert.ok(all.includes('/ai-trading') && all.includes('/dashboard'))
   const models = flatten(getNavGroups('all')).find((item) => item.to === '/ai-models')
-  assert.equal(models.children.length, 4)
+  assert.equal(models.children.length, 3)
 })
 
 test('a saved path from the other workspace falls back to this one\'s home', () => {

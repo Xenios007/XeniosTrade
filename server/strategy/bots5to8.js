@@ -13,11 +13,6 @@
 // trade preserves which bot and hypothesis produced it.
 
 import { _internals } from '../backtest/feature-lib.js'
-import { buildBotClaudeSignalSnapshot } from './bot-claude.js'
-import { buildBotGptSignalSnapshot } from './bot-gpt.js'
-import { buildBotGeminiSignalSnapshot } from './bot-gemini.js'
-import { buildBotGrokSignalSnapshot } from './bot-grok.js'
-import { buildBotOpenrouterSignalSnapshot } from './bot-openrouter.js'
 import { finiteSeries, indicatorBundle, lastOf, notReady, num, sizeAndShape } from './shared-signals.js'
 
 const { emaSeries, rsiSeries, atrSeries, mean } = _internals
@@ -276,52 +271,14 @@ export function buildBot8SignalSnapshot({ symbol, signalModel, effectiveStrategy
   })
 }
 
-// ---- Bot 9 — EXPERIMENTAL HIGH-PRECISION TREND PULLBACK -----------------
-// This mirrors the fixed hp_r2_10_v100_t10_s20 study specification. It is
-// explicitly testnet-only because that study failed validation despite a
-// favourable holdout slice.
-export function buildBot9SignalSnapshot({ symbol, signalModel, effectiveStrategy, closedBiasTimeframe, regime4hTimeframe = null }) {
-  const bias=closedBiasTimeframe, four=Array.isArray(regime4hTimeframe)?regime4hTimeframe:[]
-  if(bias.length<50||four.length<200)return notReady(symbol,signalModel,effectiveStrategy,lastOf(bias)?.close??null,'Bot 9 waiting for completed 1H / 4H history.')
-  const price=num(lastOf(bias)?.close), prev=bias[bias.length-2], closes=bias.map(x=>x.close), fourCloses=four.map(x=>x.close)
-  const e50=num(lastOf(finiteSeries(emaSeries(fourCloses,50)))),e200=num(lastOf(finiteSeries(emaSeries(fourCloses,200))))
-  const r2=num(lastOf(finiteSeries(rsiSeries(closes,2))),50), a=num(lastOf(finiteSeries(atrSeries(bias,14))),price*.003)
-  const cur=lastOf(bias), avgVol=mean(bias.slice(-21,-1).map(x=>x.volume)), buyRatio=cur.volume>0?num(cur.takerBuyBaseVolume)/num(cur.volume):.5
-  const long=[e50>e200,r2<=10,cur.volume>=avgVol,buyRatio>=.5,cur.close>cur.open&&cur.close>prev?.close]
-  const short=[e50<e200,100-r2<=10,cur.volume>=avgVol,buyRatio<=.5,cur.close<cur.open&&cur.close<prev?.close]
-  const ls=long.filter(Boolean).length,ss=short.filter(Boolean).length
-  const direction=ls===5?'LONG':ss===5?'SHORT':null
-  if(!direction)return notReady(symbol,signalModel,effectiveStrategy,price,`Bot 9 experimental watch: L${ls}/5 S${ss}/5; requires completed 4H trend, RSI(2), volume, flow, and reclaim.`)
-  const stopDist=Math.max(2*a,price*.002),targetDist=Math.max(a,price*.001)
-  const stopLoss=direction==='LONG'?price-stopDist:price+stopDist,takeProfit=direction==='LONG'?price+targetDist:price-targetDist
-  return sizeAndShape({symbol,signalModel,effectiveStrategy,direction,entryPrice:price,stopLoss,takeProfit,score:5,maxScore:5,
-    summary:`Bot 9 experimental ${direction.toLowerCase()}: 4H EMA trend, 1H RSI(2) ${r2.toFixed(1)}, relVol ${(cur.volume/Math.max(avgVol,1)).toFixed(2)}, taker ${(buyRatio*100).toFixed(1)}%. Validation-rejected research; testnet observation only.`,strategyFamily:'trend-pullback-reversion',setupFamily:direction==='LONG'?'Bull trend exhaustion reclaim':'Bear trend exhaustion reclaim',aiFeatures:{rsi2:r2,relVolume:cur.volume/Math.max(avgVol,1),takerBuyRatio:buyRatio,ema4hGap:(e50-e200)/price}})
-}
-
-// Bot 10 is intentionally executed by consolidated-bot.js, which ranks all
-// Bot 1–8 candidates globally and owns separate exchange protections. This
-// placeholder lets Wallet 10 appear with the other bots without creating a
-// second, conflicting execution path in the regular wallet scanner.
-export function buildBot10SignalSnapshot({ symbol, signalModel, effectiveStrategy, closedEntryTimeframe }) {
-  return notReady(symbol,signalModel,effectiveStrategy,lastOf(closedEntryTimeframe)?.close??null,'Bot 10 ranks Bots 1–8 through its dedicated consolidated selector and separate testnet controls. Open Bot 10 from Signal Models to inspect or manage it.')
-}
-
+// Bots 9-15 (the validation-rejected Bot 9 trend-pullback experiment, the old Bot 10
+// consolidated placeholder, and the LLM-per-bot family 11-15) were removed outright - no
+// trade history existed for any of them. Consolidated Knowledge continues unaffected as its
+// own standalone feature (consolidated-bot.js / ConsolidatedBotPage.jsx), unrelated to the
+// placeholder that used to sit here.
 export const BOT5TO8_BUILDERS = {
   'model-5': buildBot5SignalSnapshot,
   'model-6': buildBot6SignalSnapshot,
   'model-7': buildBot7SignalSnapshot,
   'model-8': buildBot8SignalSnapshot,
-  'model-9': buildBot9SignalSnapshot,
-  'model-10': buildBot10SignalSnapshot,
-  // Bots 11-15 "Bot Claude / GPT / Gemini / Grok / OpenRouter" — the entry
-  // decision comes from a live LLM API call (see llm-trading-engine.js and
-  // each bot-<name>.js), not a technical rule set. Every builder here stays
-  // synchronous: it only reads the latest cached decision, which
-  // mock-trading-server.js refreshes asynchronously (once per closed
-  // candle) before this dispatch runs.
-  'model-11': buildBotClaudeSignalSnapshot,
-  'model-12': buildBotGptSignalSnapshot,
-  'model-13': buildBotGeminiSignalSnapshot,
-  'model-14': buildBotGrokSignalSnapshot,
-  'model-15': buildBotOpenrouterSignalSnapshot,
 }

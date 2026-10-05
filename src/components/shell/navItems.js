@@ -97,7 +97,6 @@ export const NAV_GROUPS = [
         children: [
           { to: '/ai-models', label: 'Providers & Keys' },
           { to: '/ai-models/browse', label: 'Browse Models' },
-          { to: '/ai-models/bots', label: 'Bot Assignments' },
           { to: '/ai-models/agents', label: 'Agent Assignments' },
         ],
       },

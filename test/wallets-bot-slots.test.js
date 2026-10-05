@@ -4,11 +4,11 @@ import {
   applyBotSlotLocks, buildDefaultWallets, getUnlockedBotWalletIds, visibleTradingWallets,
 } from '../src/lib/wallets.js'
 
-test('visibleTradingWallets gives exactly the 9 sellable bot wallets, in order', () => {
+test('visibleTradingWallets gives exactly the 8 sellable bot wallets, in order', () => {
   const ids = visibleTradingWallets(buildDefaultWallets()).map((wallet) => wallet.id)
   assert.deepEqual(ids, [
     'wallet-model-1', 'wallet-model-2', 'wallet-model-3', 'wallet-model-4', 'wallet-model-5',
-    'wallet-model-6', 'wallet-model-7', 'wallet-model-8', 'wallet-model-9',
+    'wallet-model-6', 'wallet-model-7', 'wallet-model-8',
   ])
 })
 
@@ -16,9 +16,9 @@ test('getUnlockedBotWalletIds caps to the first N sellable wallets, in wallet-mo
   const wallets = buildDefaultWallets()
   assert.deepEqual(getUnlockedBotWalletIds(wallets, 0), [])
   assert.deepEqual(getUnlockedBotWalletIds(wallets, 3), ['wallet-model-1', 'wallet-model-2', 'wallet-model-3'])
-  assert.equal(getUnlockedBotWalletIds(wallets, 9).length, 9, 'all 9 unlocked at the full count')
-  assert.equal(getUnlockedBotWalletIds(wallets, 50).length, 9, 'capping past the sellable count is a no-op')
-  assert.equal(getUnlockedBotWalletIds(wallets, Infinity).length, 9, 'Infinity (admin) unlocks everything sellable')
+  assert.equal(getUnlockedBotWalletIds(wallets, 8).length, 8, 'all 8 unlocked at the full count')
+  assert.equal(getUnlockedBotWalletIds(wallets, 50).length, 8, 'capping past the sellable count is a no-op')
+  assert.equal(getUnlockedBotWalletIds(wallets, Infinity).length, 8, 'Infinity (admin) unlocks everything sellable')
 })
 
 test('applyBotSlotLocks marks only the sellable wallets beyond the slot count as locked', () => {
@@ -28,11 +28,9 @@ test('applyBotSlotLocks marks only the sellable wallets beyond the slot count as
   assert.equal(byId['wallet-model-1'].locked, false)
   assert.equal(byId['wallet-model-2'].locked, false)
   assert.equal(byId['wallet-model-3'].locked, true)
-  assert.equal(byId['wallet-model-9'].locked, true)
-  // Bot 10 (separate environment), the hidden LLM bots 11-15, and the MAIN-kind wallets are
-  // never part of the sellable slot pool - always unlocked regardless of botSlots.
-  assert.equal(byId['wallet-model-10'].locked, false)
-  assert.equal(byId['wallet-model-11'].locked, false)
+  assert.equal(byId['wallet-model-8'].locked, true)
+  // The MAIN-kind wallets are never part of the sellable slot pool - always unlocked
+  // regardless of botSlots.
   assert.equal(byId['wallet-main'].locked, false)
   assert.equal(byId['wallet-real-money'].locked, false)
 })
@@ -84,10 +82,10 @@ test('getUnlockedBotWalletIds: no duplicate ids when both paths grant the same w
 })
 
 test('applyBotSlotLocks: ownedSignalIds unlocks the matching wallet even at botSlots 0', () => {
-  const locked = applyBotSlotLocks(buildDefaultWallets(), 0, ['model-9'])
+  const locked = applyBotSlotLocks(buildDefaultWallets(), 0, ['model-8'])
   const byId = Object.fromEntries(locked.map((wallet) => [wallet.id, wallet]))
-  assert.equal(byId['wallet-model-9'].locked, false)
-  assert.equal(byId['wallet-model-8'].locked, true)
+  assert.equal(byId['wallet-model-8'].locked, false)
+  assert.equal(byId['wallet-model-7'].locked, true)
 })
 
 test('getUnlockedBotWalletIds: an unrecognized/stale signal id in ownedSignalIds is simply a no-op, not an error', () => {

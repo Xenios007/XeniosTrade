@@ -4,7 +4,6 @@ import { AI_PROVIDERS, getAiProvider, isLocalLoginReady, isProviderConnected, is
 import { AI_TRADING_AGENTS, AI_TRADING_LLM_AGENT_IDS } from '../lib/aiTrading'
 import { APP_MODE, APP_MODE_AI, APP_MODE_BOT, isAiModelsTabVisible } from '../lib/appMode'
 import { AiModelsBrowser } from './AiModelsBrowser'
-import { getSignalModel } from '../lib/signalModels'
 import { Panel } from './Panel'
 import { Badge } from './ui/Badge'
 import { Modal } from './ui/Modal'
@@ -14,24 +13,13 @@ import { PageHeader } from './ui/PageHeader'
 const AI_MODELS_TABS = [
   { to: '/ai-models', label: 'Providers & Keys' },
   { to: '/ai-models/browse', label: 'Browse Models' },
-  { to: '/ai-models/bots', label: 'Bot Assignments' },
   { to: '/ai-models/agents', label: 'Agent Assignments' },
 ].filter((tab) => isAiModelsTabVisible(APP_MODE, tab.to))
 
 const AI_MODELS_DESCRIPTION = {
   [APP_MODE_AI]: "Connect any AI provider's API key and choose which model runs each AI Trading agent.",
-  [APP_MODE_BOT]: "Connect any AI provider's API key — five power a live trading bot, the rest are ready for later.",
+  [APP_MODE_BOT]: "Connect any AI provider's API key for the agents and features that use one.",
 }
-
-// The five bots that actually call a provider today (see docs/LLM_TRADING_BOTS.md).
-// Every other AI_PROVIDERS entry can still hold a key here for a future bot.
-const WIRED_BOTS = [
-  { providerId: 'anthropic', signalModelId: 'model-11', walletLabel: 'Wallet 11' },
-  { providerId: 'openai', signalModelId: 'model-12', walletLabel: 'Wallet 12' },
-  { providerId: 'google', signalModelId: 'model-13', walletLabel: 'Wallet 13' },
-  { providerId: 'xai', signalModelId: 'model-14', walletLabel: 'Wallet 14' },
-  { providerId: 'openrouter', signalModelId: 'model-15', walletLabel: 'Wallet 15' },
-]
 
 function AiModelsTabs() {
   return (
@@ -322,55 +310,6 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
   )
 }
 
-function BotAssignments({ settings }) {
-  const credentials = settings?.aiProviderCredentials || {}
-  const credentialStatus = settings?.aiProviderCredentialStatus || {}
-
-  return (
-    <Panel title="LLM Trading Bots">
-      <div className="mb-4 text-xs leading-relaxed text-slate-400">
-        Every bot below shares the same fixed BTC/ETH/SOL/BNB scan universe, schedule, confidence floor, and risk
-        budget — the only difference is which model answers. Configure a provider's key and model in
-        &nbsp;<span className="text-sky-300">Providers &amp; Keys</span>; it takes effect on the next scan cycle.
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {WIRED_BOTS.map(({ providerId, signalModelId, walletLabel }) => {
-          const provider = AI_PROVIDERS.find((item) => item.id === providerId)
-          const signalModel = getSignalModel(signalModelId)
-          const entry = credentials[providerId]
-          const status = credentialStatus[providerId]
-          const connected = Boolean(status?.present)
-
-          return (
-            <div key={signalModelId} className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-sm font-semibold text-white">{signalModel.name}</div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">{walletLabel} · {provider?.label}</div>
-                </div>
-                <span
-                  className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                    connected
-                      ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
-                      : 'border-amber-400/20 bg-amber-400/10 text-amber-200'
-                  }`}
-                >
-                  {connected ? 'Live' : 'Watching'}
-                </span>
-              </div>
-              <div className="mt-2 text-xs leading-relaxed text-slate-400">
-                {connected
-                  ? `Trading with ${entry?.model || 'its default model'}.`
-                  : 'No API key configured — stays in "watching" state and never trades.'}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </Panel>
-  )
-}
-
 // Which provider/model answers each AI Trading agent (the Analyst, Critic and
 // Position Manager). Stored server-side in server/data/ai-trading/config.json,
 // not in settings.json — see server/ai-trading/store.js.
@@ -556,7 +495,6 @@ export function AiModelsPage({ settings, onSave, saving, ready }) {
       <Routes>
         <Route path="/" element={<ProvidersAndKeys settings={settings} onSave={onSave} saving={saving} ready={ready} />} />
         {isAiModelsTabVisible(APP_MODE, '/ai-models/browse') ? <Route path="browse" element={<AiModelsBrowser settings={settings} />} /> : null}
-        {isAiModelsTabVisible(APP_MODE, '/ai-models/bots') ? <Route path="bots" element={<BotAssignments settings={settings} />} /> : null}
         {isAiModelsTabVisible(APP_MODE, '/ai-models/agents') ? <Route path="agents" element={<AgentAssignments settings={settings} />} /> : null}
         <Route path="*" element={<Navigate to="/ai-models" replace />} />
       </Routes>

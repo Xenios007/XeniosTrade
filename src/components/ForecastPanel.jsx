@@ -12,8 +12,6 @@ const BOT_LABELS = {
   'model-6': 'Bot 6',
   'model-7': 'Bot 7',
   'model-8': 'Bot 8',
-  'model-9': 'Bot 9',
-  'model-10': 'Consolidated Knowledge',
 }
 
 function formatHorizon(interval) {

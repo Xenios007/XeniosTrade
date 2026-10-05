@@ -44,9 +44,7 @@ function AITrainingTabs() {
   )
 }
 
-// Bots 1-9 only: model-10 (Consolidated Knowledge) has its own separate environment/page and no shared AI-filter
-// config here; model-11..15 (the LLM-per-bot family) are hidden UI-wide for now (none enabled) - see
-// signalModels.js's SEPARATE_ENVIRONMENT_MODEL_IDS / HIDDEN_MODEL_IDS for the full reasoning.
+// Bots 9-15 were removed outright (see signalModels.js) - only 1-8 remain.
 const BOT_LABELS = {
   'model-1': 'Bot 1',
   'model-2': 'Bot 2',
@@ -56,7 +54,6 @@ const BOT_LABELS = {
   'model-6': 'Bot 6',
   'model-7': 'Bot 7',
   'model-8': 'Bot 8',
-  'model-9': 'Bot 9 — Experimental',
 }
 
 const DEFAULT_FORM = {
@@ -95,13 +92,6 @@ const DEFAULT_FORM = {
     'model-6': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-7': { enabled: false, paperOnly: true, thresholdScore: 55 },
     'model-8': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-9': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-10': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-11': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-12': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-13': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-14': { enabled: false, paperOnly: true, thresholdScore: 55 },
-    'model-15': { enabled: false, paperOnly: true, thresholdScore: 55 },
   },
 }
 
