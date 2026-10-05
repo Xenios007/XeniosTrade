@@ -129,9 +129,9 @@ function PipelineTab({ config, settings, localLogins, latestRun, running, error,
         </div>
       </Panel>
 
-      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /> : (
+      {latestRun || running ? <AiTradingRunReport run={latestRun} running={running} execution={config?.execution} config={config} onExecuted={onExecuted} trades={trades} livePrices={livePrices} /> : (
         <Panel title="Pipeline">
-          <PipelineFlow run={null} running={false} />
+          <PipelineFlow run={null} running={false} lean={Boolean(config?.strategy?.lean)} />
         </Panel>
       )}
     </div>

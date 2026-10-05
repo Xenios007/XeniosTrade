@@ -1,5 +1,5 @@
-import { ArrowRight, Check, Loader2, X } from 'lucide-react'
-import { AI_TRADING_AGENTS } from '../lib/aiTrading'
+import { Check, Loader2, X } from 'lucide-react'
+import { AI_TRADING_AGENTS, activeAiTradingAgentIds } from '../lib/aiTrading'
 import { formatDateTimeWithSeconds, formatPrice } from '../lib/formatters'
 import { getTradePnlAmount, getTradeRoiPercent, isTradeOpen } from '../lib/trades'
 import { Badge } from './ui/Badge'
@@ -217,28 +217,67 @@ function StageCard({ agent, stage, running }) {
   )
 }
 
-const DOT_TONE = {
-  watching: 'bg-sky-400',
-  closed: 'bg-slate-500',
-  waiting: 'bg-slate-600',
-  ok: 'bg-emerald-400',
-  skipped: 'bg-slate-600',
-  error: 'bg-rose-400',
-  unconfigured: 'bg-amber-400',
-  pending: 'bg-sky-400 animate-pulse',
+// The slider thumb/track colour at the current stage, and whether it should pulse (still
+// in progress at that stage, vs. settled/done there).
+const STAGE_TONE = {
+  running: { track: 'bg-sky-400', thumb: 'bg-sky-400', pulse: true },
+  rejected: { track: 'bg-rose-400', thumb: 'bg-rose-400', pulse: false },
+  approved: { track: 'bg-emerald-400', thumb: 'bg-emerald-400', pulse: false },
+  watching: { track: 'bg-sky-400', thumb: 'bg-sky-400', pulse: true },
+  closed: { track: 'bg-slate-500', thumb: 'bg-slate-500', pulse: false },
 }
 
-function FlowNode({ label, tone = 'neutral', dot }) {
-  const toneClass = {
-    up: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
-    down: 'border-rose-400/30 bg-rose-400/10 text-rose-200',
-    neutral: 'border-white/10 bg-slate-950/60 text-slate-300',
-  }[tone]
+/**
+ * Where the pipeline currently is, as a 0-based index into `agents` (the active agents for this
+ * run - 3 under the lean pipeline, 5 otherwise). Matches the stages a run actually goes through:
+ * running -> sits at the Market Analyst; approved -> advances to the Risk Manager once it signs
+ * off; a trade opening or already open/closed -> advances to the Position Manager, since it now
+ * owns the trade. A rejected run stops at whichever stage actually made that call.
+ */
+function currentStageIndex(agents, { run, running, trade }) {
+  if (running || !run) return { index: 0, tone: 'running' }
+  if (trade) return { index: agents.length - 1, tone: trade.status === 'OPEN' ? 'watching' : 'closed' }
+  if (run.final?.approved) {
+    const riskIndex = agents.findIndex((agent) => agent.id === 'risk')
+    return { index: riskIndex >= 0 ? riskIndex : agents.length - 1, tone: 'approved' }
+  }
+  // Rejected: find the last active entry-stage agent (excluding the Position Manager) that
+  // actually ran - skipped itself doesn't count (an earlier stage already ended the run, e.g.
+  // the Analyst returning HOLD skips everything after it) - that is as far as it got.
+  for (let i = agents.length - 2; i >= 0; i -= 1) {
+    const stage = run.stages?.find((item) => item.id === agents[i].id)
+    if (stage && stage.status !== 'skipped') return { index: i, tone: 'rejected' }
+  }
+  return { index: 0, tone: 'rejected' }
+}
+
+function SliderFlow({ agents, run, running, trade }) {
+  const { index, tone } = currentStageIndex(agents, { run, running, trade })
+  const total = agents.length
+  const percent = total > 1 ? (index / (total - 1)) * 100 : 0
+  const { track, thumb, pulse } = STAGE_TONE[tone]
 
   return (
-    <div className={`flex items-center gap-2 rounded-full border px-3.5 py-2 text-xs font-semibold ${toneClass}`}>
-      {dot ? <span className={`h-2 w-2 rounded-full ${dot}`} /> : null}
-      {label}
+    <div className="px-1">
+      <div className="relative h-1.5 w-full rounded-full bg-white/10">
+        <div className={`absolute left-0 top-0 h-full rounded-full transition-all duration-500 ${track}`} style={{ width: `${percent}%` }} />
+        <div
+          className={`absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-950 shadow transition-all duration-500 ${thumb} ${pulse ? 'animate-pulse' : ''}`}
+          style={{ left: `${percent}%` }}
+        />
+      </div>
+      <div className="mt-3 flex items-start">
+        {agents.map((agent, agentIndex) => (
+          <div key={agent.id} className="flex flex-col items-center gap-0.5 text-center" style={{ width: `${100 / total}%` }}>
+            <span className={`text-[11px] font-semibold leading-tight ${agentIndex <= index ? 'text-white' : 'text-slate-500'}`}>{agent.name}</span>
+            {agentIndex === index ? (
+              <span className="text-[10px] uppercase tracking-[0.12em] text-slate-500">
+                {running ? 'Running' : tone === 'watching' ? 'Watching' : tone === 'closed' ? 'Done' : tone === 'rejected' ? 'Stopped here' : 'Approved'}
+              </span>
+            ) : null}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -258,27 +297,20 @@ function managerStageFor(run, trade) {
  * for the idle diagram, and the run's `trade` (from the AI ledger) to show how the Position Manager is handling it. Older saved
  * runs may carry a retired Decision (or Quant) stage; it is not displayed.
  */
-export function PipelineFlow({ run, running, trade = null }) {
+export function PipelineFlow({ run, running, trade = null, lean = false }) {
+  // 3 agents under the lean pipeline (Analyst, Risk Manager, Position Manager), 5 otherwise -
+  // the same agents that actually ran (or would run), nothing shown that was skipped by config.
+  const activeIds = activeAiTradingAgentIds({ strategy: { lean } })
+  const agents = AI_TRADING_AGENTS.filter((agent) => activeIds.includes(agent.id))
   const stageFor = (agent) => (agent.id === 'manager' ? managerStageFor(run, trade) : run?.stages.find((item) => item.id === agent.id))
-  // While a run is in progress the first four steps show as running; the Position Manager only starts after entry.
+  // While a run is in progress the entry-stage agents show as running; the Position Manager only starts after entry.
   const isRunning = (agent) => running && agent.id !== 'manager'
 
   return (
     <div className="grid gap-5">
-      <div className="flex flex-wrap items-center gap-2">
-        <FlowNode label="Market Data" />
-        {AI_TRADING_AGENTS.map((agent) => {
-          const stage = stageFor(agent)
-          return (
-            <div key={agent.id} className="flex items-center gap-2">
-              <ArrowRight className="h-4 w-4 text-slate-600" />
-              <FlowNode label={agent.name} dot={DOT_TONE[isRunning(agent) ? 'pending' : stage?.status || 'skipped']} />
-            </div>
-          )
-        })}
-      </div>
+      <SliderFlow agents={agents} run={run} running={running} trade={trade} />
       <div className="grid gap-4 lg:grid-cols-2">
-        {AI_TRADING_AGENTS.map((agent) => (
+        {agents.map((agent) => (
           <StageCard key={agent.id} agent={agent} stage={stageFor(agent)} running={isRunning(agent)} />
         ))}
       </div>
@@ -375,13 +407,17 @@ function Verdict({ run, execution, onExecuted, liveTrade, livePrices = {} }) {
   )
 }
 
-export function AiTradingRunReport({ run, running = false, execution = null, onExecuted = null, trades = [], livePrices = {} }) {
+export function AiTradingRunReport({ run, running = false, execution = null, config = null, onExecuted = null, trades = [], livePrices = {} }) {
   const liveTrade = run?.execution?.tradeId ? trades.find((item) => item.id === run.execution.tradeId) || null : null
+  // A completed run records its own strategy tag (aiStrategyTag at the time it ran), which is
+  // the correct source for a historical run even if today's live config has since changed; a
+  // still-running or not-yet-started call falls back to the live config.
+  const lean = run ? Boolean(run.strategy?.includes('lean')) : Boolean(config?.strategy?.lean)
   return (
     <div className="grid gap-6">
       {run && !running ? <Verdict run={run} execution={execution} onExecuted={onExecuted} liveTrade={liveTrade} livePrices={livePrices} /> : null}
       <Panel title="Pipeline">
-        <PipelineFlow run={running ? null : run} running={running} trade={running ? null : liveTrade} />
+        <PipelineFlow run={running ? null : run} running={running} trade={running ? null : liveTrade} lean={lean} />
       </Panel>
     </div>
   )
