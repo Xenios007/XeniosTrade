@@ -114,11 +114,32 @@ export const AI_TRADING_EXECUTION_LIMITS = {
   // Guidance for the Risk Manager, not enforced in code (see profitGoalLines in pipeline.js): a target USDT profit on a
   // winning trade. It reasons toward it with its own riskPercent/leverage/takeProfitPercent, inside the usual ceilings.
   targetProfitPerTradeUsdt: { min: 0, max: 10_000, step: 0.1, label: 'Target profit per trade (USDT, 0 = off)' },
-  // Same kind of guidance (see leveragePreferenceLines in pipeline.js): the account owner's own stated leverage
-  // preference. The Risk Manager still picks the final leverage itself - a weak or uncertain setup still gets sized
-  // low even if that's well under this number; nothing in code raises, caps or enforces it.
-  leveragePreference: { min: 1, max: 20, step: 1, label: 'Desired leverage (x)' },
 }
+
+// A stance, not a number: the account owner assigns how the Risk Manager should trade, the Risk
+// Manager still decides every actual figure itself (riskPercent, leverage, stop, target). This
+// replaced an earlier numeric "desired leverage" slider - the Risk Manager treated that purely as
+// advisory anyway (by design: nothing in code enforces its numbers), so a number implied a control
+// that didn't really exist. A stance is honest about what this setting actually is.
+export const AI_TRADING_RISK_PROFILES = [
+  {
+    id: 'conservative',
+    label: 'Conservative',
+    description: 'Only the clearest setups, smaller size, lower leverage. Sizes down - or skips - anything less than strong.',
+  },
+  {
+    id: 'normal',
+    label: 'Normal',
+    description: 'The Risk Manager\'s own ordinary judgement, with no added bias toward caution or aggression.',
+  },
+  {
+    id: 'aggressive',
+    label: 'Aggressive',
+    description: 'Leans into genuinely strong setups with larger size and higher leverage. Still sizes down or vetoes a weak one.',
+  },
+]
+const AI_TRADING_RISK_PROFILE_IDS = AI_TRADING_RISK_PROFILES.map((profile) => profile.id)
+export const DEFAULT_AI_TRADING_RISK_PROFILE = 'normal'
 
 export const DEFAULT_AI_TRADING_EXECUTION = {
   mode: 'testnet',
@@ -140,10 +161,9 @@ export const DEFAULT_AI_TRADING_EXECUTION = {
   // The Risk Manager is told to aim for roughly this much USDT profit on a winning trade (0 = no goal stated). Purely
   // advisory - it never raises a ceiling, never overrides the model's own risk judgement, and is not enforced in code.
   targetProfitPerTradeUsdt: 1,
-  // The account owner's stated leverage preference, shown to the Risk Manager as guidance alongside the profit goal -
-  // same "advisory, never enforced" treatment. Matches config.risk.maxLeverage's own default so a fresh account's
-  // stated preference starts in line with the reference number already shown in the prompt.
-  leveragePreference: 5,
+  // The account owner's assigned trading stance - see AI_TRADING_RISK_PROFILES. Shown to the Risk
+  // Manager as guidance alongside the profit goal; it still decides every number itself.
+  riskProfile: DEFAULT_AI_TRADING_RISK_PROFILE,
   testnetStartingBalance: 1000,
   realMaxMarginUsdt: 5,
 }
@@ -321,7 +341,7 @@ export function normalizeAiTradingConfig(raw) {
     dailyMaxLossUsdt: Math.round(clampNumber(executionSource.dailyMaxLossUsdt, AI_TRADING_EXECUTION_LIMITS.dailyMaxLossUsdt, 0) * 100) / 100,
     dailyMaxTrades: Math.round(clampNumber(executionSource.dailyMaxTrades, AI_TRADING_EXECUTION_LIMITS.dailyMaxTrades, 0)),
     targetProfitPerTradeUsdt: Math.round(clampNumber(executionSource.targetProfitPerTradeUsdt, AI_TRADING_EXECUTION_LIMITS.targetProfitPerTradeUsdt, DEFAULT_AI_TRADING_EXECUTION.targetProfitPerTradeUsdt) * 100) / 100,
-    leveragePreference: Math.round(clampNumber(executionSource.leveragePreference, AI_TRADING_EXECUTION_LIMITS.leveragePreference, DEFAULT_AI_TRADING_EXECUTION.leveragePreference)),
+    riskProfile: AI_TRADING_RISK_PROFILE_IDS.includes(executionSource.riskProfile) ? executionSource.riskProfile : DEFAULT_AI_TRADING_RISK_PROFILE,
     testnetStartingBalance: clampNumber(
       executionSource.testnetStartingBalance,
       AI_TRADING_EXECUTION_LIMITS.testnetStartingBalance,

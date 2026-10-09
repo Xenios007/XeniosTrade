@@ -1509,41 +1509,55 @@ test('risk manager: is told the profit goal with concrete numbers, and that it m
   assert.doesNotMatch(riskNoCap.userPrompt, /Example at the/)
 })
 
-// ---- Desired leverage (advisory, never a ceiling) -----------------------------------------------------------------------
+// ---- Trading stance (advisory, never a ceiling; the AI still owns every number) -------------------------------------
 
-test('config: leveragePreference defaults to 5, is bounded 1-20, and always has a value (no off state)', () => {
-  const read = (execution) => normalizeAiTradingConfig({ execution }).execution.leveragePreference
-  assert.equal(read({}), 5, 'default preference is 5x')
-  assert.equal(read({ leveragePreference: 12 }), 12)
-  assert.equal(read({ leveragePreference: 0 }), 1, 'clamped to the 1x floor, not turned off')
-  assert.equal(read({ leveragePreference: 50 }), 20, 'clamped to the 20x ceiling')
-  assert.equal(read({ leveragePreference: 'x' }), 5, 'garbage falls back to the default')
+test('config: riskProfile defaults to normal, and an invalid value falls back to normal', () => {
+  const read = (execution) => normalizeAiTradingConfig({ execution }).execution.riskProfile
+  assert.equal(read({}), 'normal', 'default stance is normal')
+  assert.equal(read({ riskProfile: 'conservative' }), 'conservative')
+  assert.equal(read({ riskProfile: 'aggressive' }), 'aggressive')
+  assert.equal(read({ riskProfile: 'bogus' }), 'normal', 'garbage falls back to the default')
+  assert.equal(read({ riskProfile: 5 }), 'normal', 'a leftover numeric leverage value falls back to the default')
 })
 
-test('risk manager: is told the leverage preference, and that it is not a requirement', async () => {
-  const withPreference = normalizeAiTradingConfig({ execution: { leveragePreference: 8 } })
+test('risk manager: conservative stance is stated, and that it is not a requirement', async () => {
+  const conservative = normalizeAiTradingConfig({ execution: { riskProfile: 'conservative' } })
   const fake = fakeAgents()
   let risk = {}
   await runAiTradingPipeline({
-    symbol: 'BTCUSDT', config: withPreference, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    symbol: 'BTCUSDT', config: conservative, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
     getTradeConstraints: async () => ({ mode: 'real', minOrderUsdt: 5, marginCapUsdt: 40, availableUsdt: 40, openPositions: [] }),
     callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
     backtestStats: positiveStats,
   })
-  assert.match(risk.userPrompt, /The account owner's preferred leverage is around 8x - not a requirement/)
-  assert.match(risk.userPrompt, /Use it when the setup supports it/)
+  assert.match(risk.userPrompt, /CONSERVATIVE stance/)
+  assert.match(risk.userPrompt, /Size down - or veto - anything less than a strong case/)
 })
 
-test('risk manager: at the 1x floor the leverage preference line still appears (only a config error turns it off)', async () => {
-  const atFloor = normalizeAiTradingConfig({ execution: { leveragePreference: 1 } })
+test('risk manager: aggressive stance is stated, and still allows a veto', async () => {
+  const aggressive = normalizeAiTradingConfig({ execution: { riskProfile: 'aggressive' } })
   const fake = fakeAgents()
   let risk = {}
   await runAiTradingPipeline({
-    symbol: 'BTCUSDT', config: atFloor, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    symbol: 'BTCUSDT', config: aggressive, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
     callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
     backtestStats: positiveStats,
   })
-  assert.match(risk.userPrompt, /preferred leverage is around 1x/)
+  assert.match(risk.userPrompt, /AGGRESSIVE stance/)
+  assert.match(risk.userPrompt, /not permission to force a trade/)
+})
+
+test('risk manager: normal stance adds no extra line (the model\'s own ordinary judgement)', async () => {
+  const normal = normalizeAiTradingConfig({ execution: { riskProfile: 'normal' } })
+  const fake = fakeAgents()
+  let risk = {}
+  await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config: normal, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: async (call) => { if (/Risk Manager AI for XeniosTrade/.test(call.systemPrompt)) risk = call; return fake.callAgent(call) },
+    backtestStats: positiveStats,
+  })
+  assert.doesNotMatch(risk.userPrompt, /CONSERVATIVE stance/)
+  assert.doesNotMatch(risk.userPrompt, /AGGRESSIVE stance/)
 })
 
 test('daily limits: 0 = off for all three lets automatic real trading continue without a daily stop', async () => {

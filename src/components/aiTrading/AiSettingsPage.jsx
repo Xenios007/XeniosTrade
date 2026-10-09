@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { APP_MODE_BOT, getModeUrl } from '../../lib/appMode'
 import { ExternalHostLink } from '../ExternalHostLink'
-import { AI_SCAN_INTERVAL_MS, AI_TRADING_EXECUTION_LIMITS, AI_TRADING_MIN_NET_REWARD_RISK, AI_TRADING_MIN_TARGET_FEE_MULTIPLE, AI_TRADING_ROUND_TRIP_FEE_PCT, AI_TRADING_SYMBOLS, AI_TRADING_TIMEFRAMES, DEFAULT_AI_TRADING_STRATEGY, aiStrategyTag } from '../../lib/aiTrading'
+import { AI_SCAN_INTERVAL_MS, AI_TRADING_EXECUTION_LIMITS, AI_TRADING_MIN_NET_REWARD_RISK, AI_TRADING_MIN_TARGET_FEE_MULTIPLE, AI_TRADING_RISK_PROFILES, AI_TRADING_ROUND_TRIP_FEE_PCT, AI_TRADING_SYMBOLS, AI_TRADING_TIMEFRAMES, DEFAULT_AI_TRADING_RISK_PROFILE, DEFAULT_AI_TRADING_STRATEGY, aiStrategyTag } from '../../lib/aiTrading'
 import { formatDateTime } from '../../lib/formatters'
 import { MODE_LABEL, requestJson, useAiLedger } from '../../lib/aiTradingApi'
 import { AgentAssignmentStrip } from '../AiTradingPage'
@@ -61,14 +61,13 @@ const draftFromExecution = (execution) => ({
   dailyMaxLossUsdt: String(execution.dailyMaxLossUsdt ?? 0),
   dailyMaxTrades: String(execution.dailyMaxTrades ?? 0),
   targetProfitPerTradeUsdt: String(execution.targetProfitPerTradeUsdt ?? 0),
-  leveragePreference: String(execution.leveragePreference ?? AI_TRADING_EXECUTION_LIMITS.leveragePreference.min),
 })
 
 export function AiSettingsPage({ settings }) {
   const [config, setConfig] = useState(null)
   const [scanStatus, setScanStatus] = useState(null)
   const [localLogins, setLocalLogins] = useState(null)
-  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '', dailyProfitTargetUsdt: '', dailyMaxLossUsdt: '', dailyMaxTrades: '', targetProfitPerTradeUsdt: '', leveragePreference: '' })
+  const [draft, setDraft] = useState({ testnetStartingBalance: '', realMaxMarginUsdt: '', dailyProfitTargetUsdt: '', dailyMaxLossUsdt: '', dailyMaxTrades: '', targetProfitPerTradeUsdt: '' })
   const [daily, setDaily] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -346,36 +345,32 @@ export function AiSettingsPage({ settings }) {
               />
             </label>
           ))}
-          <div className="rounded-2xl border border-white/10 bg-slate-950/50 p-4">
-            <label className="grid gap-1 text-xs text-slate-400">
-              <span className="flex items-center justify-between gap-2">
-                {limits.leveragePreference.label}
-                <span className="text-sm font-semibold text-white">{draft.leveragePreference || limits.leveragePreference.min}x</span>
-              </span>
-              <input
-                type="range"
-                min={limits.leveragePreference.min}
-                max={limits.leveragePreference.max}
-                step={limits.leveragePreference.step}
-                value={draft.leveragePreference || limits.leveragePreference.min}
-                onChange={(event) => setDraft((current) => ({ ...current, leveragePreference: event.target.value }))}
-                className="h-1.5 w-full cursor-pointer accent-sky-400"
-              />
-            </label>
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => saveExecution({ leveragePreference: Number(draft.leveragePreference) }, 'Desired leverage saved.')}
-                className="rounded-full bg-sky-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
-              >
-                Save
-              </button>
-              <span className="text-[11px] leading-relaxed text-slate-500">
-                Guidance stated to the Risk Manager, not a ceiling the code enforces - applies in both testnet and real money. It still picks the final leverage
-                itself, and a weak or uncertain setup is sized down (lower leverage) even if that falls short of this number.
-              </span>
+          <div>
+            <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Trading stance</div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {AI_TRADING_RISK_PROFILES.map((profile) => {
+                const active = (config.execution?.riskProfile || DEFAULT_AI_TRADING_RISK_PROFILE) === profile.id
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => saveExecution({ riskProfile: profile.id }, `Trading stance: ${profile.label}.`)}
+                    className={`rounded-2xl border p-4 text-left transition disabled:opacity-60 ${active ? 'border-sky-300/50 bg-sky-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-white">{profile.label}</span>
+                      {active ? <Badge tone="info">Active</Badge> : null}
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">{profile.description}</p>
+                  </button>
+                )
+              })}
             </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              A stance for the Risk Manager to trade from, not a number you set - it still decides every stop, target, size and leverage itself, in both testnet
+              and real money. A weak or uncertain setup is still sized down or vetoed regardless of this choice.
+            </p>
           </div>
           {readiness ? (
             <div className={`rounded-2xl border px-4 py-3 text-xs ${readiness.ready ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-white/10 bg-slate-950/50 text-slate-300'}`}>
