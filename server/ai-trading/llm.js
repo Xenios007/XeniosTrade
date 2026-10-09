@@ -154,7 +154,7 @@ async function postChatCompletion({ apiKey, baseUrl, body, timeoutMs }) {
  */
 export function describeProviderError(payload, status) {
   const error = payload?.error || payload?.[0]?.error
-  // FastAPI (the local FinGPT / FinMA servers) answers {"detail": "..."}; an unhandled server crash is a bare text body
+  // FastAPI (the local FinGPT server) answers {"detail": "..."}; an unhandled server crash is a bare text body
   // such as "Internal Server Error", which on its own reads like a message, so keep the status code with it.
   const detailText = typeof payload?.detail === 'string' ? payload.detail : ''
   const rawText = typeof payload?.raw === 'string' ? payload.raw.trim().slice(0, 200) : ''

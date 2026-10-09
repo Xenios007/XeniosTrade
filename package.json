@@ -7,7 +7,6 @@
     "dev": "vite",
     "dev:server": "node --max-old-space-size=6144 server/mock-trading-server.js",
     "fingpt": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\server.py",
-    "finma": "server\\local-llm\\.venv\\Scripts\\python.exe server\\local-llm\\finma-server.py",
     "dev:all": "concurrently \"npm:dev:server\" \"npm:dev\"",
     "start": "node --max-old-space-size=6144 server/mock-trading-server.js",
     "backtest:dataset": "node server/backtest/replay-dataset.js",

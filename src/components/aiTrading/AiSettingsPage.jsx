@@ -82,7 +82,7 @@ export function AiSettingsPage({ settings }) {
     const payload = await requestJson('/api/ai-trading/config')
     setConfig(payload.config)
     setScanStatus(payload.scanStatus || null)
-    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null })
+    setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
     setDaily(payload.daily || null)
     setDraft(draftFromExecution(payload.config.execution))
     // Point 5 of the pipeline plan: has the configured strategy proven itself on enough trades? Never blocks the page.

@@ -144,7 +144,7 @@ function ProvidersAndKeys({ settings, onSave, saving, ready }) {
     let cancelled = false
     fetch('/api/ai-trading/config')
       .then((response) => (response.ok ? response.json() : null))
-      .then((payload) => { if (!cancelled && payload) setLiveStatus({ fingpt: payload.fingpt || null, finma: payload.finma || null }) })
+      .then((payload) => { if (!cancelled && payload) setLiveStatus({ fingpt: payload.fingpt || null }) })
       .catch(() => {})
     return () => { cancelled = true }
   }, [])
@@ -330,7 +330,7 @@ function AgentAssignments({ settings }) {
         if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
         if (!cancelled) {
           setConfig(payload.config)
-          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null, finma: payload.finma || null })
+          setLocalLogins({ codex: payload.codex || null, claude: payload.claude || null, fingpt: payload.fingpt || null })
           setDraft(payload.config.agents)
         }
       })

@@ -1,12 +1,11 @@
-// Readiness of a local model server (server/local-llm/server.py for FinGPT, server/local-llm/finma-server.py for
-// FinMA), shaped like the Codex / Claude login status so the UI's `isLocalLoginReady` treats it the same way:
+// Readiness of a local model server (server/local-llm/server.py for FinGPT), shaped like the Codex / Claude login
+// status so the UI's `isLocalLoginReady` treats it the same way:
 // `available` = the process answers, `loggedIn` = the model finished loading.
 
 import { getAiProvider } from '../../src/lib/aiProviders.js'
 import { getAiProviderCredential } from '../strategy/ai-provider-credentials-store.js'
 
 export const FINGPT_PROVIDER_ID = 'fingpt'
-export const FINMA_PROVIDER_ID = 'finma'
 const STATUS_TIMEOUT_MS = 1500
 
 export async function getLocalLlmStatus(providerId, { fetchImpl = fetch } = {}) {
@@ -22,8 +21,4 @@ export async function getLocalLlmStatus(providerId, { fetchImpl = fetch } = {}) 
 
 export async function getFingptStatus(options) {
   return getLocalLlmStatus(FINGPT_PROVIDER_ID, options)
-}
-
-export async function getFinmaStatus(options) {
-  return getLocalLlmStatus(FINMA_PROVIDER_ID, options)
 }
