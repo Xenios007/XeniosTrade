@@ -266,6 +266,37 @@ test('pipeline: Analyst HOLD ends the run without spending on later agents', asy
   assert.deepEqual(result.stages.slice(1).map((stage) => stage.status), ['skipped', 'skipped', 'skipped'])
 })
 
+test('pipeline: a Risk Manager APPROVE below config.risk.minConfidence holds instead of opening', async () => {
+  const { result, calls } = await run({ agents: { risk: { decision: 'APPROVE', confidence: 55, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Workable but thin.' } } })
+  assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'], 'the Risk Manager still runs — the floor is a code check on its answer, not a skip')
+  assert.equal(result.final.approved, false)
+  assert.match(result.final.reason, /55%, minimum 60%/)
+  const gate = result.final.gates.find((item) => item.id === 'confidence')
+  assert.equal(gate.passed, false)
+
+  // At or above the floor, nothing changes.
+  const atFloor = await run({ agents: { risk: { decision: 'APPROVE', confidence: 60, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'OK.' } } })
+  assert.equal(atFloor.result.final.approved, true)
+})
+
+test('pipeline: directionBlock holds on a matching Analyst call before spending on flow/critic/risk, and leaves the other side alone', async () => {
+  const fake = fakeAgents()
+  const result = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: fake.callAgent, backtestStats: positiveStats, directionBlock: { side: 'LONG', reason: '5 of the last 6 LONG trades lost; paused until one wins.' },
+  })
+  assert.deepEqual(fake.calls, ['analyst'], 'flow/critic/risk are never called once the circuit breaker matches')
+  assert.equal(result.final.approved, false)
+  assert.match(result.final.reason, /Circuit breaker: 5 of the last 6 LONG trades lost/)
+
+  // A block on the OTHER side does not interfere with this (LONG) Analyst call.
+  const unaffected = await runAiTradingPipeline({
+    symbol: 'BTCUSDT', config, getMarketInputs: async () => marketInputs(), getFlowData: async () => FLOW_DATA,
+    callAgent: fakeAgents().callAgent, backtestStats: positiveStats, directionBlock: { side: 'SHORT', reason: 'irrelevant' },
+  })
+  assert.equal(unaffected.final.approved, true)
+})
+
 test('pipeline: AI Trading, not bot trading — Critic REJECT is evidence for the Risk Manager, not a gate that skips it', async () => {
   const { result, calls, prompts } = await run({ agents: { critic: { verdict: 'REJECT', objections: [{ issue: 'Chasing an extended move', severity: 'high' }], reasoning: 'No.' } } })
   assert.deepEqual(calls, ['analyst', 'flow', 'critic', 'risk'], 'the Risk Manager is still consulted after a Critic REJECT')
@@ -347,11 +378,10 @@ test('pipeline: an explicit Risk Manager VETO blocks the trade even with every o
   assert.match(result.stages.find((stage) => stage.id === 'risk').summary, /Veto/)
 })
 
-test('pipeline: there is no code-level confidence gate — a low-confidence APPROVE still opens; REDUCE opens a smaller trade; there is no second AI after the Risk Manager', async () => {
+test('pipeline: a below-floor confidence APPROVE now holds (config.risk.minConfidence); REDUCE at or above it still opens a smaller trade; there is no second AI after the Risk Manager', async () => {
   const lowConfidence = await run({ agents: { risk: { decision: 'APPROVE', confidence: 40, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 1, leverage: 5, concerns: [], reasoning: 'Meh, but I\'ll take it.' } } })
-  assert.equal(lowConfidence.result.final.approved, true, 'a 40% confidence APPROVE is not blocked by any code threshold any more')
-  assert.equal(lowConfidence.result.final.confidence, 40, 'the low confidence is reported exactly as the Risk Manager gave it')
-  assert.ok(lowConfidence.result.final.trade, 'and the trade opens at the Risk Manager\'s own numbers')
+  assert.equal(lowConfidence.result.final.approved, false, 'a 40% confidence APPROVE is below the default 60% floor and is now held, not opened')
+  assert.match(lowConfidence.result.final.reason, /40%, minimum 60%/)
 
   const reduce = await run({ agents: { risk: { decision: 'REDUCE', confidence: 68, stopLossPercent: 1.5, takeProfitPercent: 4, riskPercent: 0.3, leverage: 2, concerns: ['Crowded'], reasoning: 'Real but weaker.' } } })
   assert.equal(reduce.result.final.approved, true)
@@ -459,7 +489,25 @@ test('evaluateGates: only analyst and risk are gates now; an absent risk stage n
   assert.equal(holdOnAnalyst.find((gate) => gate.id === 'analyst').passed, false)
 
   const approved = evaluateGates({ analyst: { action: 'LONG', confidence: 70 }, risk: { approved: true, ai: { confidence: 5 }, plan: { leverage: 1, maxLossUsdt: 1 } } })
-  assert.equal(approved.find((gate) => gate.id === 'risk').passed, true, 'a low AI-stated confidence still passes the risk gate — there is no code threshold on it')
+  assert.equal(approved.find((gate) => gate.id === 'risk').passed, true, 'a low AI-stated confidence still passes the risk gate itself — the confidence floor is a separate gate, below')
+  assert.equal(approved.find((gate) => gate.id === 'confidence'), undefined, 'no minConfidence was passed in: the confidence gate does not even appear')
+})
+
+test('evaluateGates: minConfidence, when passed, is its own gate — only checked once the Risk Manager approved', () => {
+  const risk = (confidence) => ({ approved: true, ai: { confidence }, plan: { leverage: 1, maxLossUsdt: 1 } })
+  const analyst = { action: 'LONG', confidence: 70 }
+
+  const below = evaluateGates({ analyst, risk: risk(55), minConfidence: 60 })
+  const gate = below.find((item) => item.id === 'confidence')
+  assert.equal(gate.passed, false)
+  assert.match(gate.detail, /55%, minimum 60%/)
+
+  const atFloor = evaluateGates({ analyst, risk: risk(60), minConfidence: 60 })
+  assert.equal(atFloor.find((item) => item.id === 'confidence').passed, true, '>= the floor passes')
+
+  // A veto never reaches this gate at all (it is only added when the Risk Manager approved).
+  const vetoed = evaluateGates({ analyst, risk: { approved: false, vetoReasons: ['Weak setup.'] }, minConfidence: 60 })
+  assert.equal(vetoed.find((item) => item.id === 'confidence'), undefined)
 })
 
 // ---- provider caller (against local fake servers, no real network) --------

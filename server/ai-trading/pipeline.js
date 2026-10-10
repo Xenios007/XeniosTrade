@@ -735,7 +735,7 @@ async function runLlmStage({ id, agentConfig, callAgent, prompts, parse }) {
  * one agent whose job is to weigh them, not a piece of code checking a verdict string. No confidence threshold
  * either: the Risk Manager's own stated confidence stands, whatever it is.
  */
-export function evaluateGates({ analyst, risk, trend = null }) {
+export function evaluateGates({ analyst, risk, trend = null, minConfidence = null }) {
   const gate = (id, label, passed, detail) => ({ id, label, passed: Boolean(passed), detail })
   const directional = analyst && analyst.action !== 'HOLD'
 
@@ -753,6 +753,17 @@ export function evaluateGates({ analyst, risk, trend = null }) {
           : risk.vetoReasons.join(' '))
         : 'Risk stage did not run.',
     ),
+    // Code-enforced floor on the Risk Manager's own stated confidence. Realized trades below this floor lost
+    // noticeably more than ones at or above it, yet nothing previously stopped a low-confidence APPROVE from
+    // opening at full size — only checked when the Risk Manager actually approved, so a veto is unaffected.
+    ...(risk?.approved && Number.isFinite(minConfidence)
+      ? [gate(
+        'confidence',
+        'Meets the minimum entry confidence',
+        Number.isFinite(Number(risk.ai?.confidence)) && Number(risk.ai.confidence) >= minConfidence,
+        `Risk Manager confidence ${Number.isFinite(Number(risk.ai?.confidence)) ? risk.ai.confidence : 'n/a'}%, minimum ${minConfidence}%.`,
+      )]
+      : []),
   ]
 }
 
@@ -779,8 +790,9 @@ export function trendGate(trend, analyst = null) {
  * @param {(symbol: string, snapshot: object) => Promise<{ metrics: object, sources: object }>} args.getFlowData  derivatives/order-flow evidence (flow-data.js); throwing fails the Market Flow stage closed
  * @param {(symbol: string, snapshot: object) => Promise<{ mode: string, minOrderUsdt: number, marginCapUsdt: number, availableUsdt: number } | null>} [args.getTradeConstraints]  exchange minimum order and the margin the wallet allows; lets the Risk Manager size for them
  * @param {object|null} args.backtestStats  aggregated backtest table (loadQuantStats) — background context only
+ * @param {{ side: 'LONG'|'SHORT', reason: string }|null} [args.directionBlock]  circuit breaker from scan.js's directionCircuitBreaker; a matching Analyst call holds instead of proceeding
  */
-export async function runAiTradingPipeline({ symbol, config, getMarketInputs, getFlowData, getTradeConstraints, callAgent, backtestStats, now = Date.now }) {
+export async function runAiTradingPipeline({ symbol, config, getMarketInputs, getFlowData, getTradeConstraints, callAgent, backtestStats, now = Date.now, directionBlock = null }) {
   const startedAt = now()
   const run = {
     id: `ai-trading-${symbol}-${startedAt}`,
@@ -885,6 +897,15 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     return hold(`Trend filter: ${gates[0].detail}`, gates)
   }
 
+  // Direction circuit breaker (directionBlock, computed by the caller from recent trade history — see
+  // server/ai-trading/scan.js's directionCircuitBreaker): a side on an abnormal recent losing streak is paused
+  // before spending a Flow/Critic/Risk Manager call on it.
+  if (directionBlock && analyst.action === directionBlock.side) {
+    const gates = evaluateGates({ analyst, risk: null, trend })
+    skipRest(`Circuit breaker: ${directionBlock.reason}`)
+    return hold(`Circuit breaker: ${directionBlock.reason}`, gates)
+  }
+
   // Background context for the Risk Manager; not a stage, not a gate.
   const backtest = lookupQuantEdge(backtestStats, {
     symbol,
@@ -973,8 +994,9 @@ export async function runAiTradingPipeline({ symbol, config, getMarketInputs, ge
     : riskStage.summary
   run.stages.push(riskStage)
 
-  // The Risk Manager is the sole gate for entry: its own APPROVE/REDUCE (vs VETO) is the verdict.
-  const gates = evaluateGates({ analyst, risk, trend })
+  // The Risk Manager is the sole gate for entry: its own APPROVE/REDUCE (vs VETO) is the verdict (plus the
+  // code-enforced confidence floor above it).
+  const gates = evaluateGates({ analyst, risk, trend, minConfidence: config.risk?.minConfidence })
   const approved = gates.every((item) => item.passed)
 
   if (!approved) {

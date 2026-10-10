@@ -90,7 +90,7 @@ import { fitPlanToExchangeMinimum, marginCapFor, minOrderNotional } from './ai-t
 import { buildRiskEvidence } from './ai-trading/risk-evidence.js'
 import { quoteLargeIntegers } from './exchange-json.js'
 import { dailyStatus } from './ai-trading/daily-limits.js'
-import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
+import { directionCircuitBreaker, planScanCycle, shouldPersistScanRun, summarizeScanResult } from './ai-trading/scan.js'
 import { loadQuantStats } from './ai-trading/quant-stats.js'
 import {
   appendAiScanLog, appendAiTradingRun, getAiScanLog, getAiScanStatus, getAiTrades, getAiTradingConfig, getAiTradingRuns, getShadowSignals, patchAiTradingRun,
@@ -10755,7 +10755,8 @@ async function getAiTradeConstraints(symbol, snapshot) {
 async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
   // Refresh the provider-credential mirror the LLM caller reads.
   await getSettings(await getAdminUserId())
-  const [config, quantStats] = await Promise.all([getAiTradingConfig(), loadQuantStats()])
+  const [config, quantStats, recentTrades] = await Promise.all([getAiTradingConfig(), loadQuantStats(), getAiTrades()])
+  const directionBlock = directionCircuitBreaker({ trades: recentTrades, mode: config.execution.mode })
   const run = await runAiTradingPipeline({
     symbol,
     config,
@@ -10766,6 +10767,7 @@ async function performAiTradingRun(symbol, { trigger = 'manual' } = {}) {
     getFlowData: getAiFlowData,
     getMarketInputs: (target) => getAiMarketInputs(target, getAiTradingTimeframe(config)),
     getTradeConstraints: getAiTradeConstraints,
+    directionBlock,
   })
   run.trigger = trigger
   // Auto-execution. Testnet: when autoExecuteTestnet is on. Real money: only when armed AND autoExecuteReal is on (both reset
@@ -11364,7 +11366,7 @@ async function runPositionManagerReview(tradeId) {
       return null
     }
 
-    const plan = planPositionAction({ trade, review, price })
+    const plan = planPositionAction({ trade, review, price, metrics })
     const hasChange = plan.ok && (plan.closeAll || plan.partialPct || plan.newStop != null || plan.newTakeProfit != null)
     const recordOptions = { at: Date.now(), metrics }
     let result = null

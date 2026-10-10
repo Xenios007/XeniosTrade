@@ -143,6 +143,20 @@ test('real money is limited to one open AI position; testnet to five', () => {
   rejects(base({ trades: five }), /limited to 5/)
 })
 
+test('testnet is limited to 2 open AI positions on the same side, even under the 5-total cap', () => {
+  const twoLongs = [
+    { aiRunId: 'r0', status: 'OPEN', symbol: 'S0USDT', aiTradingMode: 'testnet', side: 'BUY' },
+    { aiRunId: 'r1', status: 'OPEN', symbol: 'S1USDT', aiTradingMode: 'testnet', side: 'BUY' },
+  ]
+  // A 3rd LONG is refused even though only 2 of the 5 total slots are used.
+  rejects(base({ trades: twoLongs }), /same-side/)
+  // A SHORT is unaffected by the LONG cap.
+  assertCanExecute(base({
+    trades: twoLongs,
+    run: makeRun({ final: { ...makeRun().final, action: 'SHORT', trade: { ...makeRun().final.trade, side: 'SHORT', stopLoss: 102, takeProfit: 96 } } }),
+  }))
+})
+
 test('scalePlanToWallet caps real margin and never scales up', () => {
   const plan = makeRun().final.trade
   const real = scalePlanToWallet({ plan, mode: 'real', config: config({ realMaxMarginUsdt: 5 }), availableUsdt: 10.25 })

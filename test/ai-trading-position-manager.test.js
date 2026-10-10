@@ -172,6 +172,19 @@ test('plan: HOLD does nothing and EXIT_NOW closes everything', () => {
   assert.equal(plan(shortTrade(), { decision: 'EXIT_NOW' }, 104).closeAll, true)
 })
 
+test('plan: EXIT_NOW is rejected once the loss is past the -0.3R floor, leaving the trade on its current stop', () => {
+  const shallow = planPositionAction({ trade: longTrade(), review: review({ decision: 'EXIT_NOW' }), price: 99.2, metrics: { rMultiple: -0.27 } })
+  assert.equal(shallow.ok, true)
+  assert.equal(shallow.closeAll, true, 'still shallow (better than -0.3R): the voluntary exit is honored')
+
+  const deep = planPositionAction({ trade: longTrade(), review: review({ decision: 'EXIT_NOW' }), price: 98, metrics: { rMultiple: -0.55 } })
+  assert.equal(deep.ok, false)
+  assert.match(deep.reason, /-0\.3R floor/)
+
+  // No metrics (e.g. an older call site) never blocks it — unchanged behaviour.
+  assert.equal(planPositionAction({ trade: longTrade(), review: review({ decision: 'EXIT_NOW' }), price: 90 }).closeAll, true)
+})
+
 test('plan: MOVE_TO_BREAKEVEN moves the stop to entry only when price is beyond it and it helps', () => {
   assert.equal(plan(longTrade(), { decision: 'MOVE_TO_BREAKEVEN' }, 103).newStop, 100)
   assert.equal(plan(shortTrade(), { decision: 'MOVE_TO_BREAKEVEN' }, 97).newStop, 100)

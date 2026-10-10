@@ -63,6 +63,30 @@ export function summarizeScanResult(run, now = Date.now()) {
 }
 
 /**
+ * Safety circuit breaker: when almost all of the most recent closed AI trades on one side (LONG/SHORT) in this mode
+ * are losses, pause NEW entries on that side until a trade on it wins again. strategy.trendFilter picks one
+ * direction for every symbol at once, so a wrong trend read does not fail as one bad trade — it fails as the same
+ * bet reloaded symbol after symbol. This stops that reload instead of treating each symbol as independent evidence
+ * it is not. Self-clears: once a win lands inside the lookback window, the loss count drops back under the floor.
+ */
+export function directionCircuitBreaker({ trades = [], mode = 'testnet', lookback = 6, maxLosses = 5 }) {
+  const closed = trades
+    .filter((trade) => trade.aiTradingMode === mode && typeof trade.pnl === 'number' && (trade.side === 'BUY' || trade.side === 'SELL'))
+    .sort((a, b) => (Number(b.closedAt || b.transactTime || 0)) - (Number(a.closedAt || a.transactTime || 0)))
+
+  for (const side of ['LONG', 'SHORT']) {
+    const exchangeSide = side === 'LONG' ? 'BUY' : 'SELL'
+    const recent = closed.filter((trade) => trade.side === exchangeSide).slice(0, lookback)
+    if (recent.length < lookback) continue
+    const losses = recent.filter((trade) => trade.pnl <= 0).length
+    if (losses >= maxLosses) {
+      return { side, reason: `${losses} of the last ${lookback} ${side} trades lost; paused until one wins.` }
+    }
+  }
+  return null
+}
+
+/**
  * Runs where the Analyst just said HOLD (or failed) are one cheap call each and would push the real decisions out of
  * the 50-run history within an hour, so a scan keeps only runs that went past the Analyst; the per-symbol status keeps the rest.
  */

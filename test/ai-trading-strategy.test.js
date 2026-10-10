@@ -136,7 +136,7 @@ test('trend filter: the Analyst is only offered the trend direction, and a call 
   assert.match(ok.prompts.analyst.userPrompt, /TREND FILTER: the higher-timeframe trend is UP/)
   assert.match(ok.prompts.analyst.userPrompt, /"action":"LONG\|HOLD"/)
   assert.equal(ok.result.final.approved, true)
-  assert.deepEqual(ok.result.final.gates.map((gate) => gate.id), ['trend', 'analyst', 'risk'])
+  assert.deepEqual(ok.result.final.gates.map((gate) => gate.id), ['trend', 'analyst', 'risk', 'confidence'])
   assert.ok(ok.result.final.gates.every((gate) => gate.passed))
 
   const against = await run({ strategy: { trendFilter: true }, agents: { analyst: { ...ANALYST_LONG, action: 'SHORT' } } })

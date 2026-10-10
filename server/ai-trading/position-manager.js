@@ -23,6 +23,12 @@ const asText = (value, max = 600) => (typeof value === 'string' ? value.trim().s
 export const MIN_STOP_BUFFER = 0.0003
 /** A new target must sit at least this far beyond the current price. */
 export const MIN_TARGET_BUFFER = 0.0005
+// A voluntary EXIT_NOW is only honored while the loss is still shallow. Realized data showed EXIT_NOW closing
+// at an average of -0.37R with a 14% win rate on the call — materially worse than just letting the (already-
+// tightened) stop handle a deeper adverse move, which averaged near breakeven. Past this floor, EXIT_NOW is
+// rejected and the position stays open on its current stop; a thesis that is genuinely done keeps saying so on
+// the next review, closer to breakeven, rather than this being the one chance to act on it.
+export const MIN_EXIT_NOW_R = -0.3
 export const MAX_STORED_REVIEWS = 60
 const PREVIOUS_REVIEWS_SHOWN = 6
 
@@ -251,7 +257,7 @@ const reject = (reason) => ({ ok: false, reason })
  * requested change is valid for the exchange and does not add risk.
  * @returns {{ ok: true, type: string, closeAll: boolean, partialPct: number|null, newStop: number|null, newTakeProfit: number|'REMOVE'|null, notes: string[] } | { ok: false, reason: string }}
  */
-export function planPositionAction({ trade, review, price }) {
+export function planPositionAction({ trade, review, price, metrics = null }) {
   const sign = sideSign(trade)
   const current = Number(price)
   if (!(current > 0)) return reject('No valid current price.')
@@ -277,9 +283,14 @@ export function planPositionAction({ trade, review, price }) {
   switch (review.decision) {
     case 'HOLD':
       return plan
-    case 'EXIT_NOW':
+    case 'EXIT_NOW': {
+      const rMultiple = Number(metrics?.rMultiple)
+      if (Number.isFinite(rMultiple) && rMultiple < MIN_EXIT_NOW_R) {
+        return reject(`EXIT_NOW rejected: already ${fx(rMultiple)}R, past the ${MIN_EXIT_NOW_R}R floor for a voluntary exit — the stop handles losses beyond this, not an early bail.`)
+      }
       plan.closeAll = true
       return plan
+    }
     case 'MOVE_TO_BREAKEVEN': {
       if (stop != null && sign * (stop - entry) >= 0) {
         plan.notes.push('The stop already sits at or beyond breakeven.')

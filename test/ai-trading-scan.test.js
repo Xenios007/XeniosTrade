@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AI_SCAN_COOLDOWN_MS, DEFAULT_AI_TRADING_CONFIG, normalizeAiTradingConfig } from '../src/lib/aiTrading.js'
-import { planScanCycle, shouldPersistScanRun, summarizeScanResult } from '../server/ai-trading/scan.js'
+import { directionCircuitBreaker, planScanCycle, shouldPersistScanRun, summarizeScanResult } from '../server/ai-trading/scan.js'
 
 const NOW = 1_800_000_000_000
 const open = (symbol, mode = 'testnet') => ({ symbol, aiTradingMode: mode, status: 'OPEN', result: 'PENDING' })
@@ -63,4 +63,45 @@ test('summarizeScanResult + shouldPersistScanRun: HOLD and errors stay out of ru
 
   const failedOpen = { ...opened, execution: { status: 'failed', mode: 'testnet', error: 'Insufficient margin' } }
   assert.equal(summarizeScanResult(failedOpen).outcome, 'error')
+})
+
+// ---- directionCircuitBreaker -------------------------------------------------------------------------------------------
+
+const closedTrade = (side, pnl, ago, mode = 'testnet') => ({ side, pnl, aiTradingMode: mode, closedAt: NOW - ago })
+
+test('directionCircuitBreaker: blocks a side after 5 of its last 6 closed trades lost', () => {
+  const mostlyLosingShorts = [
+    closedTrade('SELL', -1, 10_000), closedTrade('SELL', -1, 20_000), closedTrade('SELL', -1, 30_000),
+    closedTrade('SELL', -1, 40_000), closedTrade('SELL', 1, 50_000), closedTrade('SELL', -1, 60_000),
+  ]
+  const result = directionCircuitBreaker({ trades: mostlyLosingShorts, mode: 'testnet' })
+  assert.equal(result.side, 'SHORT')
+  assert.match(result.reason, /5 of the last 6 SHORT trades lost/)
+})
+
+test('directionCircuitBreaker: does not trip under the loss threshold, or with fewer than the lookback', () => {
+  const twoLosses = [
+    closedTrade('SELL', -1, 10_000), closedTrade('SELL', -1, 20_000), closedTrade('SELL', 1, 30_000),
+    closedTrade('SELL', 1, 40_000), closedTrade('SELL', 1, 50_000), closedTrade('SELL', -1, 60_000),
+  ]
+  assert.equal(directionCircuitBreaker({ trades: twoLosses, mode: 'testnet' }), null, 'only 2 losses of 6: under the floor')
+
+  const notEnoughHistory = [closedTrade('SELL', -1, 10_000), closedTrade('SELL', -1, 20_000)]
+  assert.equal(directionCircuitBreaker({ trades: notEnoughHistory, mode: 'testnet' }), null, 'fewer than the lookback: no verdict yet')
+})
+
+test('directionCircuitBreaker: self-clears once a recent win pushes an old loss out of the lookback window, and modes do not cross-contaminate', () => {
+  const recoveredShorts = [
+    closedTrade('SELL', 1, 5_000), // most recent: a win
+    closedTrade('SELL', -1, 10_000), closedTrade('SELL', -1, 20_000), closedTrade('SELL', -1, 30_000),
+    closedTrade('SELL', -1, 40_000), closedTrade('SELL', 1, 50_000),
+  ]
+  assert.equal(directionCircuitBreaker({ trades: recoveredShorts, mode: 'testnet' }), null, 'two recent wins keep the streak at 4/6, under the 5-loss floor')
+
+  const realLosingShorts = [
+    closedTrade('SELL', -1, 10_000, 'real'), closedTrade('SELL', -1, 20_000, 'real'), closedTrade('SELL', -1, 30_000, 'real'),
+    closedTrade('SELL', -1, 40_000, 'real'), closedTrade('SELL', -1, 50_000, 'real'), closedTrade('SELL', -1, 60_000, 'real'),
+  ]
+  assert.equal(directionCircuitBreaker({ trades: realLosingShorts, mode: 'testnet' }), null, 'a losing streak in real money does not block testnet')
+  assert.equal(directionCircuitBreaker({ trades: realLosingShorts, mode: 'real' }).side, 'SHORT')
 })

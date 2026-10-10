@@ -34,6 +34,10 @@ export const MAX_PLAN_AGE_MS = {
 }
 export const MAX_ENTRY_DRIFT_PCT = { testnet: 1.5, real: 0.5 }
 export const MAX_OPEN_POSITIONS = { testnet: 5, real: 1 }
+// Caps how many of the open positions may be the SAME side (BUY/SELL) at once. strategy.trendFilter picks one
+// direction for every symbol at a time, so without this, a wrong trend read opens several highly correlated bets
+// (e.g. 4 shorts across different coins that all lose together on the same bounce) instead of diversified risk.
+export const MAX_SAME_SIDE_OPEN_POSITIONS = { testnet: 2, real: 1 }
 // Never commit more than this share of the available balance as margin on one trade.
 export { AVAILABLE_BALANCE_USAGE }
 
@@ -137,6 +141,11 @@ export function assertCanExecute({ run, mode, config, trades = [], livePrice, no
   }
   if (openInMode.length >= MAX_OPEN_POSITIONS[mode]) {
     throw new AiExecutionError(`The ${mode} wallet is limited to ${MAX_OPEN_POSITIONS[mode]} open AI position(s); close one first.`)
+  }
+  const sameSideOpen = openInMode.filter((trade) => trade.side === side).length
+  const sameSideLimit = MAX_SAME_SIDE_OPEN_POSITIONS[mode] ?? MAX_OPEN_POSITIONS[mode]
+  if (sameSideOpen >= sameSideLimit) {
+    throw new AiExecutionError(`The ${mode} wallet already has ${sameSideOpen} open ${final.action} position(s) (limit ${sameSideLimit} same-side); diversify direction or close one first.`)
   }
 
   return { plan, side }
