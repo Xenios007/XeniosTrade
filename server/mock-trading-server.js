@@ -74,7 +74,12 @@ import { BOT5TO8_BUILDERS } from './strategy/bots5to8.js'
 import { registerConsolidatedBot } from './consolidated-bot.js'
 import { mergeAiProviderCredentialsUpdate, normalizeAiProviderCredentials } from '../src/lib/aiProviders.js'
 import { getAiProviderCredential, setAiProviderCredentialsStore } from './strategy/ai-provider-credentials-store.js'
-import { AI_POSITION_MANAGER_INTERVAL_MS, AI_SCAN_INTERVAL_MS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_TIMEFRAMES, aiStrategyTag, getAiTradingTimeframe } from '../src/lib/aiTrading.js'
+import { AI_POSITION_MANAGER_INTERVAL_MS, AI_SCAN_INTERVAL_MS, AI_TRADING_LLM_AGENT_IDS, AI_TRADING_SYMBOLS, AI_TRADING_SYMBOL_PATTERN, AI_TRADING_TIMEFRAMES, aiStrategyTag, getAiTradingTimeframe } from '../src/lib/aiTrading.js'
+import { loadBacktestSeries } from './ai-trading/backtest-data.js'
+import { runAiTradingBacktest } from './ai-trading/backtest-runner.js'
+import {
+  deleteAiBacktestRun, getAiBacktestStatus, getAiBacktestTrades, listAiBacktestRuns, saveAiBacktestStatus, saveAiBacktestTrades,
+} from './ai-trading/backtest-store.js'
 import { runMakerEntry, makerLimitPrice } from './ai-trading/maker-entry.js'
 import {
   applyPartialClose, buildEntryContext, computeTradeMetrics, parsePositionManagerOutput, planPositionAction, positionManagerPrompts, recordReview,
@@ -10811,6 +10816,158 @@ app.post('/api/ai-trading/run', async (request, response) => {
   } finally {
     aiTradingRunsInFlight.delete(symbol)
   }
+})
+
+// ---- AI Trading backtest: walks historical candles through the real pipeline (see backtest-runner.js) ------------
+// One at a time (it ties up the same local model server live trading uses); tracked in memory, persisted to disk
+// as it goes (backtest-store.js) so the results page survives a server restart mid-run.
+let aiBacktestRunId = null
+const aiBacktestStopRequests = new Set()
+
+function computeAiBacktestStats(trades) {
+  const closed = trades.filter((trade) => typeof trade.pnl === 'number')
+  const wins = closed.filter((trade) => trade.pnl > 0)
+  const losses = closed.filter((trade) => trade.pnl <= 0)
+  const sum = (list) => list.reduce((total, trade) => total + trade.pnl, 0)
+  const round2 = (value) => Math.round(value * 100) / 100
+  const bySymbol = {}
+  for (const trade of closed) {
+    const bucket = bySymbol[trade.symbol] || { n: 0, pnl: 0, wins: 0 }
+    bucket.n += 1
+    bucket.pnl = round2(bucket.pnl + trade.pnl)
+    if (trade.pnl > 0) bucket.wins += 1
+    bySymbol[trade.symbol] = bucket
+  }
+  return {
+    totalTrades: closed.length,
+    openPositions: trades.length - closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: closed.length ? round2((wins.length / closed.length) * 100) : null,
+    totalPnl: round2(sum(closed)),
+    avgWin: wins.length ? round2(sum(wins) / wins.length) : null,
+    avgLoss: losses.length ? round2(sum(losses) / losses.length) : null,
+    bySymbol,
+  }
+}
+
+async function runAiTradingBacktestJob(runId, { symbols, startMs, endMs, config }) {
+  const timeframe = getAiTradingTimeframe(config)
+  const stepMs = timeframe.entry.minutes * 60_000
+  const seriesCache = new Map()
+
+  await saveAiBacktestStatus(runId, {
+    id: runId, symbols, startMs, endMs, stepMs, startedAt: Date.now(), finishedAt: null, state: 'loading-data',
+    progress: { steps: 0, totalSteps: 0, phase: 'Loading historical candles…' }, error: null,
+    strategy: config.strategy, agents: config.agents,
+  })
+
+  try {
+    for (const symbol of symbols) {
+      if (aiBacktestStopRequests.has(runId)) break
+      const series = await loadBacktestSeries(symbol, timeframe, startMs, endMs)
+      seriesCache.set(symbol, series)
+      const current = await getAiBacktestStatus(runId)
+      await saveAiBacktestStatus(runId, { ...current, progress: { steps: 0, totalSteps: 0, phase: `Loaded candles for ${symbol}` } })
+    }
+
+    const loaded = await getAiBacktestStatus(runId)
+    await saveAiBacktestStatus(runId, { ...loaded, state: 'running' })
+
+    const trades = []
+    let lastSaved = 0
+    await runAiTradingBacktest({
+      symbols, startMs, endMs, stepMs, config, callAgent: callAgentJson,
+      seriesFor: (symbol) => seriesCache.get(symbol),
+      shouldStop: () => aiBacktestStopRequests.has(runId),
+      onTrade: async (trade) => {
+        trades.push(trade)
+        await saveAiBacktestTrades(runId, trades)
+      },
+      onProgress: async (progress) => {
+        const now = Date.now()
+        if (now - lastSaved < 3_000) return // throttle disk writes during the long walk
+        lastSaved = now
+        const current = await getAiBacktestStatus(runId)
+        await saveAiBacktestStatus(runId, { ...current, progress })
+      },
+    })
+
+    const finished = await getAiBacktestStatus(runId)
+    await saveAiBacktestStatus(runId, {
+      ...finished,
+      state: aiBacktestStopRequests.has(runId) ? 'stopped' : 'completed',
+      finishedAt: Date.now(),
+    })
+  } catch (error) {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 500)
+    console.error(`[ai-trading-backtest] ${runId} failed:`, message)
+    const current = await getAiBacktestStatus(runId)
+    await saveAiBacktestStatus(runId, { ...(current || { id: runId, symbols, startMs, endMs }), state: 'error', error: message, finishedAt: Date.now() })
+  } finally {
+    aiBacktestStopRequests.delete(runId)
+    if (aiBacktestRunId === runId) aiBacktestRunId = null
+  }
+}
+
+app.get('/api/ai-trading/backtest', async (request, response) => {
+  response.json({ ok: true, runs: await listAiBacktestRuns(), activeRunId: aiBacktestRunId })
+})
+
+app.get('/api/ai-trading/backtest/:runId', async (request, response) => {
+  const status = await getAiBacktestStatus(request.params.runId)
+  if (!status) {
+    response.status(404).json({ error: 'Backtest run not found.' })
+    return
+  }
+  const trades = await getAiBacktestTrades(request.params.runId)
+  response.json({ ok: true, status, trades, stats: computeAiBacktestStats(trades) })
+})
+
+app.post('/api/ai-trading/backtest/start', async (request, response) => {
+  try {
+    if (aiBacktestRunId) {
+      response.status(409).json({ error: `A backtest (${aiBacktestRunId}) is already running. Stop it first.` })
+      return
+    }
+    const body = request.body || {}
+    const requested = Array.isArray(body.symbols) ? body.symbols.map((item) => String(item).toUpperCase()).filter((item) => AI_TRADING_SYMBOLS.includes(item)) : []
+    const symbols = requested.length ? requested : [...AI_TRADING_SYMBOLS]
+    const days = Math.min(Math.max(Math.round(Number(body.days)) || 60, 1), 400)
+    const endMs = Date.now()
+    const startMs = endMs - days * 24 * 60 * 60_000
+
+    const liveConfig = await getAiTradingConfig()
+    // "ai model set on fingpt": every active LLM role is pointed at the local FinGPT server for this run,
+    // regardless of what's live-configured for Codex/Claude. Strategy/risk/execution settings mirror live exactly.
+    const config = {
+      ...liveConfig,
+      agents: Object.fromEntries(AI_TRADING_LLM_AGENT_IDS.map((id) => [id, { providerId: 'fingpt', model: '' }])),
+    }
+
+    const runId = `aibt-${Date.now()}`
+    aiBacktestRunId = runId
+    runAiTradingBacktestJob(runId, { symbols, startMs, endMs, config }).catch((error) => {
+      console.error('[ai-trading-backtest] job crashed:', error)
+    })
+    response.json({ ok: true, runId })
+  } catch (error) {
+    response.status(500).json({ error: error instanceof Error ? error.message : 'Could not start the backtest.' })
+  }
+})
+
+app.post('/api/ai-trading/backtest/:runId/stop', async (request, response) => {
+  aiBacktestStopRequests.add(request.params.runId)
+  response.json({ ok: true })
+})
+
+app.delete('/api/ai-trading/backtest/:runId', async (request, response) => {
+  if (aiBacktestRunId === request.params.runId) {
+    response.status(409).json({ error: 'Cannot delete a running backtest; stop it first.' })
+    return
+  }
+  await deleteAiBacktestRun(request.params.runId)
+  response.json({ ok: true })
 })
 
 // Auto-scan: every 5 min, when switched on in AI Settings, run the pipeline for each enabled symbol in turn.

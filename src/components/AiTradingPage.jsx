@@ -12,6 +12,7 @@ import { useAiLedger } from '../lib/aiTradingApi'
 import { formatDateTime, formatPrice } from '../lib/formatters'
 import { getTradePnlAmount, isTradeOpen } from '../lib/trades'
 import { AiTradingRunReport, PipelineFlow } from './AiTradingRunReport'
+import { AiBacktestPage } from './aiTrading/AiBacktestPage'
 import { Panel } from './Panel'
 import { Badge } from './ui/Badge'
 import { PageHeader } from './ui/PageHeader'
@@ -24,6 +25,7 @@ const RUNS_REFRESH_MS = 15_000
 const TABS = [
   { to: '/ai-trading', label: 'Pipeline', end: true },
   { to: '/ai-trading/history', label: 'Run History' },
+  { to: '/ai-trading/backtest', label: 'Backtest' },
 ]
 
 async function requestJson(url, options) {
@@ -433,6 +435,7 @@ export function AiTradingPage({ settings }) {
             </div>
           )}
         />
+        <Route path="backtest" element={<AiBacktestPage />} />
         <Route path="risk" element={<Navigate to="/ai-trading" replace />} />
       </Routes>
     </div>

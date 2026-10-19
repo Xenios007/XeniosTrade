@@ -44,6 +44,7 @@ export const NAV_GROUPS = [
         children: [
           { to: '/ai-trading', label: 'Pipeline' },
           { to: '/ai-trading/history', label: 'Run History' },
+          { to: '/ai-trading/backtest', label: 'Backtest' },
         ],
       },
       {
