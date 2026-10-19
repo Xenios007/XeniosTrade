@@ -10859,7 +10859,7 @@ async function runAiTradingBacktestJob(runId, { symbols, startMs, endMs, config 
   await saveAiBacktestStatus(runId, {
     id: runId, symbols, startMs, endMs, stepMs, startedAt: Date.now(), finishedAt: null, state: 'loading-data',
     progress: { steps: 0, totalSteps: 0, phase: 'Loading historical candles…' }, error: null,
-    strategy: config.strategy, agents: config.agents,
+    strategy: config.strategy, agents: config.agents, risk: config.risk, execution: config.execution,
   })
 
   try {
@@ -10922,6 +10922,39 @@ app.get('/api/ai-trading/backtest/:runId', async (request, response) => {
   }
   const trades = await getAiBacktestTrades(request.params.runId)
   response.json({ ok: true, status, trades, stats: computeAiBacktestStats(trades) })
+})
+
+// Same shape as the live AI Journal's wallet view (buildJournalItems/buildJournalSummary, below) so the frontend
+// can hand a backtest run to the exact same WalletJournalCalendar component. Grouped by OPEN date (journalDateKey),
+// matching how a live trade's own journalDateKey is stamped at open time, not close time.
+app.get('/api/ai-trading/backtest/:runId/journal', async (request, response) => {
+  const status = await getAiBacktestStatus(request.params.runId)
+  if (!status) {
+    response.status(404).json({ error: 'Backtest run not found.' })
+    return
+  }
+  const trades = (await getAiBacktestTrades(request.params.runId)).map((trade) => ({
+    ...trade,
+    transactTime: trade.openedAt,
+    journalDateKey: manilaDateKey(trade.openedAt),
+  }))
+  const items = buildJournalItems(trades)
+  response.json({
+    ok: true,
+    trades,
+    wallet: {
+      walletId: `backtest:${status.id}`,
+      walletName: 'Backtest',
+      walletColorKey: 'slate',
+      assignedSignalModelName: `AI Trading · Backtest (${status.symbols.length > 1 ? `${status.symbols.length} symbols` : status.symbols[0]})`,
+      items,
+      summary: buildJournalSummary(trades, items),
+      // No real wallet exists for a backtest; the same reference equity the Risk Manager sized every trade
+      // around is the only meaningful "starting balance" to show a running balance against.
+      startingBalance: Number(status.risk?.accountEquityUsdt) || 0,
+    },
+    availableMonths: Array.from(new Set(items.map((item) => String(item.date).slice(0, 7)))).sort((left, right) => right.localeCompare(left)),
+  })
 })
 
 app.post('/api/ai-trading/backtest/start', async (request, response) => {
