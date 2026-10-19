@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
-import { formatPercent } from '../lib/formatters'
+import { formatDateTime, formatPercent } from '../lib/formatters'
 import { summarizeAccount } from '../lib/accountMetrics'
 import { getRealMoneyWallet, getWalletById, getWalletEffectiveStartingBalance, isRealMoneyWallet } from '../lib/wallets'
 import { Panel } from './Panel'
+import { Badge } from './ui/Badge'
+import { StatCard, pnlTone } from './ui/StatCard'
 
 const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -735,6 +737,123 @@ export function JournalRealMoneyPage(props) {
           />
         </>
       )}
+    </div>
+  )
+}
+
+// ---- Bot Trading backtest journal -----------------------------------------------------------
+
+const money = (value) => `${Number(value) >= 0 ? '' : '-'}${Math.abs(Number(value) || 0).toFixed(2)} USDT`
+
+async function fetchJson(url) {
+  const response = await fetch(url)
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`)
+  return payload
+}
+
+/** Same layout as JournalWalletPage, fed by a Bot Trading backtest run's journal instead of
+ * live trades (GET /api/bot-trading/backtest/:runId/journal). Self-contained: its own run
+ * picker, its own month state - mirrors AiJournalPage's BacktestJournalView. */
+export function JournalBacktestPage() {
+  const [runs, setRuns] = useState([])
+  const [runId, setRunId] = useState('')
+  const [detail, setDetail] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [activeMonth, setActiveMonth] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    fetchJson('/api/bot-trading/backtest')
+      .then((payload) => {
+        if (cancelled) return
+        const list = payload.runs || []
+        setRuns(list)
+        if (list.length) setRunId((current) => (list.some((run) => run.id === current) ? current : list[0].id))
+      })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load backtests.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const load = useCallback((id) => {
+    if (!id) { setDetail(null); return }
+    Promise.all([fetchJson(`/api/bot-trading/backtest/${id}/journal`), fetchJson(`/api/bot-trading/backtest/${id}`)])
+      .then(([journalPayload, runPayload]) => {
+        const accountSnapshot = summarizeAccount({ trades: journalPayload.trades, livePrices: {}, startingBalance: journalPayload.wallet.startingBalance })
+        setDetail({
+          view: { ...journalPayload.wallet, accountSnapshot },
+          availableMonths: journalPayload.availableMonths,
+          status: runPayload.status,
+          stats: runPayload.stats,
+        })
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Could not load that backtest.'))
+  }, [])
+
+  useEffect(() => { load(runId) }, [runId, load])
+
+  const availableMonths = detail?.availableMonths || []
+  useEffect(() => {
+    if (availableMonths.length === 0) return
+    if (!availableMonths.includes(activeMonth)) setActiveMonth(availableMonths[0])
+  }, [activeMonth, availableMonths])
+  const displayMonth = activeMonth || availableMonths[0] || ''
+  const monthIndex = availableMonths.indexOf(displayMonth)
+
+  if (loading) return <Panel title="Backtest"><div className="py-8 text-center text-sm text-slate-400">Loading…</div></Panel>
+  if (!runs.length) return <Panel title="Backtest"><div className="py-8 text-center text-sm text-slate-400">No backtest runs yet — start one from Mock Trading → Backtest.</div></Panel>
+
+  return (
+    <div className="grid gap-6">
+      {error ? <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">{error}</div> : null}
+      <div className="flex flex-wrap gap-2">
+        {runs.map((run) => (
+          <button
+            key={run.id}
+            type="button"
+            onClick={() => setRunId(run.id)}
+            className={`rounded-2xl border px-3 py-2 text-left text-xs transition ${run.id === runId ? 'border-sky-300/50 bg-sky-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
+          >
+            <div className="flex items-center gap-2 font-medium text-white">
+              {run.bots.length > 1 ? `${run.bots.length} bots` : run.bots[0]}
+              <Badge tone={run.state === 'completed' ? 'up' : run.state === 'error' ? 'down' : run.state === 'stopped' ? 'warn' : 'info'}>{run.state}</Badge>
+            </div>
+            <div className="mt-1 text-slate-400">{formatDateTime(run.startedAt)}</div>
+          </button>
+        ))}
+      </div>
+
+      {detail?.view ? (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatCard label="Realized PnL" value={money(detail.view.accountSnapshot.realizedPnl)} tone={pnlTone(detail.view.accountSnapshot.realizedPnl)} />
+            <StatCard
+              label="Win rate"
+              value={detail.stats.winRate == null ? '—' : `${detail.stats.winRate.toFixed(1)}%`}
+              sublabel={`${detail.stats.wins}W / ${detail.stats.losses}L`}
+            />
+            <StatCard label="Closed trades" value={detail.stats.totalTrades} />
+            <StatCard label="Bots" value={detail.status.bots.length} sublabel={detail.status.symbols?.length ? `${detail.status.symbols.length} symbols` : ''} />
+          </div>
+
+          {detail.view.items.length === 0 ? (
+            <Panel title="Backtest Journal">
+              <div className="py-8 text-center text-sm text-slate-400">No trades in this run yet.</div>
+            </Panel>
+          ) : (
+            <WalletJournalCalendar
+              key={runId}
+              walletView={detail.view}
+              activeMonth={displayMonth}
+              onMonthChange={setActiveMonth}
+              availableMonths={availableMonths}
+              monthIndex={monthIndex}
+            />
+          )}
+        </>
+      ) : null}
     </div>
   )
 }

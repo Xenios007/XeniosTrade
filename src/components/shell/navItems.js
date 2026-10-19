@@ -4,6 +4,7 @@ import {
   CalendarDays,
   Coins,
   CreditCard,
+  FlaskConical,
   Hammer,
   History,
   KeyRound,
@@ -36,6 +37,7 @@ export const NAV_GROUPS = [
         ],
       },
       { to: '/mock-trading', label: 'Mock Trading', Icon: Bot },
+      { to: '/bot-backtest', label: 'Backtest', Icon: FlaskConical },
       { to: '/real-money-trading', label: 'Real Money Trading', Icon: Wallet },
       {
         to: '/ai-trading',
@@ -64,6 +66,7 @@ export const NAV_GROUPS = [
           { to: '/journal', label: 'Summary' },
           { to: '/journal/head-to-head', label: 'Head to Head' },
           { to: '/journal/wallet', label: 'Wallet Journal' },
+          { to: '/journal/backtest', label: 'Backtest' },
         ],
       },
     ],

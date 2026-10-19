@@ -81,6 +81,12 @@ import {
   deleteAiBacktestRun, getAiBacktestStatus, getAiBacktestTrades, listAiBacktestRuns, saveAiBacktestStatus, saveAiBacktestTrades,
 } from './ai-trading/backtest-store.js'
 import { runMakerEntry, makerLimitPrice } from './ai-trading/maker-entry.js'
+import { simulateExitPolicy } from './backtest/exit-policy.js'
+import { loadBotBacktestSeries } from './strategy/bot-backtest-data.js'
+import { runBotBacktest } from './strategy/bot-backtest-runner.js'
+import {
+  deleteBotBacktestRun, getBotBacktestStatus, getBotBacktestTrades, listBotBacktestRuns, saveBotBacktestStatus, saveBotBacktestTrades,
+} from './strategy/bot-backtest-store.js'
 import {
   applyPartialClose, buildEntryContext, computeTradeMetrics, parsePositionManagerOutput, planPositionAction, positionManagerPrompts, recordReview,
 } from './ai-trading/position-manager.js'
@@ -11000,6 +11006,188 @@ app.delete('/api/ai-trading/backtest/:runId', async (request, response) => {
     return
   }
   await deleteAiBacktestRun(request.params.runId)
+  response.json({ ok: true })
+})
+
+// ---- Bot Trading backtest: walks historical candles through the REAL per-bot signal check
+// (analyzeSymbolStrategy) and the REAL exit simulation (simulateExitPolicy) - the same two pure
+// functions the 8-bot research harness (server/backtest/replay-worker.js) uses, just without
+// that tool's feature-vector/training scaffolding. No LLM calls, so this is seconds-to-minutes,
+// not the AI Trading backtest's hours-to-days. One at a time; tracked in memory, persisted to
+// disk as it goes (bot-backtest-store.js) so the results page survives a server restart mid-run
+// (though an in-progress run itself does not - see the AI Trading backtest's own note on this).
+let botBacktestRunId = null
+const botBacktestStopRequests = new Set()
+
+function computeBotBacktestStats(trades) {
+  const wins = trades.filter((trade) => trade.pnl > 0)
+  const losses = trades.filter((trade) => trade.pnl <= 0)
+  const sum = (list) => list.reduce((total, trade) => total + trade.pnl, 0)
+  const round2 = (value) => Math.round(value * 100) / 100
+  const byBot = {}
+  for (const trade of trades) {
+    const bucket = byBot[trade.signalModelId] || { n: 0, pnl: 0, wins: 0 }
+    bucket.n += 1
+    bucket.pnl = round2(bucket.pnl + trade.pnl)
+    if (trade.pnl > 0) bucket.wins += 1
+    byBot[trade.signalModelId] = bucket
+  }
+  return {
+    totalTrades: trades.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: trades.length ? round2((wins.length / trades.length) * 100) : null,
+    totalPnl: round2(sum(trades)),
+    avgWin: wins.length ? round2(sum(wins) / wins.length) : null,
+    avgLoss: losses.length ? round2(sum(losses) / losses.length) : null,
+    byBot,
+  }
+}
+
+app.get('/api/bot-trading/backtest', async (request, response) => {
+  response.json({ ok: true, runs: await listBotBacktestRuns(), activeRunId: botBacktestRunId, bots: SIGNAL_MODELS.map((model) => ({ id: model.id, name: getSignalModelName(model.id) })) })
+})
+
+app.get('/api/bot-trading/backtest/:runId', async (request, response) => {
+  const status = await getBotBacktestStatus(request.params.runId)
+  if (!status) {
+    response.status(404).json({ error: 'Backtest run not found.' })
+    return
+  }
+  const trades = await getBotBacktestTrades(request.params.runId)
+  response.json({ ok: true, status, trades, stats: computeBotBacktestStats(trades) })
+})
+
+// Same shape as the AI Trading backtest's journal route, reusing the same buildJournalItems /
+// buildJournalSummary live journal uses, grouped by open date.
+app.get('/api/bot-trading/backtest/:runId/journal', async (request, response) => {
+  const status = await getBotBacktestStatus(request.params.runId)
+  if (!status) {
+    response.status(404).json({ error: 'Backtest run not found.' })
+    return
+  }
+  const trades = (await getBotBacktestTrades(request.params.runId)).map((trade) => ({
+    ...trade,
+    transactTime: trade.openedAt,
+    journalDateKey: manilaDateKey(trade.openedAt),
+  }))
+  const items = buildJournalItems(trades)
+  const botLabel = status.bots.length > 1 ? `${status.bots.length} bots` : getSignalModelName(status.bots[0])
+  response.json({
+    ok: true,
+    trades,
+    wallet: {
+      walletId: `bot-backtest:${status.id}`,
+      walletName: 'Backtest',
+      walletColorKey: 'slate',
+      assignedSignalModelName: `Bot Trading · Backtest (${botLabel})`,
+      items,
+      summary: buildJournalSummary(trades, items),
+      startingBalance: 0,
+    },
+    availableMonths: Array.from(new Set(items.map((item) => String(item.date).slice(0, 7)))).sort((left, right) => right.localeCompare(left)),
+  })
+})
+
+app.post('/api/bot-trading/backtest/start', async (request, response) => {
+  try {
+    if (botBacktestRunId) {
+      response.status(409).json({ error: `A backtest (${botBacktestRunId}) is already running. Stop it first.` })
+      return
+    }
+    const body = request.body || {}
+    const validIds = new Set(SIGNAL_MODELS.map((model) => model.id))
+    const requested = Array.isArray(body.bots) ? body.bots.filter((id) => validIds.has(id)) : []
+    const bots = requested.length ? requested : SIGNAL_MODELS.map((model) => model.id)
+    const days = Math.min(Math.max(Math.round(Number(body.days)) || 30, 1), 400)
+
+    const settings = await getSettings(await getAdminUserId())
+    const preferred = (settings.strategy?.preferredSymbols || []).filter(Boolean)
+    const symbols = preferred.length ? preferred : [...DEFAULT_PREFERRED_SYMBOLS]
+
+    const runId = `botbt-${Date.now()}`
+    botBacktestRunId = runId
+    const endMs = Date.now()
+    const startMs = endMs - days * 24 * 60 * 60_000
+    runBotBacktestJob(runId, { bots, symbols, strategy: settings.strategy, startMs, endMs }).catch((error) => {
+      console.error('[bot-backtest] job crashed:', error)
+    })
+    response.json({ ok: true, runId })
+  } catch (error) {
+    response.status(500).json({ error: error instanceof Error ? error.message : 'Could not start the backtest.' })
+  }
+})
+
+async function runBotBacktestJob(runId, { bots, symbols, strategy, startMs, endMs }) {
+  const seriesCache = new Map()
+  await saveBotBacktestStatus(runId, {
+    id: runId, bots, symbols, startMs, endMs, startedAt: Date.now(), finishedAt: null, state: 'loading-data',
+    progress: { symbolsDone: 0, symbolsTotal: symbols.length, currentSymbol: null }, error: null,
+  })
+  try {
+    for (const symbol of symbols) {
+      if (botBacktestStopRequests.has(runId)) break
+      seriesCache.set(symbol, await loadBotBacktestSeries(symbol, startMs, endMs))
+    }
+    const loaded = await getBotBacktestStatus(runId)
+    await saveBotBacktestStatus(runId, { ...loaded, state: 'running' })
+
+    // analyzeSymbolStrategy's return never includes `leverage` (only `margin`) - the effective
+    // per-bot strategy is where the live scan loop actually gets it, so fall back to the same
+    // source here for the trade record's display field (never used in the pnl/notional math,
+    // which is driven by positionNotional).
+    const effLeverage = {}
+    for (const botId of bots) effLeverage[botId] = Number(getEffectiveSignalModelStrategy(strategy, botId, { runningBalance: 1000 })?.leverage) || null
+
+    const trades = []
+    let lastSaved = 0
+    let symbolsDone = 0
+    await runBotBacktest({
+      bots, symbols, seriesFor: (symbol) => seriesCache.get(symbol),
+      analyze: ({ symbol, botId, biasCandles, setupCandles, entryCandles, marketContext }) => {
+        const analysis = analyzeSymbolStrategy(symbol, biasCandles, setupCandles, entryCandles, strategy, botId, marketContext, [])
+        return analysis && !analysis.leverage ? { ...analysis, leverage: effLeverage[botId] } : analysis
+      },
+      simulateExit: (args) => simulateExitPolicy(args),
+      shouldStop: () => botBacktestStopRequests.has(runId),
+      onTrade: async (trade) => {
+        trades.push(trade)
+        await saveBotBacktestTrades(runId, trades)
+      },
+      onProgress: async (progress) => {
+        if (progress.symbolDone) symbolsDone += 1
+        const now = Date.now()
+        if (now - lastSaved < 3_000 && !progress.symbolDone) return
+        lastSaved = now
+        const current = await getBotBacktestStatus(runId)
+        await saveBotBacktestStatus(runId, { ...current, progress: { symbolsDone, symbolsTotal: symbols.length, currentSymbol: progress.symbol, tradesSoFar: trades.length } })
+      },
+    })
+
+    const finished = await getBotBacktestStatus(runId)
+    await saveBotBacktestStatus(runId, { ...finished, state: botBacktestStopRequests.has(runId) ? 'stopped' : 'completed', finishedAt: Date.now() })
+  } catch (error) {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 500)
+    console.error(`[bot-backtest] ${runId} failed:`, message)
+    const current = await getBotBacktestStatus(runId)
+    await saveBotBacktestStatus(runId, { ...(current || { id: runId, bots, symbols }), state: 'error', error: message, finishedAt: Date.now() })
+  } finally {
+    botBacktestStopRequests.delete(runId)
+    if (botBacktestRunId === runId) botBacktestRunId = null
+  }
+}
+
+app.post('/api/bot-trading/backtest/:runId/stop', async (request, response) => {
+  botBacktestStopRequests.add(request.params.runId)
+  response.json({ ok: true })
+})
+
+app.delete('/api/bot-trading/backtest/:runId', async (request, response) => {
+  if (botBacktestRunId === request.params.runId) {
+    response.status(409).json({ error: 'Cannot delete a running backtest; stop it first.' })
+    return
+  }
+  await deleteBotBacktestRun(request.params.runId)
   response.json({ ok: true })
 })
 
