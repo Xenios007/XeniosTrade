@@ -66,7 +66,6 @@ export const NAV_GROUPS = [
           { to: '/journal', label: 'Summary' },
           { to: '/journal/head-to-head', label: 'Head to Head' },
           { to: '/journal/wallet', label: 'Wallet Journal' },
-          { to: '/journal/backtest', label: 'Backtest' },
         ],
       },
     ],

@@ -570,12 +570,16 @@ export function JournalHeadToHeadPage(props) {
 }
 
 /**
- * Full-width trade calendar for one wallet at a time. The wallet dropdown
- * selects which of wallets 1-4 is shown.
+ * Full-width trade calendar, one view at a time: each live wallet plus a Backtest view -
+ * one pill-button row switches between them, same pattern as AI Trading's own Journal page
+ * (src/components/aiTrading/AiJournalPage.jsx). Backtest is its own self-contained block (own
+ * run picker, own month state, fed by GET /api/bot-trading/backtest/:runId/journal) rather than
+ * a live wallet, since a backtest run isn't one of the account's actual wallets.
  */
 export function JournalWalletPage(props) {
   const { walletViews, availableMonths, displayMonth, setActiveMonth, monthIndex } = useJournalViews(props)
   const [selectedWalletId, setSelectedWalletId] = useState('')
+  const [showBacktest, setShowBacktest] = useState(false)
 
   useEffect(() => {
     if (walletViews.length === 0) {
@@ -587,7 +591,7 @@ export function JournalWalletPage(props) {
     }
   }, [walletViews, selectedWalletId])
 
-  if (walletViews.length === 0) {
+  if (walletViews.length === 0 && !showBacktest) {
     return <JournalEmptyState title="Wallet Journal" />
   }
 
@@ -595,33 +599,44 @@ export function JournalWalletPage(props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Viewing wallet</span>
-        <label className="relative">
-          <span className="sr-only">Select wallet</span>
-          <select
-            value={activeView.walletId}
-            onChange={(event) => setSelectedWalletId(event.target.value)}
-            className="appearance-none rounded-full border border-sky-400/40 bg-sky-400/12 py-2 pl-4 pr-10 text-sm font-semibold text-sky-100 outline-none transition focus:border-sky-300/60 focus:ring-2 focus:ring-sky-400/20"
+      <div className="flex flex-wrap items-center gap-2">
+        {walletViews.map((wallet) => (
+          <button
+            key={wallet.walletId}
+            type="button"
+            onClick={() => { setShowBacktest(false); setSelectedWalletId(wallet.walletId) }}
+            className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+              !showBacktest && wallet.walletId === activeView?.walletId
+                ? 'bg-sky-400 text-slate-950'
+                : 'border border-white/10 bg-slate-950/60 text-slate-300 hover:border-white/20'
+            }`}
           >
-            {walletViews.map((wallet) => (
-              <option key={wallet.walletId} value={wallet.walletId} className="bg-slate-900 text-white">
-                {wallet.walletName} — {wallet.assignedSignalModelName}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-sky-200" />
-        </label>
+            {wallet.walletName}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => setShowBacktest(true)}
+          className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+            showBacktest ? 'bg-sky-400 text-slate-950' : 'border border-white/10 bg-slate-950/60 text-slate-300 hover:border-white/20'
+          }`}
+        >
+          Backtest
+        </button>
       </div>
 
-      <WalletJournalCalendar
-        key={activeView.walletId}
-        walletView={activeView}
-        activeMonth={displayMonth}
-        onMonthChange={setActiveMonth}
-        availableMonths={availableMonths}
-        monthIndex={monthIndex}
-      />
+      {showBacktest ? (
+        <BotBacktestJournalView />
+      ) : activeView ? (
+        <WalletJournalCalendar
+          key={activeView.walletId}
+          walletView={activeView}
+          activeMonth={displayMonth}
+          onMonthChange={setActiveMonth}
+          availableMonths={availableMonths}
+          monthIndex={monthIndex}
+        />
+      ) : null}
     </div>
   )
 }
@@ -752,10 +767,10 @@ async function fetchJson(url) {
   return payload
 }
 
-/** Same layout as JournalWalletPage, fed by a Bot Trading backtest run's journal instead of
- * live trades (GET /api/bot-trading/backtest/:runId/journal). Self-contained: its own run
- * picker, its own month state - mirrors AiJournalPage's BacktestJournalView. */
-export function JournalBacktestPage() {
+/** Same calendar as a live wallet, fed by a Bot Trading backtest run's journal instead
+ * (GET /api/bot-trading/backtest/:runId/journal). Self-contained: its own run picker, its own
+ * month state - mirrors AI Trading Journal's own BacktestJournalView. */
+function BotBacktestJournalView() {
   const [runs, setRuns] = useState([])
   const [runId, setRunId] = useState('')
   const [detail, setDetail] = useState(null)

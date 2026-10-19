@@ -35,7 +35,7 @@ import { BotStatusGrid } from './components/BotStatusGrid'
 import { ProExitStrategy } from './components/ProExitStrategy'
 import { ForecastPanel } from './components/ForecastPanel'
 import { RealMoneyTradingPage, getRealMoneyTrades } from './components/RealMoneyTradingPage'
-import { JournalBacktestPage, JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
+import { JournalHeadToHeadPage, JournalOverviewPage, JournalWalletPage } from './components/JournalSummaryPage'
 import { LearningBotPage } from './components/LearningBotPage'
 import { ConsolidatedBotPage } from './components/ConsolidatedBotPage'
 import { MockTradingPage } from './components/MockTradingPage'
@@ -181,7 +181,6 @@ const JOURNAL_TABS = [
   { to: '/journal', label: 'Summary', end: true },
   { to: '/journal/head-to-head', label: 'Head to Head' },
   { to: '/journal/wallet', label: 'Wallet Journal' },
-  { to: '/journal/backtest', label: 'Backtest' },
 ]
 const TRADE_HISTORY_TABS = [
   { to: '/trade-history', label: 'Testnet Trades', end: true },
@@ -1873,7 +1872,6 @@ export default function App() {
           <Route index element={<JournalOverviewPage {...journalProps} />} />
           <Route path="head-to-head" element={<AdminOnlyGate isAdmin={isAdmin} label="Head to Head"><JournalHeadToHeadPage {...journalProps} /></AdminOnlyGate>} />
           <Route path="wallet" element={<JournalWalletPage {...journalProps} />} />
-          <Route path="backtest" element={<JournalBacktestPage />} />
           <Route path="*" element={<Navigate to="/journal" replace />} />
         </Routes>
       </div>
