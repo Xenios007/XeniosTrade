@@ -1871,7 +1871,7 @@ export default function App() {
         <Routes>
           <Route index element={<JournalOverviewPage {...journalProps} />} />
           <Route path="head-to-head" element={<AdminOnlyGate isAdmin={isAdmin} label="Head to Head"><JournalHeadToHeadPage {...journalProps} /></AdminOnlyGate>} />
-          <Route path="wallet" element={<JournalWalletPage {...journalProps} />} />
+          <Route path="wallet" element={<JournalWalletPage {...journalProps} isAdmin={isAdmin} />} />
           <Route path="*" element={<Navigate to="/journal" replace />} />
         </Routes>
       </div>

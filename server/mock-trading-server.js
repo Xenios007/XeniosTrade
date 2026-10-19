@@ -12098,6 +12098,72 @@ app.get('/api/learning-bot/backtests/:id/report', async (request, response) => {
   }
 })
 
+// Same journal shape every other backtest/wallet view uses (buildJournalItems/buildJournalSummary),
+// fed by streaming an EXISTING recorded research run's merged NDJSON dataset instead of a live
+// simulation - this is the real 8-bot / multi-year history behind AI Training -> Backtests, now
+// viewable the same way as a wallet's own calendar. `?bots=model-3,model-5` narrows a run that
+// tested several bots down to just the ones asked for; omitted, every bot in the run counts.
+app.get('/api/learning-bot/backtests/:id/journal', async (request, response) => {
+  try {
+    const id = String(request.params.id || '').trim()
+    const registry = await getBacktestRunRegistry()
+    const run = registry.find((item) => item && item.id === id)
+    if (!run) {
+      response.status(404).json({ error: `No backtest run with id "${id}".` })
+      return
+    }
+    if (!run.dataFile) {
+      response.status(404).json({ error: 'This run has no dataset file recorded yet.' })
+      return
+    }
+    const requestedBots = String(request.query.bots || '').split(',').map((item) => item.trim()).filter(Boolean)
+    const botFilter = requestedBots.length ? new Set(requestedBots) : null
+
+    const abs = path.resolve(dataDir, String(run.dataFile))
+    const { iterateRowsNdjson } = await import('./backtest/ndjson.js')
+    const trades = []
+    // Streamed row-by-row and immediately reduced to the handful of fields a calendar needs -
+    // these datasets carry a ~263-value feature vector per row that would otherwise dominate
+    // memory for no reason here (a 5yr/20-symbol/8-bot run is ~600 MB of that).
+    for await (const row of iterateRowsNdjson(abs)) {
+      if (botFilter && !botFilter.has(row.signalModelId)) continue
+      const openedAt = Number(row.timestamp ?? row.transactTime ?? 0)
+      if (!openedAt) continue
+      trades.push({
+        symbol: row.symbol,
+        signalModelId: row.signalModelId,
+        side: row.side,
+        pnl: Number(row.pnl ?? row.label?.pnl ?? 0),
+        openedAt,
+        closedAt: Number(row.closedAt ?? openedAt),
+        result: row.result || (row.label?.win ? 'TP' : 'SL'),
+        transactTime: openedAt,
+        journalDateKey: manilaDateKey(openedAt),
+      })
+    }
+    const items = buildJournalItems(trades)
+    const label = run.label || run.id
+    const botCount = botFilter ? botFilter.size : (run.config?.bots || []).length || 8
+    response.json({
+      ok: true,
+      trades,
+      run: { id: run.id, label, config: run.config },
+      wallet: {
+        walletId: `research-backtest:${run.id}${botFilter ? `:${[...botFilter].sort().join(',')}` : ''}`,
+        walletName: 'Research Backtest',
+        walletColorKey: 'slate',
+        assignedSignalModelName: `${label} · ${botCount} bot${botCount === 1 ? '' : 's'}`,
+        items,
+        summary: buildJournalSummary(trades, items),
+        startingBalance: 0,
+      },
+      availableMonths: Array.from(new Set(items.map((item) => String(item.date).slice(0, 7)))).sort((left, right) => right.localeCompare(left)),
+    })
+  } catch (error) {
+    response.status(500).json({ error: error instanceof Error ? error.message : "Unable to build this run's journal." })
+  }
+})
+
 app.get('/api/learning-bot/signal-insights', async (_request, response) => {
   try {
     const artifact = await readJson(learningBotTrainArtifactFilePath, null)

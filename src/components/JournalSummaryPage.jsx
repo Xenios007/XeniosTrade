@@ -576,7 +576,7 @@ export function JournalHeadToHeadPage(props) {
  * run picker, own month state, fed by GET /api/bot-trading/backtest/:runId/journal) rather than
  * a live wallet, since a backtest run isn't one of the account's actual wallets.
  */
-export function JournalWalletPage(props) {
+export function JournalWalletPage({ isAdmin = false, ...props }) {
   const { walletViews, availableMonths, displayMonth, setActiveMonth, monthIndex } = useJournalViews(props)
   const [selectedWalletId, setSelectedWalletId] = useState('')
   const [showBacktest, setShowBacktest] = useState(false)
@@ -626,7 +626,7 @@ export function JournalWalletPage(props) {
       </div>
 
       {showBacktest ? (
-        <BotBacktestJournalView />
+        <BotBacktestJournalView isAdmin={isAdmin} />
       ) : activeView ? (
         <WalletJournalCalendar
           key={activeView.walletId}
@@ -767,12 +767,21 @@ async function fetchJson(url) {
   return payload
 }
 
-/** Same calendar as a live wallet, fed by a Bot Trading backtest run's journal instead
- * (GET /api/bot-trading/backtest/:runId/journal). Self-contained: its own run picker, its own
- * month state - mirrors AI Trading Journal's own BacktestJournalView. */
-function BotBacktestJournalView() {
-  const [runs, setRuns] = useState([])
-  const [runId, setRunId] = useState('')
+const botLabel = (id) => (String(id).startsWith('model-') ? `Bot ${String(id).slice(6)}` : id)
+
+/**
+ * Two sources, one calendar: your own quick self-service runs (GET /api/bot-trading/backtest*,
+ * anyone) and - admin only - the existing multi-year research history already recorded under
+ * AI Training -> Backtests (GET /api/learning-bot/backtests*, launched via `npm run
+ * backtest:dataset`). That second source is the real, already-there data: years of real 8-bot
+ * history, not something this page generates. Self-contained: its own run picker, its own month
+ * state - mirrors AI Trading Journal's own BacktestJournalView.
+ */
+function BotBacktestJournalView({ isAdmin = false }) {
+  const [selfRuns, setSelfRuns] = useState([])
+  const [researchRuns, setResearchRuns] = useState([])
+  const [runKey, setRunKey] = useState('') // `self:<id>` or `research:<id>`
+  const [botFilter, setBotFilter] = useState([])
   const [detail, setDetail] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -780,34 +789,57 @@ function BotBacktestJournalView() {
 
   useEffect(() => {
     let cancelled = false
-    fetchJson('/api/bot-trading/backtest')
-      .then((payload) => {
+    Promise.all([
+      fetchJson('/api/bot-trading/backtest').catch(() => ({ runs: [] })),
+      isAdmin ? fetchJson('/api/learning-bot/backtests').catch(() => ({ runs: [] })) : Promise.resolve({ runs: [] }),
+    ])
+      .then(([selfPayload, researchPayload]) => {
         if (cancelled) return
-        const list = payload.runs || []
-        setRuns(list)
-        if (list.length) setRunId((current) => (list.some((run) => run.id === current) ? current : list[0].id))
+        const self = selfPayload.runs || []
+        const research = (researchPayload.runs || []).filter((run) => run.status === 'complete' && run.dataFile)
+        setSelfRuns(self)
+        setResearchRuns(research)
+        setRunKey((current) => current || (self.length ? `self:${self[0].id}` : research.length ? `research:${research[0].id}` : ''))
       })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load backtests.') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [isAdmin])
 
-  const load = useCallback((id) => {
-    if (!id) { setDetail(null); return }
-    Promise.all([fetchJson(`/api/bot-trading/backtest/${id}/journal`), fetchJson(`/api/bot-trading/backtest/${id}`)])
-      .then(([journalPayload, runPayload]) => {
-        const accountSnapshot = summarizeAccount({ trades: journalPayload.trades, livePrices: {}, startingBalance: journalPayload.wallet.startingBalance })
-        setDetail({
-          view: { ...journalPayload.wallet, accountSnapshot },
-          availableMonths: journalPayload.availableMonths,
-          status: runPayload.status,
-          stats: runPayload.stats,
+  const [source, runId] = runKey.includes(':') ? runKey.split(':') : ['', '']
+  const activeResearchRun = source === 'research' ? researchRuns.find((run) => run.id === runId) : null
+
+  useEffect(() => { setBotFilter([]) }, [runKey])
+
+  useEffect(() => {
+    if (!runId) { setDetail(null); return }
+    let cancelled = false
+    if (source === 'research') {
+      const query = botFilter.length ? `?bots=${botFilter.join(',')}` : ''
+      fetchJson(`/api/learning-bot/backtests/${runId}/journal${query}`)
+        .then((journalPayload) => {
+          if (cancelled) return
+          const accountSnapshot = summarizeAccount({ trades: journalPayload.trades, livePrices: {}, startingBalance: journalPayload.wallet.startingBalance })
+          const closed = journalPayload.trades.length
+          const wins = journalPayload.trades.filter((trade) => trade.pnl > 0).length
+          setDetail({
+            view: { ...journalPayload.wallet, accountSnapshot },
+            availableMonths: journalPayload.availableMonths,
+            stats: { totalTrades: closed, wins, losses: closed - wins, winRate: closed ? (wins / closed) * 100 : null },
+          })
         })
+        .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load that backtest.') })
+      return () => { cancelled = true }
+    }
+    Promise.all([fetchJson(`/api/bot-trading/backtest/${runId}/journal`), fetchJson(`/api/bot-trading/backtest/${runId}`)])
+      .then(([journalPayload, runPayload]) => {
+        if (cancelled) return
+        const accountSnapshot = summarizeAccount({ trades: journalPayload.trades, livePrices: {}, startingBalance: journalPayload.wallet.startingBalance })
+        setDetail({ view: { ...journalPayload.wallet, accountSnapshot }, availableMonths: journalPayload.availableMonths, stats: runPayload.stats })
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Could not load that backtest.'))
-  }, [])
-
-  useEffect(() => { load(runId) }, [runId, load])
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load that backtest.') })
+    return () => { cancelled = true }
+  }, [source, runId, botFilter])
 
   const availableMonths = detail?.availableMonths || []
   useEffect(() => {
@@ -818,27 +850,66 @@ function BotBacktestJournalView() {
   const monthIndex = availableMonths.indexOf(displayMonth)
 
   if (loading) return <Panel title="Backtest"><div className="py-8 text-center text-sm text-slate-400">Loading…</div></Panel>
-  if (!runs.length) return <Panel title="Backtest"><div className="py-8 text-center text-sm text-slate-400">No backtest runs yet — start one from Mock Trading → Backtest.</div></Panel>
+  if (!selfRuns.length && !researchRuns.length) {
+    return <Panel title="Backtest"><div className="py-8 text-center text-sm text-slate-400">No backtest runs yet — start one from Mock Trading → Backtest.</div></Panel>
+  }
 
   return (
     <div className="grid gap-6">
       {error ? <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">{error}</div> : null}
       <div className="flex flex-wrap gap-2">
-        {runs.map((run) => (
+        {selfRuns.map((run) => (
           <button
-            key={run.id}
+            key={`self:${run.id}`}
             type="button"
-            onClick={() => setRunId(run.id)}
-            className={`rounded-2xl border px-3 py-2 text-left text-xs transition ${run.id === runId ? 'border-sky-300/50 bg-sky-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
+            onClick={() => setRunKey(`self:${run.id}`)}
+            className={`rounded-2xl border px-3 py-2 text-left text-xs transition ${runKey === `self:${run.id}` ? 'border-sky-300/50 bg-sky-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
           >
             <div className="flex items-center gap-2 font-medium text-white">
-              {run.bots.length > 1 ? `${run.bots.length} bots` : run.bots[0]}
+              {run.bots.length > 1 ? `${run.bots.length} bots` : botLabel(run.bots[0])}
               <Badge tone={run.state === 'completed' ? 'up' : run.state === 'error' ? 'down' : run.state === 'stopped' ? 'warn' : 'info'}>{run.state}</Badge>
             </div>
             <div className="mt-1 text-slate-400">{formatDateTime(run.startedAt)}</div>
           </button>
         ))}
+        {researchRuns.map((run) => (
+          <button
+            key={`research:${run.id}`}
+            type="button"
+            onClick={() => setRunKey(`research:${run.id}`)}
+            className={`rounded-2xl border px-3 py-2 text-left text-xs transition ${runKey === `research:${run.id}` ? 'border-violet-300/50 bg-violet-400/10' : 'border-white/10 bg-slate-950/50 hover:border-white/25'}`}
+          >
+            <div className="flex items-center gap-2 font-medium text-white">
+              {run.label || run.id}
+              <Badge tone="info">research</Badge>
+            </div>
+            <div className="mt-1 text-slate-400">{run.config?.rangeStart} → {run.config?.rangeEnd} · {(run.config?.bots || []).length} bots</div>
+          </button>
+        ))}
       </div>
+
+      {activeResearchRun ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Bots in this run</span>
+          {(activeResearchRun.config?.bots || []).map((botId) => {
+            const active = botFilter.length === 0 || botFilter.includes(botId)
+            return (
+              <button
+                key={botId}
+                type="button"
+                onClick={() => setBotFilter((current) => {
+                  const all = activeResearchRun.config?.bots || []
+                  const selected = current.length ? current : all
+                  return selected.includes(botId) ? selected.filter((item) => item !== botId) : [...selected, botId]
+                })}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${active ? 'border-violet-300/50 bg-violet-400/15 text-violet-100' : 'border-white/10 bg-slate-950/50 text-slate-500'}`}
+              >
+                {botLabel(botId)}
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
 
       {detail?.view ? (
         <>
@@ -850,7 +921,7 @@ function BotBacktestJournalView() {
               sublabel={`${detail.stats.wins}W / ${detail.stats.losses}L`}
             />
             <StatCard label="Closed trades" value={detail.stats.totalTrades} />
-            <StatCard label="Bots" value={detail.status.bots.length} sublabel={detail.status.symbols?.length ? `${detail.status.symbols.length} symbols` : ''} />
+            <StatCard label="Source" value={source === 'research' ? 'Research' : 'Self-service'} />
           </div>
 
           {detail.view.items.length === 0 ? (
@@ -859,7 +930,7 @@ function BotBacktestJournalView() {
             </Panel>
           ) : (
             <WalletJournalCalendar
-              key={runId}
+              key={`${runKey}:${botFilter.join(',')}`}
               walletView={detail.view}
               activeMonth={displayMonth}
               onMonthChange={setActiveMonth}
