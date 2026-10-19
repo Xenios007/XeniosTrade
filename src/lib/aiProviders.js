@@ -62,11 +62,15 @@ export const AI_PROVIDERS = [
   }),
   // AI Trading agents only: runs through the Codex SDK on the server with the machine's own `codex login`, so there is no key
   // or base URL to save and it never shows on Providers & Keys / Browse Models (`agentOnly`). `localLogin` marks the no-key path.
+  // `suggested[0]` is also the model Agent Assignments fills in when Codex is picked: leaving it blank let the SDK fall
+  // back to its own default, which a ChatGPT-account login does not always support (it has 400'd on two different
+  // defaults so far) - naming a model this account's own cache confirms is valid sidesteps that.
   P('codex', 'Codex (this server\'s login)', {
     keyless: true,
     agentOnly: true,
     localLogin: true,
     keyHint: 'machine login',
+    suggested: ['gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-reserve'],
   }),
   // Same idea as Codex: the Claude Agent SDK on the server with the machine's own `claude login`. Not the pay-per-token
   // Anthropic API provider above, which needs a saved key.

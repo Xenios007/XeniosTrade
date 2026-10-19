@@ -437,7 +437,7 @@ function AgentAssignments({ settings }) {
                     <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-500">Provider</span>
                     <select
                       value={assignment.providerId}
-                      onChange={(event) => update(agent.id, { providerId: event.target.value, model: '' })}
+                      onChange={(event) => update(agent.id, { providerId: event.target.value, model: getAiProvider(event.target.value)?.suggested?.[0] || '' })}
                       className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none"
                     >
                       <option value="">Unassigned (agent will not run)</option>
